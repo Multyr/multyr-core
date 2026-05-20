@@ -1,0 +1,35 @@
+name: forge-test
+
+on:
+  push:
+    branches: [main, "feature/**", "fix/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+
+      - name: forge --version
+        run: forge --version
+
+      - name: forge build
+        run: forge build --sizes
+
+      - name: forge test
+        run: forge test --no-match-path "test/fork*" -vv
+
+      - name: forge coverage (informational)
+        run: forge coverage --no-match-path "test/fork*" --report summary || true
+        continue-on-error: true
