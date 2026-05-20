@@ -1,0 +1,27 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+test = "test"
+script = "script"
+solc_version = "0.8.28"
+optimizer = true
+optimizer_runs = 200
+via_ir = true
+evm_version = "shanghai"
+fs_permissions = [
+  { access = "read", path = "./" }
+]
+allow_paths = ["../src"]
+
+[fmt]
+line_length = 100
+tab_width = 4
+quote_style = "double"
+
+[fuzz]
+runs = 256
+
+[invariant]
+runs = 256
+depth = 50

@@ -1,0 +1,92 @@
+{
+    "exitcode": 0,
+    "test_results": {
+        "test/HalmosFixedMaturityGuards.t.sol:HalmosFixedMaturityGuards": [
+            {
+                "name": "check_deposits_gate_matches_state_machine(uint8,uint8)",
+                "exitcode": 0,
+                "num_models": 0,
+                "models": [],
+                "num_paths": [
+                    5,
+                    3,
+                    0
+                ],
+                "time": [
+                    0.06343219999689609,
+                    0.06337180000264198,
+                    5.6600081734359264e-05
+                ],
+                "num_bounded_loops": 0
+            },
+            {
+                "name": "check_force_exit_gate_matches_state_machine(uint8,uint8)",
+                "exitcode": 0,
+                "num_models": 0,
+                "models": [],
+                "num_paths": [
+                    5,
+                    3,
+                    0
+                ],
+                "time": [
+                    0.046361800050362945,
+                    0.04633399995509535,
+                    2.480007242411375e-05
+                ],
+                "num_bounded_loops": 0
+            },
+            {
+                "name": "check_settlement_gate_matches_state_machine(uint8,uint8)",
+                "exitcode": 0,
+                "num_models": 0,
+                "models": [],
+                "num_paths": [
+                    5,
+                    3,
+                    0
+                ],
+                "time": [
+                    0.05080009996891022,
+                    0.05077039997559041,
+                    2.629996743053198e-05
+                ],
+                "num_bounded_loops": 0
+            },
+            {
+                "name": "check_shouldFundingFail_matches_spec(uint8,uint8,uint64,uint256,uint256,uint256)",
+                "exitcode": 0,
+                "num_models": 0,
+                "models": [],
+                "num_paths": [
+                    7,
+                    4,
+                    0
+                ],
+                "time": [
+                    0.08078369998838753,
+                    0.08075379999354482,
+                    2.589996438473463e-05
+                ],
+                "num_bounded_loops": 0
+            },
+            {
+                "name": "check_standard_exit_gate_matches_state_machine(uint8,uint8,bool,bool)",
+                "exitcode": 0,
+                "num_models": 0,
+                "models": [],
+                "num_paths": [
+                    9,
+                    5,
+                    0
+                ],
+                "time": [
+                    0.7398929999908432,
+                    0.7398724000668153,
+                    1.7900019884109497e-05
+                ],
+                "num_bounded_loops": 0
+            }
+        ]
+    }
+}

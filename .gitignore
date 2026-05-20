@@ -1,0 +1,28 @@
+# Foundry
+cache/
+out/
+broadcast/*/
+!broadcast/
+!broadcast/**/dry-run/
+
+# Environment
+.env
+.env.*
+!.env.example
+!.env.template
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Node (if any tooling)
+node_modules/
+
+# Forge coverage
+lcov.info
