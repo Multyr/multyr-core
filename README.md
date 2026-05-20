@@ -14,7 +14,7 @@ Non-custodial ERC-4626 vault primitive for the Multyr Protocol on Arbitrum.
 Multyr is a non-custodial DeFi yield protocol deployed on Arbitrum. Users deposit USDC into a
 single vault entry point (`CoreVault`) and receive ERC-4626 shares whose price-per-share rises as
 allocated capital earns yield across lending protocols (Aave V3, Compound III, Morpho Blue, Euler
-V2, Fluid, Dolomite).
+V2, Fluid, Dolomite and more).
 
 This repository (`multyr-core`) contains the on-chain foundation of the protocol: the vault
 contract, its modular execution layer, storage libraries, governance primitives, automation
