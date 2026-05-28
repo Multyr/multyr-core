@@ -314,16 +314,12 @@ contract DeployCoreSystem is Script {
 
         // 3.1b CRITICAL: Register vault in factory IMMEDIATELY (subgraph event ordering)
         {
-            DeployTypes.DeployConfig memory regCfg = DeployTypes.DeployConfig({
+            DeployTypes.VaultRegistrationConfig memory regCfg = DeployTypes.VaultRegistrationConfig({
                 asset: IERC20Metadata(USDC),
                 name: "Multyr Earn USDC",
                 symbol: "meUSDC",
                 owner: cfg.governor,
-                feeCollector: address(result.feeCollector),
-                paramsProvider: address(result.globalConfig),
-                ecosystem: IAdminModule.EcosystemConfig(address(0), address(0), address(0), address(0), address(0), address(0)),
-                freezeRouting: false,
-                selectorRegistry: address(result.selectorRegistry)
+                feeCollector: address(result.feeCollector)
             });
             result.vaultFactory.registerVault(address(result.vault), abi.encode(regCfg));
             require(result.vaultFactory.isDeployedVault(address(result.vault)), "GATE: vault not in factory");

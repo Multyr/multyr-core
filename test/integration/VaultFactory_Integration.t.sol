@@ -136,9 +136,16 @@ contract VaultFactory_Integration is Test {
         internal
         returns (DeployTypes.DeployResult memory result)
     {
-        bytes memory initData = abi.encode(config);
         result =
             CoreDeployHelper.deploy(config, sharedQueue, sharedAdmin, sharedERC4626, sharedLiquidityOps);
+        DeployTypes.VaultRegistrationConfig memory regCfg = DeployTypes.VaultRegistrationConfig({
+            asset: config.asset,
+            name: config.name,
+            symbol: config.symbol,
+            owner: config.owner,
+            feeCollector: config.feeCollector
+        });
+        bytes memory initData = abi.encode(regCfg);
         factory.registerVault(address(result.vault), initData);
     }
 

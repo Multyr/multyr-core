@@ -4,7 +4,6 @@ pragma solidity ^0.8.28;
 import { Test } from "forge-std/Test.sol";
 import { VaultFactory } from "../../../src/factory/VaultFactory.sol";
 import { DeployTypes } from "../../../src/libs/DeployTypes.sol";
-import { IAdminModule } from "../../../src/interfaces/IAdminModule.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 contract MockVault {
@@ -72,7 +71,7 @@ contract VaultFactory_Unit_Test is Test {
 
     function test_registerVault_onlyOwner() public {
         MockVault vault = new MockVault(address(mockAsset));
-        DeployTypes.DeployConfig memory cfg = _makeConfig();
+        DeployTypes.VaultRegistrationConfig memory cfg = _makeConfig();
 
         vm.prank(user);
         vm.expectRevert(VaultFactory.NotOwner.selector);
@@ -80,7 +79,7 @@ contract VaultFactory_Unit_Test is Test {
     }
 
     function test_registerVault_rejectsZeroAddress() public {
-        DeployTypes.DeployConfig memory cfg = _makeConfig();
+        DeployTypes.VaultRegistrationConfig memory cfg = _makeConfig();
 
         vm.expectRevert(VaultFactory.ZeroAddress.selector);
         factory.registerVault(address(0), abi.encode(cfg));
@@ -89,7 +88,7 @@ contract VaultFactory_Unit_Test is Test {
     function test_registerVault_rejectsAssetMismatch() public {
         MockAsset wrongAsset = new MockAsset();
         MockVault vault = new MockVault(address(wrongAsset));
-        DeployTypes.DeployConfig memory cfg = _makeConfig();
+        DeployTypes.VaultRegistrationConfig memory cfg = _makeConfig();
 
         vm.expectRevert(VaultFactory.AssetMismatch.selector);
         factory.registerVault(address(vault), abi.encode(cfg));
@@ -97,7 +96,7 @@ contract VaultFactory_Unit_Test is Test {
 
     function test_registerVault_success() public {
         MockVault vault = new MockVault(address(mockAsset));
-        DeployTypes.DeployConfig memory cfg = _makeConfig();
+        DeployTypes.VaultRegistrationConfig memory cfg = _makeConfig();
 
         vm.expectEmit(true, true, true, true);
         emit VaultDeployed(
@@ -108,14 +107,25 @@ contract VaultFactory_Unit_Test is Test {
 
         assertEq(factory.deployedVaultsCount(), 1, "count should be 1");
         assertEq(factory.deployedVaults(0), address(vault), "vault should be at index 0");
+        assertEq(factory.vaultIndexPlusOne(address(vault)), 1, "index should be tracked");
         assertTrue(factory.isDeployedVault(address(vault)), "should be registered");
+    }
+
+    function test_registerVault_rejectsDuplicate() public {
+        MockVault vault = new MockVault(address(mockAsset));
+        DeployTypes.VaultRegistrationConfig memory cfg = _makeConfig();
+
+        factory.registerVault(address(vault), abi.encode(cfg));
+
+        vm.expectRevert(VaultFactory.VaultAlreadyRegistered.selector);
+        factory.registerVault(address(vault), abi.encode(cfg));
     }
 
     function test_registerVault_multipleVaults() public {
         MockVault vault1 = new MockVault(address(mockAsset));
         MockVault vault2 = new MockVault(address(mockAsset));
         MockVault vault3 = new MockVault(address(mockAsset));
-        DeployTypes.DeployConfig memory cfg = _makeConfig();
+        DeployTypes.VaultRegistrationConfig memory cfg = _makeConfig();
 
         factory.registerVault(address(vault1), abi.encode(cfg));
         factory.registerVault(address(vault2), abi.encode(cfg));
@@ -128,6 +138,9 @@ contract VaultFactory_Unit_Test is Test {
         assertEq(vaults[0], address(vault1));
         assertEq(vaults[1], address(vault2));
         assertEq(vaults[2], address(vault3));
+        assertEq(factory.vaultIndexPlusOne(address(vault1)), 1);
+        assertEq(factory.vaultIndexPlusOne(address(vault2)), 2);
+        assertEq(factory.vaultIndexPlusOne(address(vault3)), 3);
     }
 
     // ============ View Function Tests ============
@@ -204,6 +217,7 @@ contract VaultFactory_Unit_Test is Test {
         factory.removeVault(address(vault));
 
         assertFalse(factory.isDeployedVault(address(vault)));
+        assertEq(factory.vaultIndexPlusOne(address(vault)), 0);
         assertEq(factory.deployedVaultsCount(), 0);
     }
 
@@ -221,6 +235,11 @@ contract VaultFactory_Unit_Test is Test {
         assertFalse(factory.isDeployedVault(address(v1)));
         assertTrue(factory.isDeployedVault(address(v2)));
         assertTrue(factory.isDeployedVault(address(v3)));
+        assertEq(factory.deployedVaults(0), address(v3));
+        assertEq(factory.deployedVaults(1), address(v2));
+        assertEq(factory.vaultIndexPlusOne(address(v1)), 0);
+        assertEq(factory.vaultIndexPlusOne(address(v2)), 2);
+        assertEq(factory.vaultIndexPlusOne(address(v3)), 1);
     }
 
     function test_removeVault_reverts_nonOwner() public {
@@ -263,26 +282,13 @@ contract VaultFactory_Unit_Test is Test {
 
     // ============ Helpers ============
 
-    function _makeConfig() internal view returns (DeployTypes.DeployConfig memory) {
-        IAdminModule.EcosystemConfig memory eco = IAdminModule.EcosystemConfig({
-            bufferManager: address(0xBBBB),
-            strategyRouter: address(0xCCCC),
-            healthRegistry: address(0),
-            incentives: address(0),
-            guardian: address(0xDDDD),
-            vetoer: address(0)
-        });
-
-        return DeployTypes.DeployConfig({
+    function _makeConfig() internal view returns (DeployTypes.VaultRegistrationConfig memory) {
+        return DeployTypes.VaultRegistrationConfig({
             asset: IERC20Metadata(address(mockAsset)),
             name: "Test Vault",
             symbol: "tVLT",
             owner: address(0xABCD),
-            feeCollector: address(0xFFFF),
-            paramsProvider: address(0xEEEE),
-            ecosystem: eco,
-            freezeRouting: false,
-            selectorRegistry: address(0)
+            feeCollector: address(0xFFFF)
         });
     }
 }
