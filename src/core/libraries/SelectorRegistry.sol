@@ -384,6 +384,9 @@ contract SelectorRegistry {
      * @notice Get count of all registered selectors
      * @return count Total number of registered selectors
      */
+    // TODO: this could be a useless function, and it's already lagging as we have 7 LiquidityOps slectors but only 6 are here.
+    // @dev If we keep this, we need to maintain it manually as selectors are added/removed -
+    // consider if it's worth the maintenance burden.
     function totalRegisteredSelectors() external pure returns (uint256) {
         // 34 owner + 15 admin view + 6 queue write + 5 queue view + 11 ERC4626 + 6 LiquidityOps + 14 FM = 91
         return 91;

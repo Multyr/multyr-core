@@ -49,6 +49,8 @@ library CoreStorage {
         address pendingOwner;
 
         // Packed flags + timestamps
+        // TODO: check if packedFlags could be uint64 that would fit all flags and save some gas,
+        // @dev but uint256 is more future-proof for adding flags without worrying about overflow
         uint256 packedFlags;
         uint64 epochStart;
         uint64 lastGuardianPause;
