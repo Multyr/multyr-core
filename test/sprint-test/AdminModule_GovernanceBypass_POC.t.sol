@@ -8,68 +8,34 @@ pragma solidity ^0.8.24;
 // FINDING-03 (MEDIUM): submitPerfParams / submitMinDelay / submitBufferManager /
 //                       submitRouter silently overwrite pending submissions
 //
-// ============================================================================
+// ==============================================================================
 // FINDING-02 -- setEcosystem bypasses FLAG_COMPONENTS_TIMELOCKED
-// ============================================================================
+// ==============================================================================
 //
 // enableComponentsTimelock() sets FLAG_COMPONENTS_TIMELOCKED so that direct
-// calls to setBufferManager and setRouter revert:
+// calls to setBufferManager and setRouter revert with ComponentsTimelocked.
 //
-//   function setBufferManager(address newBuffer) external {
-//       if (core.packedFlags & CoreStorage.FLAG_COMPONENTS_TIMELOCKED != 0)
-//           revert ComponentsTimelocked();    <-- blocked
-//   }
+// BUG: setEcosystem(), which sets BOTH bufferManager AND strategyRouter atomically,
+// only checked _requireNotSealed() -- it never inspected FLAG_COMPONENTS_TIMELOCKED.
+// After enableComponentsTimelock() the owner could silently swap both critical
+// infrastructure contracts to malicious ones in a single call with ZERO delay.
 //
-// setEcosystem(), which sets BOTH bufferManager AND strategyRouter atomically,
-// only checks _requireNotSealed() -- it never inspects FLAG_COMPONENTS_TIMELOCKED:
+// FIX: Added FLAG_COMPONENTS_TIMELOCKED guard to setEcosystem so it reverts
+//      with ComponentsTimelocked once the component timelock is enabled.
 //
-//   function setEcosystem(EcosystemConfig calldata config) external {
-//       _requireNotSealed();                  <-- only seal check
-//       core.bufferManager = IBufferManager(config.bufferManager);  <-- set immediately
-//       core.router        = IStrategyRouter(config.strategyRouter); <-- set immediately
-//   }
-//
-// IMPACT: After enableComponentsTimelock() the owner can silently swap both
-// critical infrastructure contracts to malicious ones in a single call with
-// ZERO timelock delay, bypassing the entire protection the flag was designed
-// to provide.
-//
-// FIX: Add the same FLAG_COMPONENTS_TIMELOCKED guard to setEcosystem, or
-//      gate setEcosystem so it reverts once the component timelock is enabled.
-//
-// ============================================================================
+// ==============================================================================
 // FINDING-03 -- submitPerfParams / submitMinDelay silently overwrite pending
-// ============================================================================
+// ==============================================================================
 //
 // submitFeeParams has a guard:
-//
 //   if (FeeStorage.layout().pendingFee.exists) revert PendingParamsNotResolved();
 //
-// submitPerfParams and submitMinDelay have NO equivalent guard:
+// BUG: submitPerfParams, submitMinDelay, submitBufferManager, and submitRouter
+// had NO equivalent guard -- a pending slot could be silently overwritten with
+// a different value in the same block, deceiving the vetoer.
 //
-//   function submitPerfParams(uint256 rateX, uint64 minInterval) external {
-//       // no pendingPerf.exists check
-//       f.pendingPerf.rateX      = rateX;   // silent overwrite
-//       f.pendingPerf.minInterval = minInterval;
-//       f.pendingPerf.eta         = eta;
-//       f.pendingPerf.exists      = true;
-//   }
-//
-// ATTACK PATTERN:
-//   1. Owner submits perf rate = 10 % (acceptable; vetoer stands down).
-//   2. Owner immediately calls submitPerfParams(50 %, ...) in the same block.
-//      The pending slot is silently overwritten with no new ETA event that
-//      distinguishes it from a fresh submission.
-//   3. Vetoer monitored step 1 and decided not to revoke. She has no signal
-//      that the value changed. After the ETA the 50 % rate takes effect.
-//
-// The same silent-overwrite applies to:
-//   - submitMinDelay    (can be used to ratchet delay to extreme values)
-//   - submitBufferManager
-//   - submitRouter
-//
-// FIX: Add if (f.pendingPerf.exists) revert PendingParamsNotResolved(); and
-//      equivalent guards to all four submit functions.
+// FIX: Added if (f.pendingXxx.exists) revert PendingParamsNotResolved(); to all
+//      four submit functions, matching the pattern already used by submitFeeParams.
 // ==============================================================================
 
 import { Test } from "lib/forge-std/src/Test.sol";
@@ -178,7 +144,8 @@ contract AdminModule_GovernanceBypass_POC is Test {
     // TEST F2-1: Sanity -- direct setBufferManager reverts after timelock enabled
     //
     // Confirms the component timelock is active and correctly blocks the
-    // direct setter.  This is the EXPECTED behaviour that setEcosystem bypasses.
+    // direct setter.  This is the baseline behaviour that setEcosystem also
+    // must respect after the fix.
     // -------------------------------------------------------------------------
     function test_f02_control_setBufferManager_reverts_after_timelock() public {
         address maliciousBM = makeAddr("maliciousBM");
@@ -199,12 +166,13 @@ contract AdminModule_GovernanceBypass_POC is Test {
     }
 
     // -------------------------------------------------------------------------
-    // TEST F2-2: setEcosystem bypasses FLAG_COMPONENTS_TIMELOCKED
+    // TEST F2-2: FIX -- setEcosystem now reverts after FLAG_COMPONENTS_TIMELOCKED
     //
-    // After enableComponentsTimelock(), setBufferManager reverts but
-    // setEcosystem succeeds and instantly swaps both infrastructure contracts.
+    // After enableComponentsTimelock(), setEcosystem must revert with the same
+    // ComponentsTimelocked error as the individual setters.  The vault state
+    // must remain unchanged.
     // -------------------------------------------------------------------------
-    function test_f02_poc_setEcosystem_bypasses_component_timelock() public {
+    function test_f02_fix_setEcosystem_reverts_after_component_timelock() public {
         address maliciousBM     = makeAddr("maliciousBM");
         address maliciousRouter = makeAddr("maliciousRouter");
         address guardian        = makeAddr("guardian");
@@ -214,14 +182,11 @@ contract AdminModule_GovernanceBypass_POC is Test {
         address originalBM     = before.bufferManager;
         address originalRouter = before.strategyRouter;
 
-        // Enable the component timelock -- direct setters are now blocked
+        // Enable the component timelock
         IAdminModule(address(core)).enableComponentsTimelock();
 
-        // Confirm that direct setters revert
+        // FIX: setEcosystem now reverts with ComponentsTimelocked
         vm.expectRevert(AdminModule.ComponentsTimelocked.selector);
-        IAdminModule(address(core)).setBufferManager(maliciousBM);
-
-        // BUG: setEcosystem does NOT check FLAG_COMPONENTS_TIMELOCKED and succeeds
         IAdminModule(address(core)).setEcosystem(IAdminModule.EcosystemConfig({
             bufferManager:  maliciousBM,
             strategyRouter: maliciousRouter,
@@ -231,56 +196,51 @@ contract AdminModule_GovernanceBypass_POC is Test {
             vetoer:         address(0)
         }));
 
-        // Both infrastructure contracts were swapped with ZERO timelock delay
+        // Vault state is unchanged -- no bypass possible
         IAdminModule.EcosystemConfig memory after_ = IAdminModule(address(core)).getEcosystem();
-
         assertEq(
             after_.bufferManager,
-            maliciousBM,
-            "BUG CONFIRMED: bufferManager replaced instantly, bypassing component timelock"
+            originalBM,
+            "FIX CONFIRMED: bufferManager unchanged -- setEcosystem correctly reverted"
         );
         assertEq(
             after_.strategyRouter,
-            maliciousRouter,
-            "BUG CONFIRMED: strategyRouter replaced instantly, bypassing component timelock"
+            originalRouter,
+            "FIX CONFIRMED: strategyRouter unchanged -- setEcosystem correctly reverted"
         );
-
-        // Originals are gone
-        assertTrue(after_.bufferManager  != originalBM,     "original bufferManager overwritten");
-        assertTrue(after_.strategyRouter != originalRouter,  "original strategyRouter overwritten");
     }
 
     // -------------------------------------------------------------------------
-    // TEST F2-3: setEcosystem swaps both contracts atomically without delay
+    // TEST F2-3: FIX -- setEcosystem cannot swap components atomically after timelock
     //
-    // Quantifies the blast radius: a single call swaps BOTH contracts at once,
-    // giving the protocol no intermediate safe state.
+    // Confirms that no single call can bypass the timelock in a single block.
+    // The only valid path post-timelock is submitBufferManager/submitRouter
+    // with a full ETA delay.
     // -------------------------------------------------------------------------
-    function test_f02_poc_setEcosystem_swaps_both_components_atomically() public {
-        address maliciousBM     = makeAddr("maliciousBM");
-        address maliciousRouter = makeAddr("maliciousRouter");
-        address guardian        = makeAddr("guardian");
+    function test_f02_fix_setEcosystem_cannot_bypass_timelock_atomically() public {
+        address guardian = makeAddr("guardian");
 
         IAdminModule(address(core)).enableComponentsTimelock();
+        IAdminModule.EcosystemConfig memory before = IAdminModule(address(core)).getEcosystem();
 
         uint256 tBefore = block.timestamp;
 
-        // Single call -- no warp, no delay, no timelock operations
+        // FIX: reverts immediately -- no time-warp trick can help
+        vm.expectRevert(AdminModule.ComponentsTimelocked.selector);
         IAdminModule(address(core)).setEcosystem(IAdminModule.EcosystemConfig({
-            bufferManager:  maliciousBM,
-            strategyRouter: maliciousRouter,
+            bufferManager:  makeAddr("maliciousBM"),
+            strategyRouter: makeAddr("maliciousRouter"),
             healthRegistry: address(0),
             incentives:     address(0),
             guardian:       guardian,
             vetoer:         address(0)
         }));
 
-        // Confirm: no time elapsed
-        assertEq(block.timestamp, tBefore, "no time passed -- bypass is instant");
-
+        // No time elapsed, vault state intact
+        assertEq(block.timestamp, tBefore, "no time passed");
         IAdminModule.EcosystemConfig memory cfg = IAdminModule(address(core)).getEcosystem();
-        assertEq(cfg.bufferManager,  maliciousBM,     "BM swapped in same block");
-        assertEq(cfg.strategyRouter, maliciousRouter,  "Router swapped in same block");
+        assertEq(cfg.bufferManager,  before.bufferManager,  "FIX: BM not swapped");
+        assertEq(cfg.strategyRouter, before.strategyRouter, "FIX: Router not swapped");
     }
 
     // =========================================================================
@@ -290,8 +250,8 @@ contract AdminModule_GovernanceBypass_POC is Test {
     // -------------------------------------------------------------------------
     // TEST F3-1: Control -- submitFeeParams correctly blocks overwrite
     //
-    // Demonstrates that the PendingParamsNotResolved guard WORKS for fee params.
-    // This is the pattern that submitPerfParams and submitMinDelay SHOULD follow.
+    // Demonstrates that the PendingParamsNotResolved guard works for fee params.
+    // This is the pattern all submit functions now follow.
     // -------------------------------------------------------------------------
     function test_f03_control_submitFeeParams_reverts_on_overwrite() public {
         address treasury = makeAddr("treasury");
@@ -305,137 +265,137 @@ contract AdminModule_GovernanceBypass_POC is Test {
     }
 
     // -------------------------------------------------------------------------
-    // TEST F3-2: submitPerfParams silently overwrites pending submission
+    // TEST F3-2: FIX -- submitPerfParams blocks overwrite, protecting the vetoer
     //
-    // The vetoer observes a 10 % rate submission and decides not to revoke.
-    // Before the ETA the owner overwrites with the maximum 50 % rate.
-    // After the timelock the 50 % rate takes effect -- the vetoer was deceived.
+    // The vetoer observes a 10 % rate submission and can trust that value.
+    // Any attempt to overwrite it with a higher rate now reverts.
+    // After the ETA the original 10 % rate takes effect -- not a covert 50 %.
     // -------------------------------------------------------------------------
-    function test_f03_poc_submitPerfParams_silent_overwrite_fools_vetoer() public {
-        // --- Submit acceptable rate (vetoer stands down) ----------------------
+    function test_f03_fix_submitPerfParams_blocks_overwrite_protecting_vetoer() public {
+        // Submit acceptable rate
         IAdminModule(address(core)).submitPerfParams(PERF_RATE_10PCT, 0);
 
         {
             (uint256 pendingRate,,, bool exists) =
                 IAdminModule(address(core)).getPendingPerfParams();
-            assertTrue(exists,                      "pending must exist after first submit");
-            assertEq(pendingRate, PERF_RATE_10PCT,  "pending rate is 10% after first submit");
+            assertTrue(exists,                     "pending must exist after first submit");
+            assertEq(pendingRate, PERF_RATE_10PCT, "pending rate is 10 % after first submit");
         }
 
-        // --- Owner overwrites in the SAME block -- should revert but does NOT -
-        // (No PendingParamsNotResolved guard on submitPerfParams)
+        // FIX: second submit reverts -- vetoer's window is trustworthy
+        vm.expectRevert(AdminModule.PendingParamsNotResolved.selector);
         IAdminModule(address(core)).submitPerfParams(PERF_RATE_50PCT, 0);
 
+        // Pending slot still holds the original 10 % rate
         {
             (uint256 pendingRate,,, bool exists) =
                 IAdminModule(address(core)).getPendingPerfParams();
-            assertTrue(exists,                       "pending must still exist");
+            assertTrue(exists,                     "pending must still exist");
             assertEq(
                 pendingRate,
-                PERF_RATE_50PCT,
-                "BUG: pending slot was silently overwritten with 50 % rate"
+                PERF_RATE_10PCT,
+                "FIX: pending slot unchanged -- vetoer can trust the submitted value"
             );
         }
 
-        // --- Advance past the ETA and accept ----------------------------------
+        // Advance past the ETA and accept -- original 10 % takes effect
         vm.warp(block.timestamp + TWO_DAYS + 1);
         IAdminModule(address(core)).acceptPerfParams();
 
-        // --- Verify the OVERWRITTEN (higher) rate took effect -----------------
         (uint256 activeRate,,,) = IAdminModule(address(core)).getPerfParams();
         assertEq(
             activeRate,
-            PERF_RATE_50PCT,
-            "BUG CONFIRMED: 50 % rate accepted -- vetoer window was bypassed"
+            PERF_RATE_10PCT,
+            "FIX CONFIRMED: original 10 % rate accepted, covert 50 % overwrite was blocked"
         );
     }
 
     // -------------------------------------------------------------------------
-    // TEST F3-3: submitPerfParams second submission does not extend the ETA
+    // TEST F3-3: FIX -- submitPerfParams revert preserves the original ETA
     //
-    // Because ETA = block.timestamp + paramMinDelay, overwriting in the same
-    // block keeps the SAME ETA. The vetoer who saw the first submission and
-    // its ETA has no extra time to react to the overwritten value.
+    // Because the overwrite reverts, the pending slot keeps both the original
+    // value AND the original ETA.  The vetoer has a clean, unambiguous window.
     // -------------------------------------------------------------------------
-    function test_f03_poc_submitPerfParams_overwrite_keeps_same_eta() public {
+    function test_f03_fix_submitPerfParams_revert_preserves_original_eta() public {
         IAdminModule(address(core)).submitPerfParams(PERF_RATE_10PCT, 0);
         (,, uint64 etaFirst,) = IAdminModule(address(core)).getPendingPerfParams();
 
-        // Overwrite in the same block
+        // Overwrite attempt reverts -- ETA is not touched
+        vm.expectRevert(AdminModule.PendingParamsNotResolved.selector);
         IAdminModule(address(core)).submitPerfParams(PERF_RATE_50PCT, 0);
-        (,, uint64 etaSecond,) = IAdminModule(address(core)).getPendingPerfParams();
 
-        // ETA is identical -- no additional delay for the higher rate
+        (,, uint64 etaAfterRevert,) = IAdminModule(address(core)).getPendingPerfParams();
+
+        // ETA is identical to the first submission -- unchanged because revert
         assertEq(
-            etaSecond,
+            etaAfterRevert,
             etaFirst,
-            "BUG: overwrite does not extend ETA -- vetoer has no extra time to react"
+            "FIX: ETA unchanged after blocked overwrite -- vetoer's window is fully intact"
         );
     }
 
     // -------------------------------------------------------------------------
-    // TEST F3-4: submitMinDelay silently overwrites pending delay
+    // TEST F3-4: FIX -- submitMinDelay blocks overwrite
     //
-    // Owner submits 3-day delay (acceptable), then immediately overwrites with
-    // 7-day delay without triggering a revert.  After acceptance the extreme
-    // delay is active, making future governance slower than vetoer expected.
+    // Owner submits a 3-day delay.  Any attempt to overwrite with a 7-day delay
+    // reverts.  After acceptance the original 3-day delay is active.
     // -------------------------------------------------------------------------
-    function test_f03_poc_submitMinDelay_silent_overwrite() public {
-        // Both values are above the minParamDelay floor (2 days) from MockParamsProvider
+    function test_f03_fix_submitMinDelay_blocks_overwrite() public {
         uint64 acceptableDelay = THREE_DAYS;
         uint64 extremeDelay    = SEVEN_DAYS;
 
-        // First submission -- acceptable value
+        // First submission succeeds
         IAdminModule(address(core)).submitMinDelay(acceptableDelay);
 
         {
             (uint64 pending,, bool exists) =
                 IAdminModule(address(core)).getPendingMinDelay();
-            assertTrue(exists,                        "pending delay must exist");
-            assertEq(pending, acceptableDelay,        "pending is 3 days after first submit");
+            assertTrue(exists,                  "pending delay must exist");
+            assertEq(pending, acceptableDelay,  "pending is 3 days after first submit");
         }
 
-        // Overwrite with extreme value -- should revert but does NOT
+        // FIX: overwrite reverts
+        vm.expectRevert(AdminModule.PendingParamsNotResolved.selector);
         IAdminModule(address(core)).submitMinDelay(extremeDelay);
 
+        // Pending still holds the original acceptable value
         {
             (uint64 pending,, bool exists) =
                 IAdminModule(address(core)).getPendingMinDelay();
             assertEq(
                 pending,
-                extremeDelay,
-                "BUG: pending delay silently overwritten with 7 days"
+                acceptableDelay,
+                "FIX: pending delay unchanged after blocked overwrite"
             );
-            assertTrue(exists, "pending still exists after overwrite");
+            assertTrue(exists, "pending still exists");
         }
 
-        // Accept after ETA -- extreme delay takes effect
+        // Accept after ETA -- original 3-day delay takes effect
         vm.warp(block.timestamp + TWO_DAYS + 1);
         IAdminModule(address(core)).acceptMinDelay();
 
         uint64 activeDelay = IAdminModule(address(core)).getMinDelay();
         assertEq(
             activeDelay,
-            extremeDelay,
-            "BUG CONFIRMED: 7-day delay accepted -- vetoer saw 3-day submission, gets 7-day result"
+            acceptableDelay,
+            "FIX CONFIRMED: 3-day delay accepted, extreme 7-day overwrite was blocked"
         );
     }
 
     // -------------------------------------------------------------------------
-    // TEST F3-5: submitBufferManager silently overwrites pending submission
+    // TEST F3-5: FIX -- submitBufferManager blocks overwrite
     //
-    // After enableComponentsTimelock, the owner submits a legitimate BM then
-    // immediately overwrites with a malicious address.  The accepted BM is the
-    // malicious one -- all within the same timelock window.
+    // After enableComponentsTimelock, the owner submits a legitimate BM.
+    // Any attempt to overwrite with a malicious address reverts.
+    // The accepted BM is the legitimate one.
     // -------------------------------------------------------------------------
-    function test_f03_poc_submitBufferManager_silent_overwrite() public {
+    function test_f03_fix_submitBufferManager_blocks_overwrite() public {
         address legitimateBM = address(new MockBufferManagerForTests(address(core)));
         address maliciousBM  = makeAddr("maliciousBM");
 
-        // Component timelock must be enabled before submitBufferManager is valid
         IAdminModule(address(core)).enableComponentsTimelock();
 
-        // First submission -- legitimate BM that vetoer accepts
+        // First submission -- legitimate BM
         IAdminModule(address(core)).submitBufferManager(legitimateBM);
 
         {
@@ -445,63 +405,69 @@ contract AdminModule_GovernanceBypass_POC is Test {
             assertTrue(exists, "pending BM exists");
         }
 
-        // Overwrite with malicious BM -- should revert but does NOT
+        // FIX: overwrite with malicious BM reverts
+        vm.expectRevert(AdminModule.PendingParamsNotResolved.selector);
         IAdminModule(address(core)).submitBufferManager(maliciousBM);
 
+        // Pending still holds the legitimate address
         {
             (address pending,, bool exists) =
                 IAdminModule(address(core)).getPendingBufferManager();
             assertEq(
                 pending,
-                maliciousBM,
-                "BUG: pending BM silently overwritten with malicious address"
+                legitimateBM,
+                "FIX: pending BM unchanged -- malicious overwrite was blocked"
             );
-            assertTrue(exists, "pending still exists after overwrite");
+            assertTrue(exists, "pending still exists after blocked overwrite");
         }
 
-        // Accept after ETA -- malicious BM takes effect
+        // Accept after ETA -- legitimate BM takes effect
         vm.warp(block.timestamp + TWO_DAYS + 1);
         IAdminModule(address(core)).acceptBufferManager();
 
         IAdminModule.EcosystemConfig memory cfg = IAdminModule(address(core)).getEcosystem();
         assertEq(
             cfg.bufferManager,
-            maliciousBM,
-            "BUG CONFIRMED: malicious bufferManager accepted -- vetoer saw legitimate submission"
+            legitimateBM,
+            "FIX CONFIRMED: legitimate bufferManager accepted, malicious overwrite was blocked"
         );
     }
 
     // -------------------------------------------------------------------------
-    // TEST F3-6: All three broken submits can be chained to bypass every
-    //            governance guard in a single block
+    // TEST F3-6: FIX -- all three overwrite attempts revert in the same block
     //
-    // The owner submits a misleading value for each parameter type, waits for
-    // the vetoer's silence window, then overwrites all three in the same block.
-    // All three overwrite calls succeed (no revert).
+    // Confirms that the PendingParamsNotResolved guard on all three submit
+    // functions holds simultaneously.  The pending slots preserve the original
+    // values submitted by the owner in step 1.
     // -------------------------------------------------------------------------
-    function test_f03_poc_all_three_overwrites_succeed_in_one_block() public {
+    function test_f03_fix_all_three_overwrite_attempts_revert() public {
         IAdminModule(address(core)).enableComponentsTimelock();
         address legitBM = address(new MockBufferManagerForTests(address(core)));
 
-        // Submit all three with acceptable/misleading values
+        // Submit original acceptable values
         IAdminModule(address(core)).submitPerfParams(PERF_RATE_10PCT, 0);
         IAdminModule(address(core)).submitMinDelay(THREE_DAYS);
         IAdminModule(address(core)).submitBufferManager(legitBM);
 
-        // Overwrite all three in the same block -- none revert
+        // FIX: all three overwrite attempts revert
+        vm.expectRevert(AdminModule.PendingParamsNotResolved.selector);
         IAdminModule(address(core)).submitPerfParams(PERF_RATE_50PCT, 0);
+
+        vm.expectRevert(AdminModule.PendingParamsNotResolved.selector);
         IAdminModule(address(core)).submitMinDelay(SEVEN_DAYS);
+
+        vm.expectRevert(AdminModule.PendingParamsNotResolved.selector);
         IAdminModule(address(core)).submitBufferManager(makeAddr("maliciousBM"));
 
-        // All three pending slots now hold the extreme/malicious values
+        // All three pending slots still hold the original values
         {
-            (uint256 rate,,,)         = IAdminModule(address(core)).getPendingPerfParams();
-            (uint64  delay,,)         = IAdminModule(address(core)).getPendingMinDelay();
-            (address bm,,)            = IAdminModule(address(core)).getPendingBufferManager();
+            (uint256 rate,,,)  = IAdminModule(address(core)).getPendingPerfParams();
+            (uint64  delay,,)  = IAdminModule(address(core)).getPendingMinDelay();
+            (address bm,,)     = IAdminModule(address(core)).getPendingBufferManager();
 
-            assertEq(rate,  PERF_RATE_50PCT,            "perf rate overwritten to 50 %");
-            assertEq(delay, SEVEN_DAYS,                  "delay overwritten to 7 days");
-            assertEq(bm,    makeAddr("maliciousBM"),     "BM overwritten with malicious address");
+            assertEq(rate,  PERF_RATE_10PCT, "FIX: perf rate unchanged");
+            assertEq(delay, THREE_DAYS,       "FIX: delay unchanged");
+            assertEq(bm,    legitBM,          "FIX: BM unchanged");
         }
     }
 }
