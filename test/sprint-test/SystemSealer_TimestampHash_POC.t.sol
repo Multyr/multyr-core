@@ -2,18 +2,23 @@
 pragma solidity ^0.8.28;
 
 // ──────────────────────────────────────────────────────────────────────────────
-// SPRINT SECURITY TEST — SystemSealer atomic batch seal is IMPOSSIBLE
+// SPRINT SECURITY TEST — SystemSealer atomic seal fix
 //
-// SystemSealer.prepareSeal() bakes block.timestamp into the configHash:
+// ORIGINAL BUG (now fixed):
+//   The prior two-call batch [prepareSeal(config), sealFinalState(configHash)]
+//   always reverted because prepareSeal baked block.timestamp into configHash:
 //
-//   configHash = keccak256(abi.encode(
-//       config.vault, config.rootTimelock, ..., block.timestamp  ← non-deterministic
-//   ));
+//     configHash = keccak256(abi.encode(..., block.timestamp ← non-deterministic));
 //
-// TimelockController.executeBatch() cannot pass return values between calls.
-// The operator must encode sealFinalState(configHash) at scheduleBatch() time,
-// but the hash is only known at executeBatch() time (block.timestamp differs by
-// the full timelock delay). The two-call atomic batch ALWAYS reverts.
+//   TimelockController.executeBatch() cannot pass return values between calls.
+//   The operator had to encode sealFinalState(configHash) at scheduleBatch() time,
+//   but configHash was only known at executeBatch() time (block.timestamp differs
+//   by the full timelock delay). The two-call atomic batch ALWAYS reverted.
+//
+// FIX:
+//   verifyAndSeal() merges both steps into a single call. The hash is computed
+//   from config addresses only (no timestamp), so it is fully deterministic.
+//   The timelock schedules one call: systemSealer.verifyAndSeal(config).
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { Test, console2 } from "forge-std/Test.sol";
@@ -146,24 +151,57 @@ contract SystemSealer_TimestampHash_POC is Test {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // PROOF: atomic two-call batch always fails because block.timestamp in hash
+    // FIX: single-call batch with verifyAndSeal seals atomically
     // ══════════════════════════════════════════════════════════════════════════
 
     /**
-     * @notice The documented usage (SystemSealer.sol:29-31) says to schedule:
-     *         [prepareSeal(config), sealFinalState(configHash)]
-     *         as a single executeBatch call. This ALWAYS reverts because:
+     * @notice verifyAndSeal() is a single-call timelock batch.
      *
-     *         - configHash is computed with block.timestamp inside prepareSeal
-     *         - the operator cannot know block.timestamp at execute time when scheduling
-     *         - prepareSeal sets pendingSealHash = hash(t_execute)
-     *         - sealFinalState receives hash(t_schedule) — they never match
+     *         The operator schedules:
+     *           [systemSealer.verifyAndSeal(config)]
+     *
+     *         No configHash needs to be known at scheduleBatch() time.
+     *         The hash is computed from config addresses only — no block.timestamp —
+     *         so it is deterministic regardless of execution block.
+     *
+     *         After executeBatch() completes:
+     *           - vault.isSystemSealed() == true
+     *           - vault.pendingSealHash() == keccak256(abi.encode(...addresses...))
      */
-    function test_atomic_batch_always_reverts_due_to_timestamp_in_hash() public {
+    function test_single_call_verifyAndSeal_seals_atomically() public {
         uint256 t_schedule = block.timestamp;
 
-        // Operator's only option: compute the hash using the current (schedule) timestamp.
-        // This mirrors prepareSeal's internal keccak exactly.
+        address[] memory targets  = new address[](1);
+        uint256[] memory values   = new uint256[](1);
+        bytes[]   memory payloads = new bytes[](1);
+
+        targets[0]  = address(systemSealer);
+        payloads[0] = abi.encodeCall(SystemSealer.verifyAndSeal, (sealConfig));
+
+        bytes32 salt = keccak256("poc-salt");
+
+        vm.prank(deployer);
+        rootTimelock.scheduleBatch(targets, values, payloads, bytes32(0), salt, TIMELOCK_DELAY);
+
+        vm.warp(t_schedule + TIMELOCK_DELAY + 1);
+
+        vm.prank(deployer);
+        rootTimelock.executeBatch(targets, values, payloads, bytes32(0), salt);
+
+        assertTrue(vault.isSystemSealed(), "vault must be sealed after single-call verifyAndSeal batch");
+        assertNotEq(vault.pendingSealHash(), bytes32(0), "pendingSealHash must record the verified config hash");
+
+        console2.log("Vault sealed at block.timestamp:", block.timestamp);
+        console2.log("configHash stored:", vm.toString(vault.pendingSealHash()));
+    }
+
+    /**
+     * @notice Hash is deterministic — computed at execute time from addresses only.
+     *         The operator can pre-compute the exact same hash at schedule time.
+     *         This proves the TOCTOU vulnerability from the old timestamp-based hash
+     *         no longer exists.
+     */
+    function test_configHash_is_deterministic_across_timelock_delay() public {
         bytes32 hashAtSchedule = keccak256(abi.encode(
             sealConfig.vault,
             sealConfig.rootTimelock,
@@ -173,121 +211,27 @@ contract SystemSealer_TimestampHash_POC is Test {
             sealConfig.strategy,
             sealConfig.incentives,
             sealConfig.incentivesEngine,
-            sealConfig.rewardsPayoutManager,
-            t_schedule
+            sealConfig.rewardsPayoutManager
         ));
 
-        // Build the two-call batch as documented
-        address[] memory targets  = new address[](2);
-        uint256[] memory values   = new uint256[](2);
-        bytes[]   memory payloads = new bytes[](2);
-
+        // Advance past the timelock delay and seal
+        address[] memory targets  = new address[](1);
+        uint256[] memory values   = new uint256[](1);
+        bytes[]   memory payloads = new bytes[](1);
         targets[0]  = address(systemSealer);
-        payloads[0] = abi.encodeCall(SystemSealer.prepareSeal, (sealConfig));
-
-        targets[1]  = address(vault);
-        payloads[1] = abi.encodeWithSignature("sealFinalState(bytes32)", hashAtSchedule);
-
-        bytes32 salt = keccak256("poc-salt");
+        payloads[0] = abi.encodeCall(SystemSealer.verifyAndSeal, (sealConfig));
 
         vm.prank(deployer);
-        rootTimelock.scheduleBatch(targets, values, payloads, bytes32(0), salt, TIMELOCK_DELAY);
-
-        // Advance past the timelock delay — this is when executeBatch can run
-        uint256 t_execute = t_schedule + TIMELOCK_DELAY + 1;
-        vm.warp(t_execute);
-
-        // prepareSeal will compute hash(t_execute), not hash(t_schedule)
-        bytes32 hashAtExecute = keccak256(abi.encode(
-            sealConfig.vault,
-            sealConfig.rootTimelock,
-            sealConfig.guardian,
-            sealConfig.vetoer,
-            sealConfig.feeCollector,
-            sealConfig.strategy,
-            sealConfig.incentives,
-            sealConfig.incentivesEngine,
-            sealConfig.rewardsPayoutManager,
-            t_execute
-        ));
-
-        console2.log("hash(t_schedule) :", vm.toString(hashAtSchedule));
-        console2.log("hash(t_execute)  :", vm.toString(hashAtExecute));
-        console2.log("timestamps differ by %d seconds (= timelock delay)", t_execute - t_schedule);
-
-        assertNotEq(hashAtSchedule, hashAtExecute, "hashes must differ - timestamps are different");
-
-        // executeBatch reverts:
-        //   call[0] prepareSeal(config)          succeeds — sets pendingSealHash = hash(t_execute)
-        //   call[1] sealFinalState(hash_schedule) reverts  — SealHashMismatch(hash_execute, hash_schedule)
-        //   entire tx reverts, pendingSealHash is rolled back to zero
+        rootTimelock.scheduleBatch(targets, values, payloads, bytes32(0), keccak256("det-salt"), TIMELOCK_DELAY);
+        vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
         vm.prank(deployer);
-        vm.expectRevert();
-        rootTimelock.executeBatch(targets, values, payloads, bytes32(0), salt);
+        rootTimelock.executeBatch(targets, values, payloads, bytes32(0), keccak256("det-salt"));
 
-        assertFalse(vault.isSystemSealed(),           "vault must not be sealed");
-        assertEq(vault.pendingSealHash(), bytes32(0), "pending hash must be zero - tx rolled back");
-    }
+        // Hash computed at schedule time must equal hash stored at execute time
+        assertEq(vault.pendingSealHash(), hashAtSchedule,
+            "configHash must be identical at schedule time and execute time - no timestamp dependency");
 
-    /**
-     * @notice Non-atomic workaround: two separate timelock operations.
-     *
-     * Op A (scheduled at t0, executes at t0+delay):
-     *   prepareSeal(config) — sets pendingSealHash = hash(t0+delay)
-     *   Operator reads pendingSealHash from vault state (or SealPrepared event).
-     *
-     * Op B (scheduled at t0+delay, executes at t0+2*delay):
-     *   sealFinalState(pendingSealHash) — succeeds because hash is now known
-     *
-     * Vault seals, but the cost is:
-     *   - 2x the timelock delay (4 days for a 2-day timelock)
-     *   - No atomicity: state can change between Op A and Op B
-     */
-    function test_non_atomic_two_op_seal_works_but_costs_double_delay() public {
-        uint256 t0 = block.timestamp;
-
-        // ── Op A: schedule prepareSeal alone ─────────────────────────────────
-        address[] memory tgtsA  = new address[](1);
-        uint256[] memory valsA  = new uint256[](1);
-        bytes[]   memory dataA  = new bytes[](1);
-        tgtsA[0] = address(systemSealer);
-        dataA[0] = abi.encodeCall(SystemSealer.prepareSeal, (sealConfig));
-
-        vm.prank(deployer);
-        rootTimelock.scheduleBatch(tgtsA, valsA, dataA, bytes32(0), keccak256("op-a"), TIMELOCK_DELAY);
-
-        vm.warp(t0 + TIMELOCK_DELAY + 1);
-
-        vm.prank(deployer);
-        rootTimelock.executeBatch(tgtsA, valsA, dataA, bytes32(0), keccak256("op-a"));
-
-        // prepareSeal ran at t0+delay+1 — operator reads the resulting hash
-        bytes32 pendingHash = vault.pendingSealHash();
-        assertNotEq(pendingHash, bytes32(0), "pendingSealHash must be set after Op A");
-        assertFalse(vault.isSystemSealed(),   "vault must not be sealed yet after Op A");
-
-        console2.log("Op A executed. pendingSealHash:", vm.toString(pendingHash));
-
-        // ── Op B: schedule sealFinalState with the now-known hash ────────────
-        address[] memory tgtsB  = new address[](1);
-        uint256[] memory valsB  = new uint256[](1);
-        bytes[]   memory dataB  = new bytes[](1);
-        tgtsB[0] = address(vault);
-        dataB[0] = abi.encodeWithSignature("sealFinalState(bytes32)", pendingHash);
-
-        vm.prank(deployer);
-        rootTimelock.scheduleBatch(tgtsB, valsB, dataB, bytes32(0), keccak256("op-b"), TIMELOCK_DELAY);
-
-        // Must wait a full second delay again before Op B can execute
-        vm.warp(t0 + 2 * TIMELOCK_DELAY + 2);
-
-        vm.prank(deployer);
-        rootTimelock.executeBatch(tgtsB, valsB, dataB, bytes32(0), keccak256("op-b"));
-
-        assertTrue(vault.isSystemSealed(), "vault sealed after non-atomic two-op flow");
-
-        console2.log("Op B executed. Vault sealed:", vault.isSystemSealed());
-        console2.log("Total elapsed: %d seconds (2x %d delay)", 2 * TIMELOCK_DELAY, TIMELOCK_DELAY);
+        console2.log("hash(schedule) == hash(execute):", vm.toString(hashAtSchedule));
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────

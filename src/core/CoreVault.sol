@@ -379,6 +379,24 @@ contract CoreVault is ERC4626, ICoreVault {
         emit Events.SystemSealed(msg.sender, expectedHash, block.timestamp);
     }
 
+    /**
+     * @notice Atomically record the verified config hash and seal in one call.
+     * @dev Called by SystemSealer.verifyAndSeal() as a single timelock operation.
+     *      Unlike the two-step prepareSeal/sealFinalState pattern, this function
+     *      sets pendingSealHash and immediately activates the sealed flag so no
+     *      separate executeBatch step is required.
+     */
+    function sealBySealer(bytes32 configHash) external {
+        CoreStorage.Layout storage core = CoreStorage.layout();
+        if (msg.sender != core.authorizedSealer) revert NotAuthorizedSealer();
+        if (core.packedFlags & CoreStorage.FLAG_SYSTEM_SEALED != 0) revert SystemSealed();
+        if (configHash == bytes32(0)) revert InvalidConfigHash();
+        if (core.packedFlags & CoreStorage.FLAG_ROUTING_FROZEN == 0) revert RoutingNotFrozen();
+        core.pendingSealHash = configHash;
+        core.packedFlags |= CoreStorage.FLAG_SYSTEM_SEALED;
+        emit Events.SystemSealed(msg.sender, configHash, block.timestamp);
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════════
     // OWNERSHIP
     // ═══════════════════════════════════════════════════════════════════════════════

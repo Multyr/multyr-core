@@ -17,33 +17,29 @@ import { AccessControl } from "@openzeppelin/contracts/access/AccessControl.sol"
 
 /**
  * @title SystemSealer
- * @notice Onchain verification + binding contract for final system state certification
- * @dev This contract verifies all invariants AND binds the verification to the seal.
+ * @notice Onchain verification + atomic seal contract for final system state certification.
+ * @dev Verifies all deployment invariants and atomically seals the vault in a single
+ *      timelock operation.
  *
- * SECURITY: Uses verified hash binding to eliminate TOCTOU vulnerabilities.
- *           sealFinalState() will REVERT if prepareSeal() wasn't called with matching hash.
+ * USAGE (SINGLE-CALL TIMELOCK BATCH):
+ *      ROOT_TIMELOCK schedules one call:
+ *        systemSealer.verifyAndSeal(config)
+ *      No pre-computed hash is needed. The hash is computed at executeBatch() time
+ *      from the config addresses (no block.timestamp), so it is fully deterministic.
  *
- * USAGE (REQUIRED - ATOMIC VIA TIMELOCK BATCH):
- *      ROOT_TIMELOCK schedules a batch transaction containing:
- *        1. systemSealer.prepareSeal(config) -> returns configHash
- *        2. vault.sealFinalState(configHash)  -> consumes hash and seals
- *      OZ TimelockController.executeBatch() ensures both run atomically.
- *
- * HOW BINDING WORKS:
- *      1. prepareSeal() verifies all invariants
- *      2. prepareSeal() computes configHash
- *      3. prepareSeal() calls vault.prepareSeal(configHash) - sets pendingSealHash
- *      4. sealFinalState(expectedHash) checks pendingSealHash == expectedHash
- *      5. If mismatch: REVERT. If match: seal and clear pendingSealHash.
+ * WHY NO TIMESTAMP IN configHash:
+ *      The prior two-call design [prepareSeal, sealFinalState] included block.timestamp
+ *      in the hash. Since scheduleBatch() and executeBatch() run at different blocks
+ *      (separated by the full timelock delay), the operator could never encode the
+ *      correct hash at schedule time — the batch always reverted.
+ *      See: test/sprint-test/SystemSealer_TimestampHash_POC.t.sol
  *
  * SECURITY MODEL:
- * - Only ROOT_TIMELOCK can call prepareSeal()
- * - Only authorized SystemSealer can call vault.prepareSeal()
- * - Only vault owner can call sealFinalState()
- * - sealFinalState() REVERTS without matching prepareSeal()
- * - Configuration hash prevents replay/mutation attacks
+ * - Only ROOT_TIMELOCK can call verifyAndSeal()
+ * - Only authorized SystemSealer can call vault.sealBySealer()
+ * - configHash binds the verified config to the seal event for auditability
  *
- * PRE-SEAL CHECKLIST (verified by prepareSeal()):
+ * PRE-SEAL CHECKLIST (verified by verifyAndSeal()):
  * [x] CoreVault.owner == ROOT_TIMELOCK
  * [x] CoreVault.guardian == SAFE_GUARDIAN
  * [x] CoreVault.vetoer == SAFE_VETO
@@ -76,11 +72,7 @@ contract SystemSealer {
     // EVENTS
     // ═══════════════════════════════════════════════════════════════════════════════
     event SystemSealedEvent(
-        address indexed vault, address indexed sealer, bytes32 configHash, uint256 timestamp
-    );
-
-    event SealPrepared(
-        address indexed vault, address indexed preparer, bytes32 configHash, uint256 timestamp
+        address indexed vault, address indexed caller, bytes32 configHash, uint256 timestamp
     );
 
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -128,22 +120,17 @@ contract SystemSealer {
     // ═══════════════════════════════════════════════════════════════════════════════
 
     /**
-     * @notice Prepare seal: verify all invariants AND bind the hash to CoreVault
-     * @param config Configuration with all addresses to verify
-     * @return configHash Hash of the verified configuration (needed for sealFinalState)
-     * @dev This function:
-     *      1. Verifies all invariants (reverts if any fail)
-     *      2. Computes the config hash
-     *      3. Calls vault.prepareSeal(configHash) to bind the verification
+     * @notice Verify all system invariants and atomically seal the vault.
+     * @param config Configuration with all addresses to verify.
+     * @dev Schedule as a single-call timelock batch:
+     *        rootTimelock.scheduleBatch([systemSealer.verifyAndSeal(config)], ...)
+     *      All invariants are checked, then vault.sealBySealer(configHash) is called
+     *      atomically. No separate sealFinalState step is required.
      *
-     * USAGE: In timelock.executeBatch(), call:
-     *        1. systemSealer.prepareSeal(config) -> returns configHash
-     *        2. vault.sealFinalState(configHash) -> consumes the hash and seals
-     *
-     * SECURITY: sealFinalState will REVERT if prepareSeal wasn't called with matching hash
+     *      configHash does NOT include block.timestamp — it is derived purely from
+     *      the config addresses, making it deterministic at schedule time.
      */
-    function prepareSeal(SealConfig calldata config) external returns (bytes32 configHash) {
-        // Caller must be ROOT_TIMELOCK
+    function verifyAndSeal(SealConfig calldata config) external {
         if (msg.sender != config.rootTimelock) revert NotRootTimelock();
 
         CoreVault vault = CoreVault(payable(config.vault));
@@ -286,11 +273,15 @@ contract SystemSealer {
         }
 
         // ─────────────────────────────────────────────────────────────────────────
-        // ALL INVARIANTS PASSED - COMPUTE CONFIG HASH AND BIND TO VAULT
+        // ALL INVARIANTS PASSED - COMPUTE CONFIG HASH AND SEAL ATOMICALLY
         // ─────────────────────────────────────────────────────────────────────────
 
-        // Compute configuration hash for verification
-        configHash = keccak256(
+        // block.timestamp is intentionally excluded. Including it would make the
+        // hash non-deterministic between scheduleBatch() and executeBatch() (they
+        // run at different blocks separated by the full timelock delay). The TOCTOU
+        // protection comes from the address binding alone — every field here is a
+        // deploy-time constant that cannot change between schedule and execute.
+        bytes32 configHash = keccak256(
             abi.encode(
                 config.vault,
                 config.rootTimelock,
@@ -300,18 +291,13 @@ contract SystemSealer {
                 config.strategy,
                 config.incentives,
                 config.incentivesEngine,
-                config.rewardsPayoutManager,
-                block.timestamp
+                config.rewardsPayoutManager
             )
         );
 
-        // BIND: Call vault.prepareSeal to set the pending hash
-        // This ensures sealFinalState can only succeed with this exact hash
-        vault.prepareSeal(configHash);
+        vault.sealBySealer(configHash);
 
-        emit SealPrepared(config.vault, msg.sender, configHash, block.timestamp);
-
-        return configHash;
+        emit SystemSealedEvent(config.vault, msg.sender, configHash, block.timestamp);
     }
 
     /**
