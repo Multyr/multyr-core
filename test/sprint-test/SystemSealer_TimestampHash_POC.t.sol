@@ -256,6 +256,11 @@ contract SystemSealer_TimestampHash_POC is Test {
         s = SelectorLib.getERC4626ModuleSelectors();
         for (uint256 i; i < s.length; ++i) vault.setModule(s[i], address(e4626), SelectorLib.ROLE_PUBLIC);
         s = SelectorLib.getLiquidityOpsModuleSelectors();
-        for (uint256 i; i < s.length; ++i) vault.setModule(s[i], address(lo), SelectorLib.ROLE_PUBLIC);
+        for (uint256 i; i < s.length; ++i) {
+            uint8 role = s[i] == LiquidityOpsModule.deployToStrategiesWithPlan.selector
+                ? SelectorLib.ROLE_OWNER_OR_GUARDIAN
+                : SelectorLib.ROLE_PUBLIC;
+            vault.setModule(s[i], address(lo), role);
+        }
     }
 }
