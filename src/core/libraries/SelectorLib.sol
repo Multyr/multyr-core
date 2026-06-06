@@ -17,7 +17,7 @@ library SelectorLib {
     uint8 internal constant ROLE_PUBLIC = 0;
     uint8 internal constant ROLE_OWNER = 1;
     uint8 internal constant ROLE_GUARDIAN = 2;
-    uint8 internal constant ROLE_MODULE = 3;
+    uint8 internal constant ROLE_OWNER_OR_GUARDIAN = 3; // matches ROLE_OWNER_OR_GUARDIAN
 
     // ═══════════════════════════════════════════════════════════════════════════════
     // SELECTOR COUNTS (for validation)
@@ -313,7 +313,11 @@ library SelectorLib {
                 if (routerAddr.moduleOf(liquidityOpsSels[i]) != liquidityOpsModule) {
                     missingCount++;
                 }
-                if (routerAddr.roleOf(liquidityOpsSels[i]) != ROLE_PUBLIC) {
+                // deployToStrategiesWithPlan is ROLE_OWNER_OR_GUARDIAN; all others PUBLIC
+                uint8 expectedRole = liquidityOpsSels[i] == LiquidityOpsModule.deployToStrategiesWithPlan.selector
+                    ? ROLE_OWNER_OR_GUARDIAN
+                    : ROLE_PUBLIC;
+                if (routerAddr.roleOf(liquidityOpsSels[i]) != expectedRole) {
                     missingCount++;
                 }
             }
@@ -357,10 +361,15 @@ library SelectorLib {
             if (erc4626Sels[i] == selector) return (ROLE_PUBLIC, true);
         }
 
-        // LiquidityOpsModule (PUBLIC)
+        // LiquidityOpsModule (PUBLIC except deployToStrategiesWithPlan = OWNER_OR_GUARDIAN)
         bytes4[] memory liquidityOpsSels = getLiquidityOpsModuleSelectors();
         for (uint256 i = 0; i < liquidityOpsSels.length; i++) {
-            if (liquidityOpsSels[i] == selector) return (ROLE_PUBLIC, true);
+            if (liquidityOpsSels[i] == selector) {
+                if (selector == LiquidityOpsModule.deployToStrategiesWithPlan.selector) {
+                    return (ROLE_OWNER_OR_GUARDIAN, true);
+                }
+                return (ROLE_PUBLIC, true);
+            }
         }
 
         return (0, false);

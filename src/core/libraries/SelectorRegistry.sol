@@ -166,12 +166,16 @@ contract SelectorRegistry {
         if (selector == 0x439fdeb4) return ROLE_PUBLIC; // forceWithdraw(uint256,address,address,(address,uint256)[],uint256)
 
         // ─────────────────────────────────────────────────────────────────────────
-        // LIQUIDITYOPSMODULE SELECTORS (3 total) - MUST BE ROLE_PUBLIC
-        // Deploy surplus to strategies (keeper/permissionless)
+        // LIQUIDITYOPSMODULE SELECTORS
+        // deployToStrategies / canDeploy / realize* / rebalance* are keeper-public.
+        // deployToStrategiesWithPlan accepts a caller-supplied allocation plan and
+        // must be ROLE_OWNER_OR_GUARDIAN -- even with strategy address validation a
+        // permissionless caller could manipulate which registered strategies receive
+        // capital and in what proportion.
         // ─────────────────────────────────────────────────────────────────────────
         if (selector == LiquidityOpsModule.canDeploy.selector) return ROLE_PUBLIC;
         if (selector == LiquidityOpsModule.deployToStrategies.selector) return ROLE_PUBLIC;
-        if (selector == LiquidityOpsModule.deployToStrategiesWithPlan.selector) return ROLE_PUBLIC;
+        if (selector == LiquidityOpsModule.deployToStrategiesWithPlan.selector) return ROLE_OWNER_OR_GUARDIAN;
         if (selector == LiquidityOpsModule.realizeForQueue.selector) return ROLE_PUBLIC;
         if (selector == LiquidityOpsModule.realizeForReserveAndOps.selector) return ROLE_PUBLIC;
         if (selector == LiquidityOpsModule.canRebalanceStrategies.selector) return ROLE_PUBLIC;

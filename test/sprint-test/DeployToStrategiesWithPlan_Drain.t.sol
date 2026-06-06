@@ -2,37 +2,30 @@
 pragma solidity ^0.8.24;
 
 // ──────────────────────────────────────────────────────────────────────────────
-// SPRINT SECURITY TEST — deployToStrategiesWithPlan arbitrary-surplus drain
+// SPRINT SECURITY TEST -- deployToStrategiesWithPlan drain: two-layer fix
 //
-// VULNERABILITY SUMMARY
-// ─────────────────────
-// `LiquidityOpsModule.deployToStrategiesWithPlan` is registered as ROLE_PUBLIC
-// (SelectorRegistry.sol:173-174, CoreHarness.sol:122-126).  It accepts a
-// caller-supplied `IStrategyRouter.Allocation[] plan` and validates ONLY that
+// ORIGINAL BUG (now fixed):
+// ─────────────────────────
+// `LiquidityOpsModule.deployToStrategiesWithPlan` was registered as ROLE_PUBLIC
+// and accepted a caller-supplied plan without validating plan[i].strat addresses.
+// Any EOA could supply their own address as plan[0].strat and receive the vault's
+// full deployable surplus in one transaction (Critical severity).
 //
-//     planTotal <= surplus          (LiquidityOpsModule.sol:645-648)
+// TWO-LAYER FIX APPLIED:
+// ──────────────────────
+// Layer 1 -- Role restriction (SelectorRegistry.sol, CoreHarness.sol):
+//   deployToStrategiesWithPlan is now ROLE_OWNER_OR_GUARDIAN.
+//   deployToStrategies (auto-plan, fully deterministic) remains ROLE_PUBLIC.
+//   Rationale: a caller-supplied plan controls which registered strategies
+//   receive capital and in what proportion -- that is an operator decision, not
+//   a permissionless keeper action. Even with address validation, a public caller
+//   could manipulate allocation to favour strategies they have a stake in.
 //
-// before executing:
-//
-//     asset_.safeTransfer(plan[i].strat, plan[i].amount)   (LiquidityOpsModule.sol:669)
-//
-// There is NO validation that `plan[i].strat` is a registered or enabled
-// strategy.  Any permissionless caller may therefore supply their own EOA (or
-// any arbitrary contract) as `plan[i].strat` and receive the vault's full
-// deployable surplus in one transaction.
-//
-// The safe on-chain path (`deployToStrategies`) routes through
-// `r.planDeposit(surplus)` which only returns registered+enabled strategies,
-// but `deployToStrategiesWithPlan` bypasses that guard entirely.
-//
-// SEVERITY:  Critical
-// IMPACT:    Full drain of vault hot-surplus (up to 100 % of hot balance
-//            depending on BufferManager config) by any EOA / bot.
-//
-// FIX OPTIONS (either):
-//   A. Validate every leg:
-//        require(r.isStrategyEnabled(plan[i].strat), "unregistered strategy");
-//   B. Restrict selector to ROLE_KEEPER / ROLE_OWNER in SelectorRegistry.
+// Layer 2 -- Strategy address validation (LiquidityOpsModule.sol):
+//   Each leg is validated before summing amounts:
+//     if (!r.isStrategyEnabled(plan[i].strat))
+//         revert UnregisteredStrategy(plan[i].strat);
+//   This ensures even the owner/guardian cannot route funds to arbitrary addresses.
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { Test } from "lib/forge-std/src/Test.sol";
@@ -46,10 +39,10 @@ import { MockBufferManagerForTests } from "../helpers/MockBufferManagerForTests.
 import { IBufferManager } from "../../src/interfaces/IBufferManager.sol";
 import { IStrategyRouter } from "../../src/interfaces/IStrategyRouter.sol";
 import { LiquidityOpsModule } from "../../src/core/modules/LiquidityOpsModule.sol";
+import { CoreVault } from "../../src/core/CoreVault.sol";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Minimal mock strategy — satisfies StrategyRouter.register()'s asset() check.
-// Has no real logic: deposit/withdraw are no-ops for the control test.
+// Minimal mock strategy -- satisfies StrategyRouter.register()'s asset() check.
 // ─────────────────────────────────────────────────────────────────────────────
 contract MockStrategy {
     address private immutable _asset;
@@ -71,7 +64,6 @@ contract MockStrategy {
         return "MockStrategy";
     }
 
-    /// @dev Records the deposit (vault already transferred funds via safeTransfer)
     function deposit(uint256 amount) external returns (uint256) {
         _total += amount;
         return amount;
@@ -103,208 +95,250 @@ contract MockStrategy {
 
 // ─────────────────────────────────────────────────────────────────────────────
 contract DeployToStrategiesWithPlan_Drain is Test {
-    // ── canonical addresses ───────────────────────────────────────────────────
     address constant USDC_UNDERLYING = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
-
-    // ── scale constants ───────────────────────────────────────────────────────
     uint256 constant ONE_MILLION_USDC = 1_000_000e6;
 
-    // ── actors ────────────────────────────────────────────────────────────────
+    address internal owner;
+    address internal guardian;
     address internal attacker;
 
-    // ── infra ─────────────────────────────────────────────────────────────────
     CoreHarness        internal core;
     MockUSDC           internal mock;
     MockParamsProvider internal params;
-    MockStrategy       internal legitimateStrat; // registered, for the control test
+    MockStrategy       internal legitimateStrat;
 
-    // ─────────────────────────────────────────────────────────────────────────
     function setUp() public {
+        owner    = address(this); // test contract is the vault owner
+        guardian = makeAddr("guardian");
         attacker = makeAddr("attacker");
 
-        // 1. Etch MockUSDC at the canonical USDC address
         mock = new MockUSDC();
         vm.etch(USDC_UNDERLYING, address(mock).code);
 
-        // 2. Deploy vault with all modules wired as ROLE_PUBLIC (test harness)
         params = new MockParamsProvider();
         core   = new CoreHarness(
             IERC20Metadata(USDC_UNDERLYING),
             "USDC Agg",
             "agUSDC",
-            address(this), // owner
-            address(this), // feeCollector / treasury
+            owner,
+            owner,
             address(params)
         );
 
-        // 3. CoreHarness auto-installs MockBufferManagerForTests with a zero
-        //    BufferConfig:
-        //      opsReserveTargetBps = 0  →  no mandatory reserve
-        //      maxWarmBps          = 0  →  no warm headroom
-        //      ∴  surplus  =  hot − 0 − 0  =  entire vault hot balance  (100% drainable)
+        // Set a guardian so ROLE_OWNER_OR_GUARDIAN has two valid callers
+        core.setGuardianUnsafe(guardian);
 
-        // 4. Deploy a legitimate strategy and register it via the harness.
-        //    addStrategyUnsafe auto-deploys a StrategyRouter (owner = CoreHarness).
-        //    This gives _deployInternal a non-zero address(r) so the guard passes,
-        //    AND it gives the safe on-chain path a real strategy to route to.
         legitimateStrat = new MockStrategy(USDC_UNDERLYING);
         core.addStrategyUnsafe(address(legitimateStrat));
     }
 
-    // ── helpers ───────────────────────────────────────────────────────────────
     function _fundVault(uint256 amount) internal {
         MockUSDC(USDC_UNDERLYING).mint(address(core), amount);
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // TEST 1 — PRIMARY EXPLOIT (zero-config BufferManager → 100 % drainable)
+    // =========================================================================
+    // TEST 1 -- Layer 1: attacker blocked at the role gate (NotOwnerOrGuardian)
     //
-    // Any unprivileged EOA can drain the vault's entire hot balance by
-    // supplying their own address as plan[0].strat.
-    //
-    // Surplus derivation (zero-config BM, 1 M USDC vault):
-    //   nav             = 1,000,000 USDC   (hot = 1M, warm = 0, strat = 0)
-    //   reserveHot      = 0               (opsReserveTargetBps = 0)
-    //   maxWarm         = 0               (maxWarmBps = 0)
-    //   warmHeadroom    = 0
-    //   surplus         = 1M − 0 − 0  =  1,000,000 USDC  ← 100 % of vault
-    // ═════════════════════════════════════════════════════════════════════════
-    function test_poc_attacker_drains_full_vault_zero_config() public {
+    // deployToStrategiesWithPlan is now ROLE_OWNER_OR_GUARDIAN. A random EOA
+    // never reaches the strategy-validation logic -- CoreVault's dispatcher
+    // rejects the call before delegating to the module.
+    // =========================================================================
+    function test_fix_layer1_attacker_blocked_by_role_gate_zero_config() public {
         _fundVault(ONE_MILLION_USDC);
 
-        uint256 vaultBefore    = IERC20(USDC_UNDERLYING).balanceOf(address(core));
-        uint256 attackerBefore = IERC20(USDC_UNDERLYING).balanceOf(attacker);
+        uint256 vaultBefore = IERC20(USDC_UNDERLYING).balanceOf(address(core));
 
-        // Build malicious plan: one leg, dest = attacker EOA.
-        // _deployInternal only checks planTotal <= surplus — no address validation.
         IStrategyRouter.Allocation[] memory plan = new IStrategyRouter.Allocation[](1);
         plan[0] = IStrategyRouter.Allocation({
-            strat:                   attacker,        // ← arbitrary, unregistered address
+            strat:                   attacker,
             amount:                  ONE_MILLION_USDC,
             fundsAlreadyTransferred: false
         });
 
-        // Anyone can invoke this — ROLE_PUBLIC, no ACL check.
+        // Layer 1: role gate fires before strategy validation
         vm.prank(attacker);
+        vm.expectRevert(CoreVault.NotOwnerOrGuardian.selector);
         LiquidityOpsModule(address(core)).deployToStrategiesWithPlan(
             plan,
             ONE_MILLION_USDC
         );
 
-        uint256 vaultAfter    = IERC20(USDC_UNDERLYING).balanceOf(address(core));
-        uint256 attackerAfter = IERC20(USDC_UNDERLYING).balanceOf(attacker);
-
         assertEq(
-            attackerAfter - attackerBefore,
-            ONE_MILLION_USDC,
-            "CRITICAL: attacker received the entire vault balance"
-        );
-        assertEq(
-            vaultBefore - vaultAfter,
-            ONE_MILLION_USDC,
-            "CRITICAL: vault was fully drained"
+            IERC20(USDC_UNDERLYING).balanceOf(address(core)),
+            vaultBefore,
+            "FIX L1: vault fully preserved -- role gate blocked the drain"
         );
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // TEST 2 — PARTIAL DRAIN (production-realistic BufferManager config)
-    //
-    // Even with sane production parameters the exploit is viable at scale.
-    //
-    // Config:
-    //   opsReserveTargetBps = 1000  (10 % reserve  → floor $100 k on $1 M vault)
-    //   maxWarmBps          = 2000  (20 % max warm  → cap  $200 k on $1 M vault)
-    //
-    // Surplus derivation (1 M vault, warm = 0):
-    //   reserveHot      = 1M × 10%  = 100,000 USDC
-    //   maxWarm         = 1M × 20%  = 200,000 USDC
-    //   warmHeadroom    = 200,000 USDC
-    //   excessAfterRes. = 1M − 100k = 900,000 USDC
-    //   toWarm          = min(900k, 200k) = 200,000 USDC
-    //   surplus         = 900k − 200k   = 700,000 USDC  ← 70 % drained
-    // ═════════════════════════════════════════════════════════════════════════
-    function test_poc_attacker_drains_700k_with_realistic_config() public {
-        // Replace the default zero-config BM with one that has realistic params
+    // =========================================================================
+    // TEST 2 -- Layer 1: attacker also blocked with realistic BufferManager config
+    // =========================================================================
+    function test_fix_layer1_attacker_blocked_realistic_config() public {
         MockBufferManagerForTests realisticBm =
             new MockBufferManagerForTests(address(core));
 
         IBufferManager.BufferConfig memory cfg;
-        cfg.opsReserveTargetBps = 1000; // 10 % ops reserve
-        cfg.maxWarmBps          = 2000; // 20 % max warm
-        // asset left as address(0) so setBufferManagerUnsafe skips the mismatch guard
+        cfg.opsReserveTargetBps = 1000;
+        cfg.maxWarmBps          = 2000;
         realisticBm.setBufferConfig(cfg);
         core.setBufferManagerUnsafe(address(realisticBm));
 
         _fundVault(ONE_MILLION_USDC);
-
-        uint256 expectedSurplus = 700_000e6; // 70 % of vault
-
-        uint256 vaultBefore    = IERC20(USDC_UNDERLYING).balanceOf(address(core));
-        uint256 attackerBefore = IERC20(USDC_UNDERLYING).balanceOf(attacker);
+        uint256 vaultBefore = IERC20(USDC_UNDERLYING).balanceOf(address(core));
 
         IStrategyRouter.Allocation[] memory plan = new IStrategyRouter.Allocation[](1);
         plan[0] = IStrategyRouter.Allocation({
             strat:                   attacker,
-            amount:                  expectedSurplus,
+            amount:                  700_000e6,
             fundsAlreadyTransferred: false
         });
 
         vm.prank(attacker);
+        vm.expectRevert(CoreVault.NotOwnerOrGuardian.selector);
         LiquidityOpsModule(address(core)).deployToStrategiesWithPlan(
             plan,
-            expectedSurplus
+            700_000e6
         );
 
-        uint256 vaultAfter    = IERC20(USDC_UNDERLYING).balanceOf(address(core));
-        uint256 attackerAfter = IERC20(USDC_UNDERLYING).balanceOf(attacker);
-
         assertEq(
-            attackerAfter - attackerBefore,
-            expectedSurplus,
-            "CRITICAL: attacker drained 700,000 USDC (70%) from a 1M vault"
-        );
-        assertEq(
-            vaultBefore - vaultAfter,
-            expectedSurplus,
-            "Vault lost 70 % of its assets"
+            IERC20(USDC_UNDERLYING).balanceOf(address(core)),
+            vaultBefore,
+            "FIX L1: vault preserved -- role gate blocked 70% drain attempt"
         );
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // TEST 3 — CONTROL: safe on-chain path cannot be weaponised
+    // =========================================================================
+    // TEST 3 -- Control: safe on-chain path (deployToStrategies) stays ROLE_PUBLIC
     //
-    // `deployToStrategies` (no external plan) uses r.planDeposit() which only
-    // returns registered+enabled strategies.  The attacker calling this variant
-    // cannot redirect funds to themselves: funds flow only to legitimateStrat.
-    //
-    // This demonstrates the asymmetry — the vulnerability is specific to the
-    // external-plan path, not to the function's access level per se.
-    // ═════════════════════════════════════════════════════════════════════════
+    // The automatic path uses r.planDeposit() -- the caller has zero influence
+    // over fund routing. Keeping it permissionless is correct and unaffected.
+    // =========================================================================
     function test_control_safe_path_routes_to_registered_strategy_only() public {
         _fundVault(ONE_MILLION_USDC);
 
-        uint256 stratBefore   = IERC20(USDC_UNDERLYING).balanceOf(address(legitimateStrat));
+        uint256 stratBefore    = IERC20(USDC_UNDERLYING).balanceOf(address(legitimateStrat));
         uint256 attackerBefore = IERC20(USDC_UNDERLYING).balanceOf(attacker);
 
-        // Attacker calls the on-chain path hoping to influence routing — they cannot.
+        // Attacker can still call the auto-plan path -- no influence over routing
         vm.prank(attacker);
         LiquidityOpsModule(address(core)).deployToStrategies(ONE_MILLION_USDC);
 
-        uint256 attackerAfter = IERC20(USDC_UNDERLYING).balanceOf(attacker);
-        uint256 stratAfter    = IERC20(USDC_UNDERLYING).balanceOf(address(legitimateStrat));
-
-        // Attacker receives nothing
         assertEq(
-            attackerAfter - attackerBefore,
-            0,
-            "On-chain path must never transfer to an unregistered caller"
+            IERC20(USDC_UNDERLYING).balanceOf(attacker),
+            attackerBefore,
+            "Auto-plan path never transfers to the caller"
+        );
+        assertGt(
+            IERC20(USDC_UNDERLYING).balanceOf(address(legitimateStrat)),
+            stratBefore,
+            "Auto-plan path routed to the registered strategy as expected"
+        );
+    }
+
+    // =========================================================================
+    // TEST 4 -- Layer 2: owner supplying an unregistered strategy is also blocked
+    //
+    // Even after passing the role gate, the strategy-address validation (Layer 2)
+    // prevents the owner/guardian from routing funds to an arbitrary address.
+    // This defends against a compromised or malicious owner key.
+    // =========================================================================
+    function test_fix_layer2_owner_blocked_for_unregistered_strategy() public {
+        _fundVault(ONE_MILLION_USDC);
+        uint256 vaultBefore = IERC20(USDC_UNDERLYING).balanceOf(address(core));
+
+        address arbitraryAddr = makeAddr("arbitraryAddr");
+
+        IStrategyRouter.Allocation[] memory plan = new IStrategyRouter.Allocation[](1);
+        plan[0] = IStrategyRouter.Allocation({
+            strat:                   arbitraryAddr,
+            amount:                  ONE_MILLION_USDC,
+            fundsAlreadyTransferred: false
+        });
+
+        // Owner passes the role gate but hits Layer 2 (strategy validation)
+        vm.expectRevert(
+            abi.encodeWithSelector(LiquidityOpsModule.UnregisteredStrategy.selector, arbitraryAddr)
+        );
+        LiquidityOpsModule(address(core)).deployToStrategiesWithPlan(
+            plan,
+            ONE_MILLION_USDC
         );
 
-        // Funds flowed to the legitimately registered strategy
+        assertEq(
+            IERC20(USDC_UNDERLYING).balanceOf(address(core)),
+            vaultBefore,
+            "FIX L2: vault preserved -- strategy validation blocked owner's unregistered route"
+        );
+    }
+
+    // =========================================================================
+    // TEST 5 -- Positive path: owner with a registered strategy succeeds
+    //
+    // Confirms the fix does not break the intended use case. Owner builds a plan
+    // pointing to legitimateStrat (registered + enabled) and it executes correctly.
+    // Guardian can do the same.
+    // =========================================================================
+    function test_fix_positive_owner_with_registered_strategy_succeeds() public {
+        _fundVault(ONE_MILLION_USDC);
+
+        uint256 deployAmount   = ONE_MILLION_USDC;
+        uint256 stratBefore    = IERC20(USDC_UNDERLYING).balanceOf(address(legitimateStrat));
+        uint256 attackerBefore = IERC20(USDC_UNDERLYING).balanceOf(attacker);
+
+        IStrategyRouter.Allocation[] memory plan = new IStrategyRouter.Allocation[](1);
+        plan[0] = IStrategyRouter.Allocation({
+            strat:                   address(legitimateStrat),
+            amount:                  deployAmount,
+            fundsAlreadyTransferred: false
+        });
+
+        // Owner (address(this)) calls -- passes both role gate and strategy validation
+        LiquidityOpsModule(address(core)).deployToStrategiesWithPlan(
+            plan,
+            deployAmount
+        );
+
+        assertEq(
+            IERC20(USDC_UNDERLYING).balanceOf(address(legitimateStrat)),
+            stratBefore + deployAmount,
+            "FIX: funds correctly routed to registered strategy by owner"
+        );
+        assertEq(
+            IERC20(USDC_UNDERLYING).balanceOf(attacker),
+            attackerBefore,
+            "FIX: attacker received nothing"
+        );
+    }
+
+    // =========================================================================
+    // TEST 6 -- Guardian can also call deployToStrategiesWithPlan
+    //
+    // ROLE_OWNER_OR_GUARDIAN allows the guardian (emergency multisig) to use
+    // this function for urgent operational adjustments.
+    // =========================================================================
+    function test_fix_guardian_can_also_call_deployWithPlan() public {
+        _fundVault(ONE_MILLION_USDC);
+
+        uint256 stratBefore = IERC20(USDC_UNDERLYING).balanceOf(address(legitimateStrat));
+
+        IStrategyRouter.Allocation[] memory plan = new IStrategyRouter.Allocation[](1);
+        plan[0] = IStrategyRouter.Allocation({
+            strat:                   address(legitimateStrat),
+            amount:                  ONE_MILLION_USDC,
+            fundsAlreadyTransferred: false
+        });
+
+        // Guardian passes the role gate
+        vm.prank(guardian);
+        LiquidityOpsModule(address(core)).deployToStrategiesWithPlan(
+            plan,
+            ONE_MILLION_USDC
+        );
+
         assertGt(
-            stratAfter - stratBefore,
-            0,
-            "On-chain path routed to the registered strategy as expected"
+            IERC20(USDC_UNDERLYING).balanceOf(address(legitimateStrat)),
+            stratBefore,
+            "Guardian can route funds to registered strategies via deployToStrategiesWithPlan"
         );
     }
 }

@@ -116,13 +116,15 @@ contract CoreHarness is CoreVault {
         _setModuleUnsafe(bytes4(keccak256("redeem(uint256,address,address,uint256)")), address(erc4626Module), ROLE_PUBLIC);
         _setModuleUnsafe(ERC4626Module.forceWithdrawAll.selector, address(erc4626Module), ROLE_PUBLIC);
 
-        // Wire up LiquidityOpsModule selectors (PUBLIC)
+        // Wire up LiquidityOpsModule selectors
+        // deployToStrategiesWithPlan is ROLE_OWNER_OR_GUARDIAN: caller-supplied plans
+        // control allocation across strategies and must not be permissionless.
         _setModuleUnsafe(LiquidityOpsModule.canDeploy.selector, address(liquidityOpsModule), ROLE_PUBLIC);
         _setModuleUnsafe(LiquidityOpsModule.deployToStrategies.selector, address(liquidityOpsModule), ROLE_PUBLIC);
         _setModuleUnsafe(
             LiquidityOpsModule.deployToStrategiesWithPlan.selector,
             address(liquidityOpsModule),
-            ROLE_PUBLIC
+            ROLE_OWNER_OR_GUARDIAN
         );
         _setModuleUnsafe(LiquidityOpsModule.realizeForQueue.selector, address(liquidityOpsModule), ROLE_PUBLIC);
         _setModuleUnsafe(
@@ -205,6 +207,10 @@ contract CoreHarness is CoreVault {
 
     function setStrategyRouterUnsafe(address r) external {
         CoreStorage.layout().router = IStrategyRouter(r);
+    }
+
+    function setGuardianUnsafe(address g) external {
+        CoreStorage.layout().guardian = g;
     }
 
     // ---- Ops reserve params (for tests expectations) ----
