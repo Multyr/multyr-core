@@ -27,7 +27,7 @@ interface IForceWithdrawAll {
 }
 
 interface IDepositFor {
-    function depositFor(uint256 assets, address receiver, address payer) external returns (uint256);
+    function depositFor(uint256 assets, address receiver) external returns (uint256);
 }
 
 /// @title ExitEngine Stress Test - Multi-User 300M TVL
@@ -108,12 +108,12 @@ contract ExitEngine_StressTest is Test {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // HELPER: depositFor (DepositRouter/Permit2 style - payer != receiver)
+    // HELPER: depositFor (DepositRouter style - payer = msg.sender, receiver can differ)
     // ═══════════════════════════════════════════════════════════════════════════
 
     function _depositFor(address payer, address receiver, uint256 amount) internal {
         vm.prank(payer);
-        IDepositFor(address(vault)).depositFor(amount, receiver, payer);
+        IDepositFor(address(vault)).depositFor(amount, receiver);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

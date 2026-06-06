@@ -4,120 +4,132 @@ pragma solidity ^0.8.24;
 import { BaseVaultTest } from "../../helpers/BaseVaultTest.t.sol";
 
 /// @title CoreVault_DepositFor
-/// @notice Unit tests for depositFor(assets, receiver, payer) function
-/// @dev Tests payer-model deposits where assets come from one address and shares go to another
+/// @notice Unit tests for depositFor(assets, receiver) -- 2-arg router model.
+///
+/// msg.sender is always the payer. Routers pull user tokens to themselves
+/// first (via Permit2 or ERC20 approve-to-router), then call
+/// depositFor(amount, user) so the router is the token source.
+/// This eliminates the unauthorized-payer attack from the 3-arg form.
 contract CoreVault_DepositFor is BaseVaultTest {
     address internal alice = address(0xA11CE);
-    address internal bob = address(0xB0B);
+    address internal bob   = address(0xB0B);
 
-    /// @notice Test depositFor when payer and receiver are the same address
-    function test_depositFor_samePayerAndReceiver() public {
+    /// @notice Caller deposits for themselves (payer == receiver == msg.sender)
+    function test_depositFor_callerDepositsForSelf() public {
         uint256 amt = 10_000e6;
-
-        // Transfer USDC to user
         require(assetToken.transfer(user, amt), "transfer fail");
 
         vm.startPrank(user);
-        // User approves vault to pull from themselves
         assetToken.approve(vaultAddr, amt);
 
         uint256 expectedShares = vault.previewDeposit(amt);
-        uint256 userSharesBefore = IVaultLike(vaultAddr).balanceOf(user);
+        uint256 sharesBefore   = IVaultLike(vaultAddr).balanceOf(user);
 
-        // User calls depositFor with themselves as both payer and receiver
-        uint256 shares = IVaultLike(vaultAddr).depositFor(amt, user, user);
+        // user is both msg.sender (payer) and receiver
+        uint256 shares = IVaultLike(vaultAddr).depositFor(amt, user);
 
-        uint256 userSharesAfter = IVaultLike(vaultAddr).balanceOf(user);
         vm.stopPrank();
 
-        uint256 minted = userSharesAfter - userSharesBefore;
-        assertEq(minted, expectedShares, "shares mismatch preview");
+        assertEq(IVaultLike(vaultAddr).balanceOf(user) - sharesBefore, expectedShares, "shares mismatch");
         assertEq(shares, expectedShares, "return value mismatch");
     }
 
-    /// @notice Test depositFor when payer (alice) is different from receiver (bob)
-    function test_depositFor_differentPayerAndReceiver() public {
+    /// @notice Router pattern: caller (router/payer) deposits for a different receiver
+    ///
+    /// Simulates the DepositRouter flow:
+    ///   1. alice has USDC and approves the vault (simulates router holding tokens)
+    ///   2. alice calls depositFor(amt, bob) -- alice is msg.sender (payer), bob gets shares
+    function test_depositFor_routerDepositsForReceiver() public {
         uint256 amt = 10_000e6;
-
-        // Transfer USDC to alice (the payer)
         require(assetToken.transfer(alice, amt), "transfer fail");
 
-        // Alice approves vault
         vm.prank(alice);
         assetToken.approve(vaultAddr, amt);
 
-        uint256 expectedShares = vault.previewDeposit(amt);
+        uint256 expectedShares  = vault.previewDeposit(amt);
         uint256 bobSharesBefore = IVaultLike(vaultAddr).balanceOf(bob);
-        uint256 aliceAssetsBefore = assetToken.balanceOf(alice);
+        uint256 aliceBefore     = assetToken.balanceOf(alice);
 
-        // Anyone can call depositFor (msg.sender doesn't matter for authorization)
-        // Assets come from alice, shares go to bob
-        uint256 shares = IVaultLike(vaultAddr).depositFor(amt, bob, alice);
+        // alice = msg.sender = payer; bob = receiver
+        vm.prank(alice);
+        uint256 shares = IVaultLike(vaultAddr).depositFor(amt, bob);
 
-        uint256 bobSharesAfter = IVaultLike(vaultAddr).balanceOf(bob);
-        uint256 aliceAssetsAfter = assetToken.balanceOf(alice);
-
-        // Bob received shares
-        uint256 minted = bobSharesAfter - bobSharesBefore;
-        assertEq(minted, expectedShares, "bob shares mismatch");
+        // bob received shares, alice paid tokens
+        assertEq(IVaultLike(vaultAddr).balanceOf(bob) - bobSharesBefore, expectedShares, "bob shares mismatch");
         assertEq(shares, expectedShares, "return value mismatch");
-
-        // Alice's assets were pulled
-        assertEq(aliceAssetsBefore - aliceAssetsAfter, amt, "alice assets not pulled");
-
-        // Alice should have 0 shares (she's just the payer)
+        assertEq(aliceBefore - assetToken.balanceOf(alice), amt, "alice tokens not pulled");
         assertEq(IVaultLike(vaultAddr).balanceOf(alice), 0, "alice should have no shares");
     }
 
-    /// @notice Test depositFor reverts when payer has insufficient allowance
+    /// @notice Caller without vault approval reverts
     function test_depositFor_revertsOnInsufficientAllowance() public {
         uint256 amt = 10_000e6;
-
-        // Transfer USDC to alice but don't approve vault
         require(assetToken.transfer(alice, amt), "transfer fail");
+        // alice has tokens but no vault approval
 
-        // Attempt depositFor without approval - should revert
+        vm.prank(alice);
         vm.expectRevert();
-        IVaultLike(vaultAddr).depositFor(amt, bob, alice);
+        IVaultLike(vaultAddr).depositFor(amt, bob);
     }
 
-    /// @notice Test depositFor reverts when payer has insufficient balance
+    /// @notice Caller without balance reverts
     function test_depositFor_revertsOnInsufficientBalance() public {
         uint256 amt = 10_000e6;
-
-        // Alice has no balance but approves
+        // alice has no balance but approves
         vm.prank(alice);
         assetToken.approve(vaultAddr, amt);
 
-        // Attempt depositFor without balance - should revert
+        vm.prank(alice);
         vm.expectRevert();
-        IVaultLike(vaultAddr).depositFor(amt, bob, alice);
+        IVaultLike(vaultAddr).depositFor(amt, bob);
     }
 
-    /// @notice Test depositFor reverts on zero amount
+    /// @notice Zero amount reverts
     function test_depositFor_revertsOnZeroAmount() public {
+        vm.prank(user);
         vm.expectRevert();
-        IVaultLike(vaultAddr).depositFor(0, user, user);
+        IVaultLike(vaultAddr).depositFor(0, user);
     }
 
-    /// @notice Test depositFor reverts on zero receiver
+    /// @notice Zero receiver reverts
     function test_depositFor_revertsOnZeroReceiver() public {
         require(assetToken.transfer(user, 1000e6), "transfer fail");
         vm.prank(user);
         assetToken.approve(vaultAddr, 1000e6);
 
+        vm.prank(user);
         vm.expectRevert();
-        IVaultLike(vaultAddr).depositFor(1000e6, address(0), user);
+        IVaultLike(vaultAddr).depositFor(1000e6, address(0));
     }
 
-    /// @notice Test depositFor reverts on zero payer
-    function test_depositFor_revertsOnZeroPayer() public {
-        vm.expectRevert();
-        IVaultLike(vaultAddr).depositFor(1000e6, user, address(0));
+    /// @notice Arbitrary caller cannot use a victim's approval to deposit on their behalf
+    ///
+    /// In the old 3-arg form: attacker called depositFor(amount, attacker, victim).
+    /// In the new 2-arg form: msg.sender is always the payer, so the attacker
+    /// would have to supply their OWN tokens -- and they have none.
+    function test_depositFor_cannotStealVictimApproval() public {
+        address victim   = makeAddr("victim");
+        address attacker = makeAddr("attacker");
+        uint256 amt = 1_000_000e6;
+
+        // Victim has USDC and approves the vault (standard UX)
+        assetToken.transfer(victim, amt);
+        vm.prank(victim);
+        assetToken.approve(vaultAddr, type(uint256).max);
+
+        // Attacker has no USDC; calling depositFor with attacker as receiver now
+        // pulls from msg.sender (attacker), not from victim
+        vm.prank(attacker);
+        vm.expectRevert(); // reverts: attacker has no USDC
+        IVaultLike(vaultAddr).depositFor(amt, attacker);
+
+        // Victim's USDC is untouched
+        assertEq(assetToken.balanceOf(victim), amt, "FIX: victim USDC unchanged");
+        assertEq(IVaultLike(vaultAddr).balanceOf(attacker), 0, "FIX: attacker received no shares");
     }
 }
 
 interface IVaultLike {
-    function depositFor(uint256 assets, address receiver, address payer) external returns (uint256);
+    function depositFor(uint256 assets, address receiver) external returns (uint256);
     function balanceOf(address) external view returns (uint256);
 }

@@ -151,7 +151,7 @@ contract SelectorRegistry {
 
         // Standard ERC4626
         if (selector == 0x6e553f65) return ROLE_PUBLIC; // deposit(uint256,address)
-        if (selector == 0xe63db82d) return ROLE_PUBLIC; // depositFor(uint256,address,address)
+        if (selector == bytes4(keccak256("depositFor(uint256,address)"))) return ROLE_PUBLIC; // depositFor(uint256,address)
         if (selector == 0x94bf804d) return ROLE_PUBLIC; // mint(uint256,address)
         if (selector == 0xb460af94) return ROLE_PUBLIC; // withdraw(uint256,address,address)
         if (selector == 0xba087652) return ROLE_PUBLIC; // redeem(uint256,address,address)

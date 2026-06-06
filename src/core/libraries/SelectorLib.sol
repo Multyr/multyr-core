@@ -137,7 +137,7 @@ library SelectorLib {
         selectors = new bytes4[](ERC4626_MODULE_SELECTORS);
         // Standard ERC4626 functions (explicit keccak256 due to overloads)
         selectors[0] = bytes4(keccak256("deposit(uint256,address)")); // 0x6e553f65
-        selectors[1] = bytes4(keccak256("depositFor(uint256,address,address)")); // depositFor
+        selectors[1] = bytes4(keccak256("depositFor(uint256,address)")); // depositFor
         selectors[2] = bytes4(keccak256("mint(uint256,address)")); // 0x94bf804d
         selectors[3] = bytes4(keccak256("withdraw(uint256,address,address)")); // 0xb460af94
         selectors[4] = bytes4(keccak256("redeem(uint256,address,address)")); // 0xba087652

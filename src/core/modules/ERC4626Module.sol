@@ -82,14 +82,18 @@ contract ERC4626Module {
         return _depositInternal(assets, receiver, msg.sender);
     }
 
-    /// @notice Deposit assets on behalf of another user (payer model)
-    function depositFor(uint256 assets, address receiver, address payer)
+    /// @notice Deposit assets on behalf of another user (router model)
+    /// @dev msg.sender is always the payer. Routers (e.g. DepositRouter) pull
+    ///      user tokens to themselves first, then call depositFor(amount, user)
+    ///      so the router is both msg.sender and the token source. This eliminates
+    ///      the unauthorized-payer attack where any caller could drain any address
+    ///      with a standing vault approval.
+    function depositFor(uint256 assets, address receiver)
         external
         returns (uint256 shares)
     {
         if (receiver == address(0)) revert ZeroAddress();
-        if (payer == address(0)) revert ZeroAddress();
-        return _depositInternal(assets, receiver, payer);
+        return _depositInternal(assets, receiver, msg.sender);
     }
 
     /// @notice Mint exact shares by depositing assets

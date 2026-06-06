@@ -107,7 +107,7 @@ contract CoreHarness is CoreVault {
         // Use raw selectors for overloaded functions
         _setModuleUnsafe(bytes4(keccak256("deposit(uint256,address)")), address(erc4626Module), ROLE_PUBLIC);
         _setModuleUnsafe(bytes4(keccak256("deposit(uint256,address,uint256)")), address(erc4626Module), ROLE_PUBLIC);
-        _setModuleUnsafe(bytes4(keccak256("depositFor(uint256,address,address)")), address(erc4626Module), ROLE_PUBLIC);
+        _setModuleUnsafe(bytes4(keccak256("depositFor(uint256,address)")), address(erc4626Module), ROLE_PUBLIC);
         _setModuleUnsafe(bytes4(keccak256("mint(uint256,address)")), address(erc4626Module), ROLE_PUBLIC);
         _setModuleUnsafe(bytes4(keccak256("mint(uint256,address,uint256)")), address(erc4626Module), ROLE_PUBLIC);
         _setModuleUnsafe(bytes4(keccak256("withdraw(uint256,address,address)")), address(erc4626Module), ROLE_PUBLIC);
