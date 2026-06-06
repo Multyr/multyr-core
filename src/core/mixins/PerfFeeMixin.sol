@@ -83,11 +83,20 @@ abstract contract PerfFeeMixin {
         uint256 pps = _pps();
         uint256 old = p.init ? p.hwm : FixedPoint.WAD;
         if (pps <= old) {
-            perf.hwm = pps;
+            // HWM is monotonically non-decreasing. Write old back so the storage
+            // slot is initialised on the very first crystallise (!p.init means
+            // old = WAD by default but was never persisted).
+            perf.hwm = old;
             perf.init = true;
             perf.last = uint64(block.timestamp);
             emit Events.Crystallized(old, pps, 0);
-            return (pps, 0);
+            return (old, 0);
+        }
+        // Interval guard: block fee extraction within the minimum crystallise interval.
+        // Guard is skipped on the very first crystallise (!p.init).
+        if (p.init && p.minInterval > 0 &&
+            block.timestamp < uint256(p.last) + uint256(p.minInterval)) {
+            return (old, 0);
         }
         uint256 total = _totalAssets();
         uint256 oldAssets = FixedPoint.mulWadDown(old, ts);

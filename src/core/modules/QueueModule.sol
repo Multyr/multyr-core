@@ -776,10 +776,21 @@ contract QueueModule {
         uint256 old = f.highWaterMark == 0 ? FixedPoint.WAD : f.highWaterMark;
 
         if (pps <= old) {
-            f.highWaterMark = pps;
+            // HWM is monotonically non-decreasing. Write old back so the storage
+            // slot is initialised on the very first crystallise (highWaterMark == 0
+            // means "use WAD as default" but the value is never persisted until here).
+            f.highWaterMark = old;
             f.lastCrystallize = uint64(block.timestamp);
             emit Events.Crystallized(old, pps, 0);
-            return (pps, 0);
+            return (old, 0);
+        }
+
+        // Interval guard: block fee extraction within the minimum crystallise interval.
+        // Guard is skipped on the very first crystallise (highWaterMark == 0).
+        uint64 minInterval = f.minCrystallizeInterval;
+        if (f.highWaterMark != 0 && minInterval > 0 &&
+            block.timestamp < uint256(f.lastCrystallize) + uint256(minInterval)) {
+            return (old, 0);
         }
 
         uint256 total = _totalAssets();

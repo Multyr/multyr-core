@@ -181,7 +181,7 @@ contract CoreVaultPerfFeeMixinTest is Test {
     }
 
     /// @notice Test 3: Verify crystallization when PPS <= HWM updates HWM downward without minting
-    function test_perf_crystallize_when_pps_below_hwm_updates_hwm_down() public {
+    function test_perf_crystallize_when_pps_below_hwm_preserves_hwm() public {
         // Deposit
         vm.startPrank(user);
         usdc.approve(address(vault), 1_000e6);
