@@ -108,14 +108,3 @@ Recommended fix:
 - verify `selectorRegistry`, `feeCollector`, `globalConfig`, `router`, buffer,
   health registry, incentives, rewards payout manager, and guardian/vetoer in
   one place
-
-### 6. Document DepositRouter In Production Deployment
-
-The core repo now has the safe payer model and mock tests. Production periphery
-should include a concrete DepositRouter with Permit2 and referral binding.
-
-Recommended fix:
-
-- keep the router in periphery scope
-- test both Permit2 SignatureTransfer and AllowanceTransfer modes end-to-end
-- ensure the router never calls a vault function that accepts an arbitrary payer
