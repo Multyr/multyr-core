@@ -8,6 +8,8 @@ Final review materials for the Multyr Core sprint.
   scenario, fix/resolution, and residual risk.
 - [Architecture understanding](architecture-understanding.md): complete system
   walkthrough, module boundaries, security invariants, and review order.
+- [Complete understanding](complete-understanding.md): deeper design rationale
+  for routing, storage, governance, liquidity tiers, sealer, and periphery.
 
 ## Nice To Have
 
