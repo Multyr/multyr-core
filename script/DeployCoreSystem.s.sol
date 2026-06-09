@@ -611,7 +611,7 @@ contract DeployCoreSystem is Script {
         console.log("  ERC4626Module selectors:", erc4626Sels.length);
 
         bytes4[] memory liquidityOpsSels = SelectorLib.getLiquidityOpsModuleSelectors();
-        _setModulesBatch(result.vault, liquidityOpsSels, address(result.liquidityOpsModule), SelectorLib.ROLE_PUBLIC);
+        _setLiquidityOpsModulesBatch(result.vault, liquidityOpsSels, address(result.liquidityOpsModule));
         console.log("  LiquidityOpsModule selectors:", liquidityOpsSels.length);
 
         result.vault.authorizeModule(address(result.erc4626Module), true);
@@ -636,6 +636,23 @@ contract DeployCoreSystem is Script {
         for (uint256 i; i < len; i++) {
             modules[i] = module;
             roles[i] = role;
+        }
+        vault.setModulesBatch(selectors, modules, roles);
+    }
+
+    function _setLiquidityOpsModulesBatch(
+        CoreVault vault,
+        bytes4[] memory selectors,
+        address module
+    ) internal {
+        uint256 len = selectors.length;
+        address[] memory modules = new address[](len);
+        uint8[] memory roles = new uint8[](len);
+        for (uint256 i; i < len; i++) {
+            modules[i] = module;
+            roles[i] = selectors[i] == LiquidityOpsModule.deployToStrategiesWithPlan.selector
+                ? SelectorLib.ROLE_OWNER_OR_GUARDIAN
+                : SelectorLib.ROLE_PUBLIC;
         }
         vault.setModulesBatch(selectors, modules, roles);
     }

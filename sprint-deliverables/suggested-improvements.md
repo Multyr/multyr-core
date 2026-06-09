@@ -1,37 +1,121 @@
 # Suggested Improvements
 
-## VaultFactory
+This file separates completed sprint fixes from remaining hardening items.
 
-### Changes Done
+## Completed During Sprint
 
-- `registerVault` now decodes `DeployTypes.VaultRegistrationConfig` instead of the full deployment config, keeping registry metadata separate from deployment wiring.
-- Registry storage now uses `deployedVaults` plus `vaultIndexPlusOne`, giving enumerable reads, constant-time membership checks, duplicate protection, and swap-and-pop removal.
-- The `index + 1` pattern keeps `0` available as the "not registered" sentinel while still supporting vaults stored at array index `0`.
+### DepositFor Unauthorized Payer
 
-### Open Improvements
+- Replaced the unsafe three-argument `depositFor(assets, receiver, payer)` model
+  with `depositFor(uint256 assets, address receiver)`.
+- The payer is now always `msg.sender`.
+- DepositRouter/Permit2 must pull user tokens into the router first, then call
+  `depositFor(amount, user)` or `deposit(amount, user)`.
+- Covered by `test/sprint-test/DepositFor_UnauthorizedPayer_POC.t.sol`.
 
-- **Rename to `VaultRegistry`**: the contract no longer deploys vaults; it registers, removes, deprecates, and emits status events for off-chain deployments.
-- **Use transferable ownership**: replace `immutable owner` with `Ownable2Step` so registry control can move safely between governance, timelocks, or multisigs.
-- **Gate lifecycle/status calls**: make `deprecateVault` and `setVaultStatus` revert with `VaultNotFound` when `vaultIndexPlusOne[vault] == 0`.
-- **Choose one creation event**: `registerVault` emits `VaultDeployed`, `Events.VaultCreated`, and `Events.VaultProductionReady`; keep duplicates only if the subgraph still needs them.
-- **Prefer typed registration input**: replace `bytes initData` with `VaultRegistrationConfig calldata` or explicit args unless encoded bytes are required for tooling compatibility.
-- **Validate metadata fields**: explicitly reject zero `cfg.asset`, `cfg.owner`, and `cfg.feeCollector`.
-- **Add pagination if needed**: use a paginated getter such as `getDeployedVaults(uint256 start, uint256 limit)` if the registry is expected to grow large.
+### DeployToStrategiesWithPlan Drain
 
-## ERC4626Module
+- Changed `deployToStrategiesWithPlan` from `ROLE_PUBLIC` to
+  `ROLE_OWNER_OR_GUARDIAN`.
+- Added validation that every external plan destination is an enabled strategy
+  before any USDC transfer occurs.
+- Kept the auto-planned `deployToStrategies(maxAmount)` path public because the
+  caller does not control destination addresses.
+- Covered by `test/sprint-test/DeployToStrategiesWithPlan_Drain.t.sol`.
 
-### Open Improvements
+### High-Water Mark Drawdown
 
-- **Authorize `depositFor` payers**: require `msg.sender == payer`, consume a dedicated payer approval, or use a signed permit before pulling assets from a third party. An ERC-20 allowance to the vault should not allow an arbitrary caller to redirect the payer's funds into shares owned by another receiver. See `DepositFor_UnauthorizedPayer_POC.t.sol`.
-- **Protect `forceWithdrawAll` against unbounded shortfall**: add a `minAssetsOut` parameter or a separate exact/protected variant that reverts when best-effort liquidity extraction returns too little. If partial emergency exits remain supported, consider burning shares only for assets actually paid or preserving a residual claim for unpaid value. See `ForceWithdrawAll_SlippagePOC.t.sol`.
-- **Rename or clearly document `forceWithdrawAll`**: the function guarantees removal of the caller's share position, not delivery of the full calculated asset value. A name such as `emergencyExitBestEffort` would make the risk clearer to integrators.
-- **Run slippage checks after warm NAV refresh**: the slippage-protected `deposit` and `mint` overloads calculate their expected values before `_depositInternal` / `_mintInternal` can refresh stale warm NAV. If the refresh changes NAV, the actual shares or assets may violate the caller's `minShares` or `maxAssets` limit. Refresh first or validate the final computed result immediately before asset transfer.
-- **Align `mint` side effects with `deposit`**: `_depositInternal` notifies incentives and can trigger fixed-maturity funding auto-close, while `_mintInternal` does neither. Apply the same hooks to both entry paths, or explicitly document and test why exact-share minting should behave differently.
+- Preserved HWM during drawdowns instead of lowering it to depressed PPS.
+- Moved the `minCrystallizeInterval` guard inside `_crystallize`.
+- Prevented public `endEpochCrystallize` from charging fees before the minimum
+  interval has elapsed.
+- Covered by `test/sprint-test/HWM_Drawdown_POC.t.sol`.
 
-## SystemSealer
+### AdminModule Governance Bypasses
 
-### Open Improvements
+- Added `FLAG_COMPONENTS_TIMELOCKED` guard to `setEcosystem`.
+- Added pending-exists guards to `submitPerfParams`, `submitMinDelay`,
+  `submitBufferManager`, and `submitRouter`.
+- Covered by `test/sprint-test/AdminModule_GovernanceBypass_POC.t.sol`.
 
-- **Make `configHash` deterministic**: remove `block.timestamp`, add `computeConfigHash(config)`, and schedule `sealFinalState(precomputedHash)` with the same deterministic value. Include every `SealConfig` field in the hash.
-- **Strengthen dead-deposit verification**: check actual dead-share balance or a minimum seeded amount, not only `isDeadDepositDone()`.
-- **Verify live vault wiring**: confirm the config addresses match the addresses stored in `CoreVault`, including router, buffer manager, health registry, fee collector, selector registry, and other critical components.
+### SystemSealer Timestamp Hash
+
+- Added the single-call `SystemSealer.verifyAndSeal(config)` production path.
+- Added `CoreVault.sealBySealer(configHash)` so the sealer can record the hash
+  and set `FLAG_SYSTEM_SEALED` atomically.
+- Removed timestamp dependency from the review seal hash.
+- Covered by `test/sprint-test/SystemSealer_TimestampHash_POC.t.sol`.
+
+## Remaining Hardening Items
+
+### 1. Add Slippage Protection To forceWithdrawAll
+
+`forceWithdrawAll(address receiver)` still burns all caller shares and pays a
+best-effort amount. If strategy liquidity is frozen or partial, the user may
+receive materially less than `targetAssets`.
+
+Recommended fix:
+
+- add `forceWithdrawAll(address receiver, uint256 minAssetsOut)`, or
+- rename current behavior to `emergencyExitBestEffort`, then add an exact/protected
+  all-shares variant, or
+- burn shares only proportional to assets actually delivered and preserve a
+  residual claim for unpaid value.
+
+Status: open residual risk. See `ForceWithdrawAll_SlippagePOC.t.sol`.
+
+### 2. Tighten External Plan Validation
+
+The critical external-plan drain is fixed, but two small validation cleanups are
+worth adding:
+
+- reject zero-amount legs instead of silently skipping them
+- reject caller-supplied `fundsAlreadyTransferred == true` on external plans
+
+These make the external-plan API less ambiguous.
+
+### 3. Refresh Warm NAV Before Slippage Previews
+
+The slippage-protected `deposit` and `mint` overloads calculate expected
+shares/assets before `_depositInternal` or `_mintInternal` refreshes stale warm
+NAV.
+
+Recommended fix:
+
+- call the same warm-NAV refresh before previewing, or
+- re-check the final computed value immediately before transferring assets.
+
+### 4. Align mint Hooks With deposit
+
+`_depositInternal` notifies incentives and can trigger fixed-maturity auto-close.
+`_mintInternal` currently mirrors fee accounting but does not trigger all the
+same hooks.
+
+Recommended fix:
+
+- either add the same incentives/FM hooks to `_mintInternal`, or
+- document and test why exact-share minting intentionally differs.
+
+### 5. Strengthen SystemSealer Live Wiring Checks
+
+`SystemSealer` verifies ownership/governance of configured components. The next
+hardening step is to also assert that the configured component addresses exactly
+match the live addresses stored in the vault's ecosystem config.
+
+Recommended fix:
+
+- compare `IAdminModule(vault).getEcosystem()` against `SealConfig`
+- verify `selectorRegistry`, `feeCollector`, `globalConfig`, `router`, buffer,
+  health registry, incentives, rewards payout manager, and guardian/vetoer in
+  one place
+
+### 6. Document DepositRouter In Production Deployment
+
+The core repo now has the safe payer model and mock tests. Production periphery
+should include a concrete DepositRouter with Permit2 and referral binding.
+
+Recommended fix:
+
+- keep the router in periphery scope
+- test both Permit2 SignatureTransfer and AllowanceTransfer modes end-to-end
+- ensure the router never calls a vault function that accepts an arbitrary payer
