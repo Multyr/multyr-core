@@ -16,6 +16,7 @@ import { IStrategyRouter } from "../../interfaces/IStrategyRouter.sol";
 import { QueueLib } from "../libraries/QueueLib.sol";
 import { ExitEngineLib } from "../libraries/ExitEngineLib.sol";
 import { IIncentivesEngine } from "../../interfaces/IIncentivesEngine.sol";
+import { ICoreVault } from "../../interfaces/ICoreVault.sol";
 import {
     FixedMaturityStorage,
     _checkStandardExitAllowed, _checkSettlementAllowed
@@ -70,6 +71,15 @@ contract QueueModule {
         bool hitEarlyExit;         // true if scan stopped by bound, not by maxClaims
     }
 
+    /// @dev Bundles the cached totalAssets/totalSupply snapshot into a single
+    ///      memory-struct pointer (one stack slot) instead of two separate
+    ///      uint256 params -- _settleLoop is already a stack-tight, via-IR
+    ///      -sensitive function extracted specifically to avoid stack-too-deep.
+    struct NavSnapshot {
+        uint256 ta;
+        uint256 ts;
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════════
     // QUEUE MANAGEMENT (called via delegatecall)
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -111,8 +121,16 @@ contract QueueModule {
         // Check anti-spam
         _checkQueueAntiSpam(msg.sender);
 
+        // _canSettleInstant only fetches assetAddr lazily (once it actually
+        // reaches the liquidity check, after the cheaper lock/cap checks) and
+        // hands it back so the transfer below reuses it instead of a second
+        // _asset() external call. Ternary short-circuits: _canSettleInstant is
+        // not called at all when immediate == false.
+        (bool instantOk, address assetAddr) =
+            immediate ? _canSettleInstant(gross, wp, core) : (false, address(0));
+
         // Try INSTANT settlement if requested and conditions met
-        if (immediate && _canSettleInstant(gross, wp, core)) {
+        if (instantOk) {
             // Compute fee shares via ExitEngineLib (rounded UP)
             (uint256 feeShares, uint256 userShares) =
                 ExitEngineLib.computeFeeShares(shares, ExitEngineLib.ExitMode.INSTANT, f.fee);
@@ -132,7 +150,7 @@ contract QueueModule {
             _burn(msg.sender, userShares);
 
             // Transfer net assets to user
-            IERC20(_asset()).safeTransfer(msg.sender, netAssets);
+            IERC20(assetAddr).safeTransfer(msg.sender, netAssets);
 
             // Consume epoch cap (INSTANT only)
             ExitEngineLib.consumeEpochCap(core, gross);
@@ -400,7 +418,10 @@ contract QueueModule {
         }
 
         // ─── STEP C: Settle loop [head, scanWindowEnd) ───────────────
-        _settleLoop(pr.scanWindowEnd, pr.eligibleCount, wp.lockPeriod, hot, capRem, cachedTA, cachedTS);
+        _settleLoop(
+            pr.scanWindowEnd, pr.eligibleCount, wp.lockPeriod, hot, capRem,
+            NavSnapshot({ ta: cachedTA, ts: cachedTS })
+        );
     }
 
     /// @dev Inner settle loop, extracted to avoid stack-too-deep.
@@ -410,8 +431,7 @@ contract QueueModule {
         uint256 lockPeriod,
         uint256 hot,
         uint256 capRem,
-        uint256 cachedTA,
-        uint256 cachedTS
+        NavSnapshot memory nav
     ) internal {
         CoreStorage.Layout storage core = CoreStorage.layout();
         QueueStorage.Layout storage q = QueueStorage.layout();
@@ -445,7 +465,7 @@ contract QueueModule {
                 }
             }
 
-            uint256 gross = _convertToAssetsCached(c.shares, cachedTA, cachedTS);
+            uint256 gross = _convertToAssetsCached(c.shares, nav.ta, nav.ts);
             {
                 bool ok = c.immediate
                     ? (gross <= capRem)
@@ -481,7 +501,7 @@ contract QueueModule {
                 }
 
                 // CRITICAL: compute net BEFORE burn, using cached TA/TS snapshot.
-                uint256 net = _convertToAssetsCached(userShares, cachedTA, cachedTS);
+                uint256 net = _convertToAssetsCached(userShares, nav.ta, nav.ts);
                 _burn(address(this), userShares);
 
                 ps -= c.shares;
@@ -524,18 +544,22 @@ contract QueueModule {
     // INTERNAL: INSTANT SETTLEMENT CHECK
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    /// @dev Check if instant settlement is possible
+    /// @dev Check if instant settlement is possible. Returns the resolved
+    ///      asset address alongside the result so callers that proceed with
+    ///      settlement can reuse it instead of a second _asset() call --
+    ///      assetAddr is only fetched lazily, once the cheaper lock/cap checks
+    ///      have already passed, so failing fast still costs zero extra calls.
     function _canSettleInstant(
         uint256 grossAssets,
         IParamsProvider.WithdrawalParams memory wp,
         CoreStorage.Layout storage core
-    ) internal view returns (bool) {
+    ) internal view returns (bool ok, address assetAddr) {
         // Lock period check
         if (
             wp.lockPeriod > 0
                 && block.timestamp < uint256(core.lastDepositTs[msg.sender]) + wp.lockPeriod
         ) {
-            return false;
+            return (false, address(0));
         }
 
         // Epoch cap check via ExitEngineLib
@@ -543,13 +567,14 @@ contract QueueModule {
         uint256 capRemaining = ExitEngineLib.calculateCapRemaining(
             core, q, _totalAssets(), address(this)
         );
-        if (grossAssets > capRemaining) return false;
+        if (grossAssets > capRemaining) return (false, address(0));
 
         // Liquidity check
-        uint256 hot = IERC20(_asset()).balanceOf(address(this));
-        if (hot < grossAssets) return false;
+        assetAddr = _asset();
+        uint256 hot = IERC20(assetAddr).balanceOf(address(this));
+        if (hot < grossAssets) return (false, address(0));
 
-        return true;
+        return (true, assetAddr);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -671,25 +696,21 @@ contract QueueModule {
     // VAULT INTERFACE CALLS (delegatecall context → address(this) IS CoreVault)
     // ═══════════════════════════════════════════════════════════════════════════════
 
+    // NOTE: direct interface calls, not low-level staticcall/call +
+    // abi.encodeWithSignature. Same external-call semantics (delegatecall
+    // context means address(this) is still the vault), but the compiler
+    // resolves the selector at compile time and skips the manual bytes-memory
+    // encode/decode + require(success, "...") boilerplate on every call site.
     function _asset() internal view returns (address) {
-        (bool success, bytes memory data) =
-            address(this).staticcall(abi.encodeWithSignature("asset()"));
-        require(success, "asset call failed");
-        return abi.decode(data, (address));
+        return IERC4626(address(this)).asset();
     }
 
     function _totalAssets() internal view returns (uint256) {
-        (bool success, bytes memory data) =
-            address(this).staticcall(abi.encodeWithSignature("totalAssets()"));
-        require(success, "totalAssets call failed");
-        return abi.decode(data, (uint256));
+        return IERC4626(address(this)).totalAssets();
     }
 
     function _totalSupply() internal view returns (uint256) {
-        (bool success, bytes memory data) =
-            address(this).staticcall(abi.encodeWithSignature("totalSupply()"));
-        require(success, "totalSupply call failed");
-        return abi.decode(data, (uint256));
+        return IERC20(address(this)).totalSupply();
     }
 
     /// @dev Cached conversion: uses pre-computed totalAssets/totalSupply snapshot.
@@ -703,52 +724,29 @@ contract QueueModule {
     }
 
     function _convertToAssets(uint256 shares) internal view returns (uint256) {
-        (bool success, bytes memory data) = address(this).staticcall(
-            abi.encodeWithSignature("convertToAssets(uint256)", shares)
-        );
-        require(success, "convertToAssets call failed");
-        return abi.decode(data, (uint256));
+        return IERC4626(address(this)).convertToAssets(shares);
     }
 
     function _balanceOf(address account) internal view returns (uint256) {
-        (bool success, bytes memory data) = address(this).staticcall(
-            abi.encodeWithSignature("balanceOf(address)", account)
-        );
-        require(success, "balanceOf call failed");
-        return abi.decode(data, (uint256));
+        return IERC20(address(this)).balanceOf(account);
     }
 
     /// @dev Raw asset-to-share conversion WITHOUT deposit fee.
     ///      Used for perf fee minting and settle fee calculation.
     function _previewDeposit(uint256 assets) internal view returns (uint256) {
-        (bool success, bytes memory data) = address(this).staticcall(
-            abi.encodeWithSignature("convertToShares(uint256)", assets)
-        );
-        require(success, "convertToShares call failed");
-        return abi.decode(data, (uint256));
+        return IERC4626(address(this)).convertToShares(assets);
     }
 
     function _transferShares(address from, address to, uint256 amount) internal {
-        (bool success,) = address(this).call(
-            abi.encodeWithSignature(
-                "processorTransfer(address,address,uint256)", from, to, amount
-            )
-        );
-        require(success, "transfer failed");
+        ICoreVault(address(this)).processorTransfer(from, to, amount);
     }
 
     function _mint(address to, uint256 amount) internal {
-        (bool success,) = address(this).call(
-            abi.encodeWithSignature("processorMint(address,uint256)", to, amount)
-        );
-        require(success, "mint failed");
+        ICoreVault(address(this)).processorMint(to, amount);
     }
 
     function _burn(address from, uint256 amount) internal {
-        (bool success,) = address(this).call(
-            abi.encodeWithSignature("processorBurn(address,uint256)", from, amount)
-        );
-        require(success, "burn failed");
+        ICoreVault(address(this)).processorBurn(from, amount);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════

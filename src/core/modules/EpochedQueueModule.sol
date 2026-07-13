@@ -16,6 +16,7 @@ import { IParamsProvider }        from "../../interfaces/IParamsProvider.sol";
 import { IBufferManager }         from "../../interfaces/IBufferManager.sol";
 import { IStrategyRouter }        from "../../interfaces/IStrategyRouter.sol";
 import { IIncentivesEngine }      from "../../interfaces/IIncentivesEngine.sol";
+import { ICoreVault }             from "../../interfaces/ICoreVault.sol";
 import {
     FixedMaturityStorage,
     _checkStandardExitAllowed, _checkSettlementAllowed
@@ -223,13 +224,13 @@ contract EpochedQueueModule {
 
         // Initialise epoch 0 if this is the very first submission
         epochId = eq.currentEpochId;
-        if (eq.epochs[epochId].openedAt == 0) {
-            eq.epochs[epochId].openedAt = uint64(block.timestamp);
-            eq.epochs[epochId].state    = EpochQueueStorage.EpochState.Open;
+        EpochQueueStorage.EpochData storage epoch = eq.epochs[epochId];
+        if (epoch.openedAt == 0) {
+            epoch.openedAt = uint64(block.timestamp);
+            epoch.state    = EpochQueueStorage.EpochState.Open;
             emit EpochOpened(epochId, uint64(block.timestamp));
         }
 
-        EpochQueueStorage.EpochData storage epoch = eq.epochs[epochId];
         if (epoch.state != EpochQueueStorage.EpochState.Open) revert EpochNotOpen();
 
         _trySoftRefreshWarmNav();
@@ -261,8 +262,11 @@ contract EpochedQueueModule {
         eq.escrowedShares += shares;
 
         // --- Incentives sync (best-effort) -----------------------------------
-        uint256 grossAssets = _convertToAssets(shares);
-        _notifyIncentivesExit(user, grossAssets, core);
+        // Skip the convertToAssets() call entirely when no engine is wired --
+        // _notifyIncentivesExit would just discard the value anyway.
+        if (address(core.incentivesEngine) != address(0)) {
+            _notifyIncentivesExit(user, _convertToAssets(shares), core);
+        }
 
         emit EpochWithdrawalRequested(epochId, claimId, user, shares, netShares, feeShares);
     }
@@ -544,7 +548,13 @@ contract EpochedQueueModule {
         IParamsProvider.WithdrawalParams memory wp = core.params.getWithdrawalParams(address(this));
         uint256 gross = _convertToAssets(shares);
 
-        if (_canInstant(gross, wp, core)) {
+        // _canInstant fetches assetAddr lazily (only once the cheaper lock/cap
+        // checks pass) and hands it back so a successful settlement reuses it
+        // below instead of a second _asset() call; failing fast still costs
+        // zero extra calls.
+        (bool instantOk, address assetAddr) = _canInstant(gross, wp, core);
+
+        if (instantOk) {
             // Settle now
             (uint256 feeShares, uint256 netShares) =
                 ExitEngineLib.computeFeeShares(shares, ExitEngineLib.ExitMode.INSTANT, f.fee);
@@ -558,7 +568,7 @@ contract EpochedQueueModule {
             }
             _burn(msg.sender, netShares);
 
-            IERC20(_asset()).safeTransfer(msg.sender, netAssets);
+            IERC20(assetAddr).safeTransfer(msg.sender, netAssets);
             ExitEngineLib.consumeEpochCap(core, gross);
 
             emit Events.InstantExit(msg.sender, shares, netAssets, feeShares);
@@ -640,52 +650,37 @@ contract EpochedQueueModule {
     // INTERNAL: VAULT INTERFACE (delegatecall context -- address(this) = CoreVault)
     // =========================================================================
 
+    // NOTE: direct interface calls, not low-level staticcall/call +
+    // abi.encodeWithSignature. Same external-call semantics (delegatecall
+    // context means address(this) is still the vault), but the compiler
+    // resolves the selector at compile time and skips the manual bytes-memory
+    // encode/decode + require(ok, "...") boilerplate on every call site.
     function _asset() internal view returns (address) {
-        (bool ok, bytes memory d) = address(this).staticcall(abi.encodeWithSignature("asset()"));
-        require(ok, "asset()");
-        return abi.decode(d, (address));
+        return IERC4626(address(this)).asset();
     }
 
     function _totalAssets() internal view returns (uint256) {
-        (bool ok, bytes memory d) = address(this).staticcall(abi.encodeWithSignature("totalAssets()"));
-        require(ok, "totalAssets()");
-        return abi.decode(d, (uint256));
+        return IERC4626(address(this)).totalAssets();
     }
 
     function _totalSupply() internal view returns (uint256) {
-        (bool ok, bytes memory d) = address(this).staticcall(abi.encodeWithSignature("totalSupply()"));
-        require(ok, "totalSupply()");
-        return abi.decode(d, (uint256));
+        return IERC20(address(this)).totalSupply();
     }
 
     function _convertToAssets(uint256 shares) internal view returns (uint256) {
-        (bool ok, bytes memory d) = address(this).staticcall(
-            abi.encodeWithSignature("convertToAssets(uint256)", shares)
-        );
-        require(ok, "convertToAssets()");
-        return abi.decode(d, (uint256));
+        return IERC4626(address(this)).convertToAssets(shares);
     }
 
     function _balanceOf(address account) internal view returns (uint256) {
-        (bool ok, bytes memory d) = address(this).staticcall(
-            abi.encodeWithSignature("balanceOf(address)", account)
-        );
-        require(ok, "balanceOf()");
-        return abi.decode(d, (uint256));
+        return IERC20(address(this)).balanceOf(account);
     }
 
     function _transferShares(address from, address to, uint256 amount) internal {
-        (bool ok,) = address(this).call(
-            abi.encodeWithSignature("processorTransfer(address,address,uint256)", from, to, amount)
-        );
-        require(ok, "processorTransfer()");
+        ICoreVault(address(this)).processorTransfer(from, to, amount);
     }
 
     function _burn(address from, uint256 amount) internal {
-        (bool ok,) = address(this).call(
-            abi.encodeWithSignature("processorBurn(address,uint256)", from, amount)
-        );
-        require(ok, "processorBurn()");
+        ICoreVault(address(this)).processorBurn(from, amount);
     }
 
     // =========================================================================
@@ -727,24 +722,29 @@ contract EpochedQueueModule {
     // INTERNAL: INSTANT SETTLEMENT CHECK
     // =========================================================================
 
+    /// @dev Returns the resolved asset address alongside the result so a
+    ///      successful caller can reuse it instead of a second _asset() call.
+    ///      assetAddr is only fetched lazily, once the cheaper lock/cap checks
+    ///      have already passed, so failing fast still costs zero extra calls.
     function _canInstant(
         uint256 gross,
         IParamsProvider.WithdrawalParams memory wp,
         CoreStorage.Layout storage core
-    ) internal view returns (bool) {
+    ) internal view returns (bool ok, address assetAddr) {
         // Lock period
         if (wp.lockPeriod > 0 &&
             block.timestamp < uint256(core.lastDepositTs[msg.sender]) + wp.lockPeriod)
-            return false;
+            return (false, address(0));
 
         // Epoch cap -- single source of truth via WithdrawalCapLib (same lib
         // ExitEngineLib.calculateCapRemaining uses), including dynamic cap support.
-        if (gross > _epochCapRemaining(core, wp, _totalAssets())) return false;
+        if (gross > _epochCapRemaining(core, wp, _totalAssets())) return (false, address(0));
 
         // Liquidity
-        if (IERC20(_asset()).balanceOf(address(this)) < gross) return false;
+        assetAddr = _asset();
+        if (IERC20(assetAddr).balanceOf(address(this)) < gross) return (false, address(0));
 
-        return true;
+        return (true, assetAddr);
     }
 
     /// @dev Remaining immediate-withdrawal capacity for the current cap epoch.
