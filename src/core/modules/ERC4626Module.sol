@@ -33,7 +33,9 @@ import { FixedMaturityLogicLib } from "../libraries/FixedMaturityLogicLib.sol";
 /// EXIT SEMANTICS:
 ///   withdraw/redeem: REVERT AsyncWithdrawalRequired (ERC4626 compliant: maxWithdraw=0)
 ///   forceWithdraw: FORCE mode, no cap consumption, penalty via ExitEngineLib
-///   forceWithdrawAll: FORCE mode, best-effort, fee via transfer
+///   forceWithdrawAll: FORCE mode, best-effort pull, PROPORTIONAL burn --
+///     shares/fees are only charged for the slice of targetAssets actually
+///     raised; any unfilled remainder stays as a live, residual share balance
 ///
 /// INVARIANTS:
 ///   1. withdraw/redeem CANNOT ever transfer assets
@@ -257,7 +259,16 @@ contract ERC4626Module {
     // FORCE WITHDRAW ALL — Deterministic Exit (W2 Policy)
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    /// @notice Guaranteed exit: burns ALL caller shares, pulls liquidity from all sources
+    /// @notice Guaranteed exit: pulls liquidity from all sources (best-effort) and
+    ///         burns ONLY the slice of shares whose assets were actually raised.
+    /// @dev If the pull falls short of targetAssets (e.g. a frozen/illiquid
+    ///      strategy), shares and fees are charged proportionally to the fill
+    ///      ratio (assetsReceived / targetAssets) instead of unconditionally
+    ///      burning 100% of shares for a partial payout. The unfilled remainder
+    ///      of the caller's shares is left untouched -- no value is destroyed by
+    ///      a partial pull, and the caller retains a residual claim they can
+    ///      retry (forceWithdrawAll again once liquidity frees up) or exit via
+    ///      the normal queue.
     function forceWithdrawAll(address receiver) external returns (uint256 assetsReceived) {
         // FixedMaturity gate: same as forceWithdraw — only Active state or OpenEnded.
         _checkForceExitAllowed(FixedMaturityStorage.layout());
@@ -284,53 +295,73 @@ contract ERC4626Module {
         // Target assets from net shares
         uint256 targetAssets = _convertToAssets(netShares);
 
-        // Anti-abuse limits (bypasses lock period)
+        // Anti-abuse limits (bypasses lock period) — checked against the full ask,
+        // same as forceWithdraw().
         _checkWithdrawalLimitsForForce(msg.sender, targetAssets, core);
 
+        // Pull liquidity BEFORE sizing the burn/fee — deterministic, no plan, no
+        // LossCap. This is a best-effort pull; the fill ratio computed below
+        // determines how much of the caller's shares are actually consumed.
+        _forcePullAllLiquidity(targetAssets, core);
+
+        address assetAddr = _asset();
+        uint256 hot = IERC20(assetAddr).balanceOf(address(this));
+        assetsReceived = hot >= targetAssets ? targetAssets : hot;
+
+        // Proportional fill: scale shares burned and fee charged by how much of
+        // targetAssets was actually raised. targetAssets == 0 only happens for
+        // dust-sized netShares; treat that degenerate case as fully filled so we
+        // don't divide by zero (there is nothing to under-fill).
+        bool fullyFilled = targetAssets == 0 || assetsReceived >= targetAssets;
+        uint256 netSharesToBurn = fullyFilled ? netShares : (netShares * assetsReceived) / targetAssets;
+        uint256 feeSharesToTransfer =
+            fullyFilled ? totalFeeShares : (totalFeeShares * assetsReceived) / targetAssets;
+
         // Transfer fee shares to FeeCollector (SHARES, not USDC)
-        if (totalFeeShares > 0) {
-            _processorTransfer(msg.sender, core.feeCollector, totalFeeShares);
-            emit Events.FeePaid(msg.sender, core.feeCollector, totalFeeShares);
+        if (feeSharesToTransfer > 0) {
+            _processorTransfer(msg.sender, core.feeCollector, feeSharesToTransfer);
+            emit Events.FeePaid(msg.sender, core.feeCollector, feeSharesToTransfer);
 
             uint16 witBps = f.fee.witBps;
             uint16 forceBps = f.fee.forceExitPenaltyBps;
             if (witBps > 0) {
                 uint256 witFeeShares = Percentage.mulBpsUp(shares, witBps);
+                if (!fullyFilled) witFeeShares = (witFeeShares * assetsReceived) / targetAssets;
                 emit Events.WithdrawFeeTaken(
                     msg.sender, _convertToAssets(witFeeShares), witFeeShares
                 );
             }
             if (forceBps > 0) {
                 uint256 forcePenaltyShares = Percentage.mulBpsUp(shares, forceBps);
+                if (!fullyFilled) forcePenaltyShares = (forcePenaltyShares * assetsReceived) / targetAssets;
                 emit Events.ForceExitPenaltyTaken(
                     msg.sender, _convertToAssets(forcePenaltyShares), forcePenaltyShares
                 );
             }
         }
 
-        // Sync incentives BEFORE burn (assets-based, try/catch)
-        _notifyIncentivesExit(msg.sender, targetAssets, core);
+        // Sync incentives BEFORE burn (assets-based, try/catch) — only for the
+        // assets actually delivered, since the unfilled remainder is still held.
+        if (assetsReceived > 0) {
+            _notifyIncentivesExit(msg.sender, assetsReceived, core);
+        }
 
-        // Pull liquidity — deterministic, no plan, no LossCap
-        _forcePullAllLiquidity(targetAssets, core);
-
-        // Burn net shares
-        _processorBurn(msg.sender, netShares);
-
-        // Payout = min(pulled, targetAssets) — best-effort
-        address assetAddr = _asset();
-        uint256 hot = IERC20(assetAddr).balanceOf(address(this));
-        assetsReceived = hot >= targetAssets ? targetAssets : hot;
+        // Burn only the filled slice of net shares. The rest remains in the
+        // caller's balance as a residual, redeemable claim.
+        if (netSharesToBurn > 0) {
+            _processorBurn(msg.sender, netSharesToBurn);
+        }
 
         if (assetsReceived > 0) {
             IERC20(assetAddr).safeTransfer(receiver, assetsReceived);
         }
 
         // NO consumeEpochCap — force bypasses cap
+        uint256 sharesConsumed = netSharesToBurn + feeSharesToTransfer;
         emit ForceWithdrawAllExecuted(
-            msg.sender, receiver, shares, assetsReceived, targetAssets
+            msg.sender, receiver, sharesConsumed, assetsReceived, targetAssets
         );
-        emit Events.ForceExit(msg.sender, shares, assetsReceived, totalFeeShares);
+        emit Events.ForceExit(msg.sender, sharesConsumed, assetsReceived, feeSharesToTransfer);
 
         _exitNonReentrant();
     }

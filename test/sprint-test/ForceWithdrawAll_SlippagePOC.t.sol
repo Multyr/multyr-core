@@ -4,43 +4,38 @@ pragma solidity ^0.8.24;
 // ──────────────────────────────────────────────────────────────────────────────
 // SPRINT SECURITY TEST — forceWithdrawAll partial-payout / share-burn imbalance
 //
-// VULNERABILITY SUMMARY
-// ─────────────────────
-// `ERC4626Module.forceWithdrawAll` (ERC4626Module.sol:257) burns ALL of the
-// caller's net shares unconditionally, then pays only what best-effort
-// liquidity extraction managed to gather:
+// ORIGINAL BUG (now fixed):
+// ─────────────────────────
+// `ERC4626Module.forceWithdrawAll` burned ALL of the caller's net shares
+// unconditionally, then paid only what best-effort liquidity extraction
+// managed to gather:
 //
-//   targetAssets = _convertToAssets(netShares)        (line 281)
-//   _forcePullAllLiquidity(targetAssets, core)         (line 311)  ← best-effort
-//   _processorBurn(msg.sender, netShares)              (line 314)  ← ALL shares burned
+//   targetAssets = _convertToAssets(netShares)
+//   _forcePullAllLiquidity(targetAssets, core)         ← best-effort
+//   _processorBurn(msg.sender, netShares)              ← ALL shares burned
 //   hot = balanceOf(address(this))
-//   assetsReceived = hot >= targetAssets ? targetAssets : hot     (line 319)
-//   safeTransfer(receiver, assetsReceived)             (line 322)
+//   assetsReceived = hot >= targetAssets ? targetAssets : hot
+//   safeTransfer(receiver, assetsReceived)
 //
 // The force-redeem path in StrategyRouter explicitly skips reverting strategies
-// and has NO loss cap (StrategyRouter.sol:1078, 1085-1159):
+// and has NO loss cap (StrategyRouter.sol, forceRedeemForWithdraw):
 //
 //   try IStrategy(addrs[i]).withdraw(...) { ... }
 //   catch { emit ForceRedeemAdapterSkipped(...); }  ← silent skip, no revert
 //
-// RESULT:
-//   If any strategy is frozen/illiquid or returns less than requested,
-//   `_forcePullAllLiquidity` returns a sub-target amount.
-//   The burn still consumes ALL net shares; the user is paid
-//   `min(actuallyPulled, targetAssets)` — potentially a tiny fraction of
-//   their fair share value — with NO protection, NO `minAssetsOut` parameter,
-//   and NO revert-on-shortfall.
+// RESULT: if any strategy was frozen/illiquid or returned less than requested,
+// the burn still consumed ALL net shares while the user was paid only
+// `min(actuallyPulled, targetAssets)` — potentially a tiny fraction of their
+// fair share value, with no protection and no recourse.
 //
-// IMPACT:
-//   A user with 1 000 000 USDC worth of shares in a vault where the bulk of
-//   liquidity lives in a frozen strategy loses up to ~90 % of their value
-//   while having all shares burned in the same transaction.
-//
-// FIX OPTIONS (either):
-//   A. Add a `minAssetsOut` parameter and `revert` if payout < minAssetsOut.
-//   B. Keep forceWithdrawAll as the "emergency partial" path but create a
-//      separate `forceWithdrawAllOrRevert(minAssetsOut)` that reverts on
-//      shortfall, clearly documenting the trade-off.
+// FIX APPLIED (see ERC4626Module.forceWithdrawAll):
+// ──────────────────────────────────────────────────
+// Shares and fees are now burned/transferred PROPORTIONALLY to the fill ratio
+// (assetsReceived / targetAssets). If only 10% of targetAssets could be
+// raised, only 10% of the caller's net shares (and fee shares) are consumed;
+// the unfilled 90% remains as a live share balance the caller can retry later
+// (once liquidity frees up) or exit via the normal queue. No value is
+// destroyed by a partial pull.
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { Test } from "lib/forge-std/src/Test.sol";
@@ -232,19 +227,19 @@ contract ForceWithdrawAll_SlippagePOC is Test {
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // TEST 1 — FROZEN STRATEGY: user loses 90 % of value, all shares burned
+    // TEST 1 — FROZEN STRATEGY: partial fill burns only the filled share slice
     //
     // Scenario: 90 % of vault assets are in a strategy that always reverts
     // on withdraw (frozen underlying, protocol pause, bridge down, etc.).
     //
-    // Expected behaviour without the fix:
+    // FIX CONFIRMED behaviour:
     //   forceRedeemForWithdraw catches the revert, skips the strategy.
     //   _forcePullAllLiquidity pulls nothing from strategies.
-    //   Burns ALL 1 000 000 shares.
-    //   Pays only the 100 000 USDC hot balance.
-    //   User suffers a 90 % loss of fair value with no recourse.
+    //   Only the hot balance (10 % of fair value) is raised.
+    //   Only 10 % of net shares are burned; the caller keeps a 90 % residual
+    //   share balance instead of losing 90 % of fair value outright.
     // ═════════════════════════════════════════════════════════════════════════
-    function test_poc_frozen_strategy_user_loses_90_percent() public {
+    function test_poc_frozen_strategy_partialFill_burnsOnlyFilledSlice() public {
         _baseSetUp();
 
         MockFrozenStrategy frozen = new MockFrozenStrategy(USDC_UNDERLYING);
@@ -264,42 +259,53 @@ contract ForceWithdrawAll_SlippagePOC is Test {
         uint256 userSharesAfter = core.balanceOf(user);
         uint256 userUSDCAfter   = IERC20(USDC_UNDERLYING).balanceOf(user);
 
-        // ── All shares burned ────────────────────────────────────────────────
-        assertEq(userSharesAfter, 0, "CRITICAL: all user shares must be burned");
-
-        // ── Only hot balance paid out (10 % of fair value) ───────────────────
-        assertEq(
-            received,
-            HOT_BALANCE,
-            "CRITICAL: user received only the hot balance, not fair value"
-        );
+        // ── Only the hot balance could be raised (10 % of fair value) ────────
+        assertEq(received, HOT_BALANCE, "only the hot balance was actually raisable");
         assertEq(
             userUSDCAfter - userUSDCBefore,
             HOT_BALANCE,
-            "CRITICAL: user wallet only gained the hot balance"
+            "wallet gained exactly the raised amount"
         );
 
-        // ── Quantify the loss ────────────────────────────────────────────────
-        uint256 lost = fairValue - received;
-        assertEq(lost, STRAT_BALANCE, "user lost exactly the strategy-held amount");
-        // 900 000 USDC lost while 1 000 000 worth of shares were burned.
-        // Loss percentage: 90 %.
-        assertGt(lost * 10_000 / fairValue, 8900, "loss should exceed 89% of fair value");
+        // ── FIX CONFIRMED: shares burned proportionally, not fully ───────────
+        uint256 sharesBurned = userSharesBefore - userSharesAfter;
+        assertApproxEqAbs(
+            sharesBurned,
+            userSharesBefore / 10,
+            2,
+            "FIX CONFIRMED: only ~10% of shares burned, matching the 10% fill ratio"
+        );
+
+        // ── FIX CONFIRMED: caller retains a ~90% residual share balance ──────
+        assertApproxEqAbs(
+            userSharesAfter,
+            userSharesBefore * 9 / 10,
+            2,
+            "FIX CONFIRMED: ~90% of shares preserved as a residual, retriable claim"
+        );
+
+        // No value destroyed: received assets + residual share value
+        // reconstructs the caller's full fair value.
+        uint256 residualValue = core.convertToAssets(userSharesAfter);
+        assertApproxEqAbs(
+            received + residualValue,
+            fairValue,
+            2,
+            "FIX CONFIRMED: no value destroyed -- delivered + residual == fair value"
+        );
     }
 
     // ═════════════════════════════════════════════════════════════════════════
-    // TEST 2 — PARTIAL STRATEGY (10 % return): user loses ~81 %, all shares burned
+    // TEST 2 — PARTIAL STRATEGY (10 % return): proportional fill, no value lost
     //
     // Scenario: The strategy is partially illiquid — it only returns 10 % of
     // any requested withdrawal (e.g. redemption queue, partial unlock schedule).
     //
     //   forceRedeemForWithdraw requests 900 k → strategy returns 90 k
-    //   hot after pull = 100 k + 90 k = 190 000 USDC
-    //   Burns ALL 1 000 000 shares
-    //   Pays 190 000 USDC (19 % of fair value)
-    //   User loses 81 % of fair value with no minimum guarantee.
+    //   hot after pull = 100 k + 90 k = 190 000 USDC (19 % of fair value)
+    //   FIX CONFIRMED: only 19 % of net shares burned, not 100 %.
     // ═════════════════════════════════════════════════════════════════════════
-    function test_poc_partial_strategy_user_loses_majority() public {
+    function test_poc_partial_strategy_partialFill_burnsOnlyFilledSlice() public {
         _baseSetUp();
 
         // 10 % return rate
@@ -308,6 +314,7 @@ contract ForceWithdrawAll_SlippagePOC is Test {
         core.addStrategyUnsafe(address(partialStrat));
         _depositAndAllocate(address(partialStrat));
 
+        uint256 userSharesBefore = core.balanceOf(user);
         uint256 userUSDCBefore = IERC20(USDC_UNDERLYING).balanceOf(user);
         uint256 fairValue      = VAULT_TOTAL; // 1 000 000 USDC at PPS = 1
 
@@ -321,21 +328,29 @@ contract ForceWithdrawAll_SlippagePOC is Test {
         uint256 userUSDCAfter  = IERC20(USDC_UNDERLYING).balanceOf(user);
         uint256 userSharesAfter = core.balanceOf(user);
 
-        // ── All shares burned ────────────────────────────────────────────────
-        assertEq(userSharesAfter, 0, "CRITICAL: all user shares must be burned");
+        // ── Only partial payout was raisable ──────────────────────────────────
+        assertEq(received, expectedPaid, "only hot + 10% of strategy balance was raisable");
+        assertEq(userUSDCAfter - userUSDCBefore, expectedPaid, "wallet gained the raised amount");
 
-        // ── Only partial payout ───────────────────────────────────────────────
-        assertEq(
-            received,
-            expectedPaid,
-            "CRITICAL: user received only hot + 10% of strategy balance"
+        // ── FIX CONFIRMED: shares burned proportionally to the 19% fill ──────
+        uint256 sharesBurned = userSharesBefore - userSharesAfter;
+        uint256 expectedBurn = userSharesBefore * expectedPaid / fairValue; // ~19%
+        assertApproxEqAbs(
+            sharesBurned,
+            expectedBurn,
+            2,
+            "FIX CONFIRMED: shares burned match the fill ratio, not 100%"
         );
-        assertEq(userUSDCAfter - userUSDCBefore, expectedPaid, "wallet gained partial only");
+        assertGt(userSharesAfter, 0, "FIX CONFIRMED: caller retains a residual share balance");
 
-        // ── Quantify the loss ────────────────────────────────────────────────
-        uint256 lost = fairValue - received;
-        // Should be 810 000 USDC lost (81 % of fair value)
-        assertGt(lost * 10_000 / fairValue, 8000, "loss should exceed 80% of fair value");
+        // No value destroyed: received + residual reconstructs fair value.
+        uint256 residualValue = core.convertToAssets(userSharesAfter);
+        assertApproxEqAbs(
+            received + residualValue,
+            fairValue,
+            2,
+            "FIX CONFIRMED: no value destroyed -- delivered + residual == fair value"
+        );
     }
 
     // ═════════════════════════════════════════════════════════════════════════
@@ -374,5 +389,58 @@ contract ForceWithdrawAll_SlippagePOC is Test {
         // Full fair value paid
         assertEq(received,                         fairValue, "healthy: should receive full fair value");
         assertEq(userUSDCAfter - userUSDCBefore,   fairValue, "healthy: wallet should gain full fair value");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // TEST 4 — RETRY AFTER RECOVERY: residual claim is real and collectable
+    //
+    // The whole point of proportional burn is that the unfilled remainder is
+    // not lost value -- it is a live share balance the caller can act on again.
+    // This test proves that end-to-end: a frozen strategy blocks the first
+    // forceWithdrawAll to a 10% fill, the strategy then "unfreezes", and a
+    // second forceWithdrawAll recovers the rest.
+    // ═════════════════════════════════════════════════════════════════════════
+    function test_poc_residualClaim_isCollectableOnceStrategyRecovers() public {
+        _baseSetUp();
+
+        MockPartialStrategy stuck = new MockPartialStrategy(USDC_UNDERLYING, 0); // 0% return initially
+
+        core.addStrategyUnsafe(address(stuck));
+        _depositAndAllocate(address(stuck));
+
+        uint256 fairValue = VAULT_TOTAL;
+        uint256 userUSDCBefore = IERC20(USDC_UNDERLYING).balanceOf(user);
+
+        // First call: strategy returns nothing, only the hot balance is raised.
+        vm.prank(user);
+        uint256 firstReceived = ERC4626Module(address(core)).forceWithdrawAll(user);
+        assertEq(firstReceived, HOT_BALANCE, "first call only raises the hot balance");
+
+        uint256 residualShares = core.balanceOf(user);
+        assertGt(residualShares, 0, "residual shares remain after partial fill");
+
+        // Strategy "recovers" -- now returns 100% of any request.
+        // (MockPartialStrategy's return rate is immutable, so redeploy a
+        // healthy strategy holding the same funds to simulate recovery and
+        // re-register it as the sole strategy.)
+        MockHealthyStrategy recovered = new MockHealthyStrategy(USDC_UNDERLYING);
+        vm.prank(address(stuck));
+        IERC20(USDC_UNDERLYING).transfer(address(recovered), STRAT_BALANCE);
+        core.addStrategyUnsafe(address(recovered));
+
+        // Second call: recovers the residual claim in full.
+        vm.prank(user);
+        uint256 secondReceived = ERC4626Module(address(core)).forceWithdrawAll(user);
+
+        assertEq(core.balanceOf(user), 0, "FIX CONFIRMED: residual fully claimed, no shares left");
+
+        uint256 totalReceived = IERC20(USDC_UNDERLYING).balanceOf(user) - userUSDCBefore;
+        assertApproxEqAbs(
+            totalReceived,
+            fairValue,
+            2,
+            "FIX CONFIRMED: two proportional calls recover full fair value, zero permanent loss"
+        );
+        assertGt(secondReceived, 0, "second call delivered the residual");
     }
 }
