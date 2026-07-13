@@ -193,6 +193,11 @@ contract ERC4626Module {
         // NAV freshness before convertToAssets (W2: never block)
         _trySoftRefreshWarmNav();
 
+        // Cached once: liquidity sourcing always runs unconditionally below, so
+        // there's no lazy-evaluation benefit to deferring this fetch -- reused
+        // by _sourceLiquidityForForceWithdraw and the final transfer.
+        address assetAddr = _asset();
+
         // Calculate base shares
         uint256 baseShares = _previewWithdraw(assets);
 
@@ -219,7 +224,7 @@ contract ERC4626Module {
         _checkWithdrawalLimitsForForce(owner_, gross, core);
 
         // Source liquidity with user plan
-        _sourceLiquidityForForceWithdraw(assets, plan, core);
+        _sourceLiquidityForForceWithdraw(assetAddr, assets, plan, core);
 
         // Transfer fee shares to feeCollector (NO mint — anti-dilution)
         if (totalFeeShares > 0) {
@@ -247,7 +252,7 @@ contract ERC4626Module {
         _processorBurn(owner_, baseShares);
 
         // Transfer exact assets to receiver
-        IERC20(_asset()).safeTransfer(receiver, assets);
+        IERC20(assetAddr).safeTransfer(receiver, assets);
 
         emit Events.ForceWithdrawExecuted(msg.sender, owner_, receiver, assets, sharesSpent);
         emit Events.ForceExit(owner_, sharesSpent, assets, totalFeeShares);
@@ -299,12 +304,16 @@ contract ERC4626Module {
         // same as forceWithdraw().
         _checkWithdrawalLimitsForForce(msg.sender, targetAssets, core);
 
+        // Cached once: the pull always runs unconditionally below, so there's
+        // no lazy-evaluation benefit to deferring this fetch -- reused by
+        // _forcePullAllLiquidity, the post-pull balance check, and the payout.
+        address assetAddr = _asset();
+
         // Pull liquidity BEFORE sizing the burn/fee — deterministic, no plan, no
         // LossCap. This is a best-effort pull; the fill ratio computed below
         // determines how much of the caller's shares are actually consumed.
-        _forcePullAllLiquidity(targetAssets, core);
+        _forcePullAllLiquidity(assetAddr, targetAssets, core);
 
-        address assetAddr = _asset();
         uint256 hot = IERC20(assetAddr).balanceOf(address(this));
         assetsReceived = hot >= targetAssets ? targetAssets : hot;
 
@@ -376,10 +385,10 @@ contract ERC4626Module {
 
     /// @dev Deterministic liquidity pull: hot → warm → strategy
     function _forcePullAllLiquidity(
+        address assetAddr,
         uint256 target,
         CoreStorage.Layout storage core
     ) internal {
-        address assetAddr = _asset();
         uint256 hot = IERC20(assetAddr).balanceOf(address(this));
         if (hot >= target) return;
 
@@ -429,11 +438,11 @@ contract ERC4626Module {
 
     /// @dev Source liquidity with user plan for force withdraw
     function _sourceLiquidityForForceWithdraw(
+        address assetAddr,
         uint256 assets,
         IStrategyRouter.Pull[] calldata plan,
         CoreStorage.Layout storage core
     ) internal {
-        address assetAddr = _asset();
         uint256 hot = IERC20(assetAddr).balanceOf(address(this));
 
         if (hot >= assets) return;
