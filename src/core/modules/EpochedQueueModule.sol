@@ -9,6 +9,7 @@ import { CoreStorage }  from "../storage/CoreStorage.sol";
 import { FeeStorage }   from "../storage/FeeStorage.sol";
 import { Events }       from "../libraries/Events.sol";
 import { ExitEngineLib } from "../libraries/ExitEngineLib.sol";
+import { WithdrawalCapLib } from "../libraries/WithdrawalCapLib.sol";
 import { Percentage }   from "../../libs/Percentage.sol";
 import { FixedPoint }   from "../../libs/FixedPoint.sol";
 import { IParamsProvider }        from "../../interfaces/IParamsProvider.sol";
@@ -76,7 +77,7 @@ library EpochQueueStorage {
 // MODULE
 // =============================================================================
 
-/// @title QueueModuleSprintDeliverable
+/// @title EpochedQueueModule
 /// @notice Epoch-bucket settlement queue -- Renzo ezETH architecture pattern
 ///
 /// @dev WHY THIS ARCHITECTURE
@@ -118,7 +119,7 @@ library EpochQueueStorage {
 ///   5. No array compaction: epochs are naturally immutable after settlement.
 ///   6. Instant path preserved: requestInstantWithdrawal() for cap-eligible exits.
 ///
-contract QueueModuleSprintDeliverable {
+contract EpochedQueueModule {
     using SafeERC20 for IERC20;
 
     // =========================================================================
@@ -196,8 +197,23 @@ contract QueueModuleSprintDeliverable {
         external
         returns (uint256 epochId, uint256 claimId)
     {
-        _checkStandardExitAllowed(FixedMaturityStorage.layout(), false);
         _enterNonReentrant();
+        (epochId, claimId) = _requestEpochWithdrawal(msg.sender, shares);
+        _exitNonReentrant();
+    }
+
+    /// @dev Shared body for requestEpochWithdrawal() and the instant-withdrawal
+    ///      fallback path. MUST be called internally (never via `this.foo()`):
+    ///      an external self-call re-enters CoreVault's fallback and rebinds
+    ///      msg.sender to the vault's own address, silently attributing the
+    ///      resulting claim to the vault instead of the real withdrawing user.
+    ///      Caller is responsible for the reentrancy guard and for gating
+    ///      access via _checkStandardExitAllowed(..., false).
+    function _requestEpochWithdrawal(address user, uint256 shares)
+        internal
+        returns (uint256 epochId, uint256 claimId)
+    {
+        _checkStandardExitAllowed(FixedMaturityStorage.layout(), false);
 
         if (shares == 0) revert ZeroAmount();
 
@@ -224,12 +240,12 @@ contract QueueModuleSprintDeliverable {
 
         // --- Transfer ALL gross shares from user to vault escrow -------------
         // Shares sit here until claimEpochAssets() burns them per-user.
-        _transferShares(msg.sender, address(this), shares);
+        _transferShares(user, address(this), shares);
 
         // --- Record claim ----------------------------------------------------
         claimId = ++eq.nextClaimId[epochId];
         eq.claims[epochId][claimId] = EpochQueueStorage.EpochClaim({
-            user:      msg.sender,
+            user:      user,
             netShares: netShares,
             feeShares: feeShares,
             claimed:   false
@@ -246,11 +262,9 @@ contract QueueModuleSprintDeliverable {
 
         // --- Incentives sync (best-effort) -----------------------------------
         uint256 grossAssets = _convertToAssets(shares);
-        _notifyIncentivesExit(msg.sender, grossAssets, core);
+        _notifyIncentivesExit(user, grossAssets, core);
 
-        emit EpochWithdrawalRequested(epochId, claimId, msg.sender, shares, netShares, feeShares);
-
-        _exitNonReentrant();
+        emit EpochWithdrawalRequested(epochId, claimId, user, shares, netShares, feeShares);
     }
 
     /// @notice Cancel a claim while the epoch is still OPEN.
@@ -303,10 +317,7 @@ contract QueueModuleSprintDeliverable {
 
         // --- Maturity check: epoch must have run for at least epochDuration --
         CoreStorage.Layout storage core = CoreStorage.layout();
-        IParamsProvider.QueueParams memory qp = core.params.getQueueParams(address(this));
-        uint64 minDuration = qp.epochDuration > 0 ? qp.epochDuration : 1 days;
-
-        if (block.timestamp < epoch.openedAt + minDuration) revert EpochTooYoung();
+        if (block.timestamp < epoch.openedAt + _minEpochDuration(core)) revert EpochTooYoung();
 
         _trySoftRefreshWarmNav();
 
@@ -327,6 +338,10 @@ contract QueueModuleSprintDeliverable {
         // Transfer all of them to feeCollector atomically here.
         if (epoch.totalFeeShares > 0) {
             _transferShares(address(this), core.feeCollector, epoch.totalFeeShares);
+            // Fee shares just left vault escrow for good -- remove them from the
+            // escrow tracker now. Only netShares remain in escrow, to be
+            // decremented per-claim in claimEpochAssets/batchClaimEpochAssets.
+            eq.escrowedShares -= epoch.totalFeeShares;
             emit Events.FeePaid(address(this), core.feeCollector, epoch.totalFeeShares);
         }
 
@@ -438,9 +453,9 @@ contract QueueModuleSprintDeliverable {
         // Mark claimed BEFORE external transfers (CEI)
         claim.claimed = true;
         epoch.claimedAssets += assets;
-        eq.escrowedShares   -= (claim.netShares + claim.feeShares);
-        // feeShares already transferred at close; only netShares remain in escrow
-        eq.escrowedShares   += claim.feeShares; // correct the double-subtract
+        // feeShares already left escrow (transferred to feeCollector) at close;
+        // only netShares remain in escrow for this claim.
+        eq.escrowedShares   -= claim.netShares;
 
         // Burn net shares from escrow
         _burn(address(this), claim.netShares);
@@ -481,9 +496,16 @@ contract QueueModuleSprintDeliverable {
                 epoch.claimedAssets += assets;
                 totalAssets         += assets;
 
+                // feeShares already left escrow at close; only netShares remain.
+                eq.escrowedShares -= claim.netShares;
+
                 _burn(address(this), claim.netShares);
 
                 emit EpochAssetsClaimed(epochId, claimIds[i], msg.sender, assets, claim.netShares);
+                emit IERC4626.Withdraw(address(this), msg.sender, msg.sender,
+                    FixedPoint.mulWadDown(claim.netShares + claim.feeShares, epoch.ppsAtClose),
+                    claim.netShares + claim.feeShares
+                );
             }
             unchecked { ++i; }
         }
@@ -545,10 +567,11 @@ contract QueueModuleSprintDeliverable {
             epochId            = 0;
             claimId            = 0;
         } else {
-            // Fallback: enqueue in current epoch as standard claim
-            _exitNonReentrant();
-            (epochId, claimId) = this.requestEpochWithdrawal(shares);
-            return (false, epochId, claimId);
+            // Fallback: enqueue in current epoch as standard claim.
+            // Calls the internal helper directly (never `this.foo()`) so the
+            // claim is correctly attributed to msg.sender, not to the vault.
+            (epochId, claimId) = _requestEpochWithdrawal(msg.sender, shares);
+            settledImmediately = false;
         }
 
         _exitNonReentrant();
@@ -600,9 +623,17 @@ contract QueueModuleSprintDeliverable {
         if (e.state != EpochQueueStorage.EpochState.Open) return false;
         if (e.openedAt == 0) return false;
         CoreStorage.Layout storage core = CoreStorage.layout();
+        return block.timestamp >= e.openedAt + _minEpochDuration(core);
+    }
+
+    /// @dev Shared epoch-duration lookup. Unlike ExitEngineLib.rollEpochIfNeeded
+    ///      (which enforces a deploy-time-set cap-epoch duration with no zero
+    ///      fallback), this queue-settlement epoch duration is an operational
+    ///      batching cadence, not a security gate -- a 1 day default is
+    ///      intentional here if governance hasn't configured QueueParams.
+    function _minEpochDuration(CoreStorage.Layout storage core) internal view returns (uint64) {
         IParamsProvider.QueueParams memory qp = core.params.getQueueParams(address(this));
-        uint64 minDuration = qp.epochDuration > 0 ? qp.epochDuration : 1 days;
-        return block.timestamp >= e.openedAt + minDuration;
+        return qp.epochDuration > 0 ? qp.epochDuration : 1 days;
     }
 
     // =========================================================================
@@ -706,19 +737,45 @@ contract QueueModuleSprintDeliverable {
             block.timestamp < uint256(core.lastDepositTs[msg.sender]) + wp.lockPeriod)
             return false;
 
-        // Epoch cap
-        EpochQueueStorage.Layout storage eq = EpochQueueStorage.layout();
-        // Reuse QueueStorage-level cap via ExitEngineLib (requires QueueStorage import in production)
-        // For now: check cap via CoreStorage.epochWithdrawn
-        IParamsProvider.WithdrawalParams memory _wp = wp;
-        if (_wp.capPerEpochBps > 0) {
-            uint256 cap = (_totalAssets() * _wp.capPerEpochBps) / 10_000;
-            if (core.epochWithdrawn + gross > cap) return false;
-        }
+        // Epoch cap -- single source of truth via WithdrawalCapLib (same lib
+        // ExitEngineLib.calculateCapRemaining uses), including dynamic cap support.
+        if (gross > _epochCapRemaining(core, wp, _totalAssets())) return false;
 
         // Liquidity
         if (IERC20(_asset()).balanceOf(address(this)) < gross) return false;
 
         return true;
+    }
+
+    /// @dev Remaining immediate-withdrawal capacity for the current cap epoch.
+    ///      Mirrors ExitEngineLib.calculateCapRemaining's bps-selection logic, but
+    ///      uses this module's own open-epoch claimCount as the "queue depth"
+    ///      signal for dynamic-cap scaling (EpochQueueStorage has no flat queue
+    ///      array to measure, unlike QueueStorage).
+    function _epochCapRemaining(
+        CoreStorage.Layout storage core,
+        IParamsProvider.WithdrawalParams memory wp,
+        uint256 totalAssets_
+    ) internal view returns (uint256) {
+        IParamsProvider.DynamicCapParams memory dcp = core.params.getDynamicCapParams(address(this));
+
+        uint16 cap;
+        if (dcp.enabled) {
+            if (dcp.minBps == 0 || dcp.maxBps == 0) {
+                cap = wp.capPerEpochBps;
+            } else {
+                EpochQueueStorage.Layout storage eq = EpochQueueStorage.layout();
+                uint256 queueDepth = eq.epochs[eq.currentEpochId].claimCount;
+                cap = WithdrawalCapLib.calculateDynamicCapBps(
+                    dcp.minBps, dcp.maxBps, dcp.queueStressThreshold, queueDepth
+                );
+            }
+        } else {
+            cap = wp.capPerEpochBps == 0 ? type(uint16).max : wp.capPerEpochBps;
+        }
+
+        if (cap == type(uint16).max) return type(uint256).max;
+
+        return WithdrawalCapLib.calculateCapRemaining(totalAssets_, cap, core.epochWithdrawn);
     }
 }
