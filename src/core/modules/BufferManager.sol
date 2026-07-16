@@ -30,7 +30,6 @@ contract BufferManager is IBufferManager, ReentrancyGuard {
     error BpsOutOfRange();
     error WarmAdapterZero();
     error SlippageExceeded(); // C2: Warm withdraw slippage exceeded
-    error InvalidWarmAdapters(); // Fallback requires exactly 2 adapters
     error InsufficientHot(uint256 hot, uint256 amount); // Solvency: cannot deploy more than hot balance
 
     // Graceful degradation event
@@ -370,46 +369,10 @@ contract BufferManager is IBufferManager, ReentrancyGuard {
         uint256 hot = hotBalance();
         if (hot < amount) revert InsufficientHot(hot, amount);
 
-        uint256 len = _warmAdapters.length;
-        if (len == 0) revert WarmAdapterZero();
+        if (_warmAdapters.length == 0) revert WarmAdapterZero();
 
-        address primary = _warmAdapters[0];
-        bool deployed = false;
-
-        // Single adapter: try once, if fails funds stay hot
-        if (len == 1) {
-            try IWarmAdapter(primary).deposit(amount) returns (uint256 received) {
-                emit WarmDeploySuccess(primary, amount);
-                emit BufferDeployed(amount, received);
-                deployed = true;
-            } catch {
-                // Failed - funds stay hot in CoreVault
-                emit WarmDeployAllFailed(amount);
-            }
-        } else if (len == 2) {
-            // Two adapters: try primary, then fallback
-            address fallback_ = _warmAdapters[1];
-
-            // Try primary adapter - adapter pulls from CoreVault internally
-            try IWarmAdapter(primary).deposit(amount) returns (uint256 received) {
-                emit WarmDeploySuccess(primary, amount);
-                emit BufferDeployed(amount, received);
-                deployed = true;
-            } catch {
-                // Primary failed, try fallback
-                try IWarmAdapter(fallback_).deposit(amount) returns (uint256 received) {
-                    emit WarmDeployFallbackUsed(primary, fallback_, amount);
-                    emit BufferDeployed(amount, received);
-                    deployed = true;
-                } catch {
-                    // Both failed - funds stay hot in CoreVault
-                    emit WarmDeployAllFailed(amount);
-                }
-            }
-        } else {
-            // More than 2 adapters: not supported (use setWarmAdapters to configure exactly 1 or 2)
-            revert InvalidWarmAdapters();
-        }
+        // Try adapters in order, stopping at the first success; funds stay hot if all fail.
+        bool deployed = _deployToAdapters(amount);
 
         // Update warm NAV cache if deploy succeeded (warm balance changed)
         if (deployed) {
@@ -421,31 +384,8 @@ contract BufferManager is IBufferManager, ReentrancyGuard {
         if (amount == 0) return;
         BufferConfig memory cfg = _cfg; // Cache storage to save ~2 SLOADs
 
-        uint256 totalReceived = 0;
-        uint256 remaining = amount;
-
-        // A5: Try legacy adapter first if set
-        address legacyWarm = cfg.warmAdapter;
-        if (legacyWarm != address(0) && remaining > 0) {
-            uint256 received = IWarmAdapter(legacyWarm).withdraw(remaining, core);
-            totalReceived += received;
-            remaining = amount > totalReceived ? amount - totalReceived : 0;
-        }
-
-        // A5: Try multi-adapters in order until we get enough
-        uint256 len = _warmAdapters.length;
-        for (uint256 i = 0; i < len && remaining > 0;) {
-            address warm = _warmAdapters[i];
-            try IWarmAdapter(warm).withdraw(remaining, core) returns (uint256 received) {
-                totalReceived += received;
-                remaining = amount > totalReceived ? amount - totalReceived : 0;
-            } catch {
-                // Skip failed adapter, try next
-            }
-            unchecked {
-                ++i;
-            }
-        }
+        // A5: Withdraw from legacy + multi-adapters (deduplicated) until filled or exhausted
+        uint256 totalReceived = _withdrawFromAdapters(amount);
 
         // C2: Slippage protection - verify received amount
         if (cfg.maxWarmSlippageBps > 0 && totalReceived < amount) {
@@ -470,10 +410,12 @@ contract BufferManager is IBufferManager, ReentrancyGuard {
 
         uint256 totalReceived = 0;
         uint256 remaining = amount;
+        uint256 len = _warmAdapters.length;
 
-        // Legacy adapter first
+        // Legacy adapter first — skipped if already present in _warmAdapters (see
+        // _withdrawFromAdapters) to avoid calling the same underlying adapter twice.
         address legacyWarm = _cfg.warmAdapter;
-        if (legacyWarm != address(0) && remaining > 0) {
+        if (legacyWarm != address(0) && remaining > 0 && !_isInWarmAdapters(legacyWarm, len)) {
             (bool s, bytes memory ret) = legacyWarm.call(
                 abi.encodeWithSignature("withdraw(uint256,address)", remaining, core)
             );
@@ -487,7 +429,6 @@ contract BufferManager is IBufferManager, ReentrancyGuard {
         }
 
         // Multi-adapters
-        uint256 len = _warmAdapters.length;
         for (uint256 i = 0; i < len && remaining > 0;) {
             address warm = _warmAdapters[i];
             (bool s, bytes memory ret) = warm.call(
@@ -532,36 +473,8 @@ contract BufferManager is IBufferManager, ReentrancyGuard {
         BufferConfig memory cfg = _cfg; // Cache storage to save ~2 SLOADs
 
         if (needRefill > 0) {
-            // A5: Multi-adapter refill (same logic as refill())
-            uint256 totalReceived = 0;
-            uint256 remaining = needRefill;
-
-            // Try legacy adapter first
-            address legacyWarm = cfg.warmAdapter;
-            if (legacyWarm != address(0) && remaining > 0) {
-                try IWarmAdapter(legacyWarm).withdraw(remaining, core) returns (uint256 received) {
-                    totalReceived += received;
-                    remaining = needRefill > totalReceived ? needRefill - totalReceived : 0;
-                } catch {
-                    // Skip failed adapter
-                }
-            }
-
-            // Try multi-adapters
-            uint256 len = _warmAdapters.length;
-            for (uint256 i = 0; i < len && remaining > 0;) {
-                try IWarmAdapter(_warmAdapters[i]).withdraw(remaining, core) returns (
-                    uint256 received
-                ) {
-                    totalReceived += received;
-                    remaining = needRefill > totalReceived ? needRefill - totalReceived : 0;
-                } catch {
-                    // Skip failed adapter
-                }
-                unchecked {
-                    ++i;
-                }
-            }
+            // A5: Multi-adapter refill (same deduplicated logic as refill())
+            uint256 totalReceived = _withdrawFromAdapters(needRefill);
 
             // C2: Slippage protection — graceful degradation instead of revert
             if (cfg.maxWarmSlippageBps > 0 && totalReceived < needRefill) {
@@ -582,40 +495,10 @@ contract BufferManager is IBufferManager, ReentrancyGuard {
             uint256 hot = hotBalance();
             if (hot < needDeploy) revert InsufficientHot(hot, needDeploy);
 
-            uint256 adapterLen = _warmAdapters.length;
-            if (adapterLen == 0) revert WarmAdapterZero();
+            if (_warmAdapters.length == 0) revert WarmAdapterZero();
 
-            address primary = _warmAdapters[0];
-
-            // Single adapter: try once, if fails funds stay hot
-            if (adapterLen == 1) {
-                try IWarmAdapter(primary).deposit(needDeploy) returns (uint256 received) {
-                    emit WarmDeploySuccess(primary, needDeploy);
-                    emit BufferDeployed(needDeploy, received);
-                } catch {
-                    emit WarmDeployAllFailed(needDeploy);
-                }
-            } else if (adapterLen == 2) {
-                // Two adapters: try primary, then fallback
-                address fallback_ = _warmAdapters[1];
-
-                try IWarmAdapter(primary).deposit(needDeploy) returns (uint256 received) {
-                    emit WarmDeploySuccess(primary, needDeploy);
-                    emit BufferDeployed(needDeploy, received);
-                } catch {
-                    // Primary failed, try fallback
-                    try IWarmAdapter(fallback_).deposit(needDeploy) returns (uint256 received) {
-                        emit WarmDeployFallbackUsed(primary, fallback_, needDeploy);
-                        emit BufferDeployed(needDeploy, received);
-                    } catch {
-                        // Both failed - funds stay hot in CoreVault
-                        emit WarmDeployAllFailed(needDeploy);
-                    }
-                }
-            } else {
-                // More than 2 adapters: not supported
-                revert InvalidWarmAdapters();
-            }
+            // Try adapters in order, stopping at the first success.
+            _deployToAdapters(needDeploy);
         }
 
         // Update cached warm NAV after all operations
@@ -722,30 +605,8 @@ contract BufferManager is IBufferManager, ReentrancyGuard {
         uint256 need = tgt - hot;
         if (need > maxAmount) need = maxAmount;
 
-        // A5: Try to withdraw from all warm adapters
-        address legacyWarm = _cfg.warmAdapter;
-        if (legacyWarm != address(0)) {
-            try IWarmAdapter(legacyWarm).withdraw(need, core) returns (uint256 received) {
-                pulled += received;
-                need = need > received ? need - received : 0;
-            } catch {
-                // Skip failed adapter
-            }
-        }
-
-        // Try multi-adapters if still need more
-        uint256 len = _warmAdapters.length;
-        for (uint256 i = 0; i < len && need > 0;) {
-            try IWarmAdapter(_warmAdapters[i]).withdraw(need, core) returns (uint256 received) {
-                pulled += received;
-                need = need > received ? need - received : 0;
-            } catch {
-                // Skip failed adapter
-            }
-            unchecked {
-                ++i;
-            }
-        }
+        // A5: Withdraw from legacy + multi-adapters (deduplicated) until filled or exhausted
+        pulled = _withdrawFromAdapters(need);
 
         if (pulled > 0) {
             emit BufferRefilled(pulled, 0);
@@ -791,6 +652,82 @@ contract BufferManager is IBufferManager, ReentrancyGuard {
     }
 
     // --- Internal helpers ---
+
+    /// @dev True if `a` is present in `_warmAdapters` (first `len` entries).
+    function _isInWarmAdapters(address a, uint256 len) internal view returns (bool) {
+        for (uint256 i = 0; i < len;) {
+            if (_warmAdapters[i] == a) return true;
+            unchecked {
+                ++i;
+            }
+        }
+        return false;
+    }
+
+    /// @dev Withdraws up to `amount` from warm adapters via try/catch, stopping once
+    ///      filled. Legacy `cfg.warmAdapter` is skipped if it is also present in
+    ///      `_warmAdapters` — otherwise it would be called a second time for the same
+    ///      underlying adapter whenever its first withdrawal under-fills, since the
+    ///      default config seeds `_warmAdapters[0]` with the legacy adapter (see
+    ///      `_setConfig`). Mirrors the dedup already used by `warmBalance()` and
+    ///      `_updateWarmNavCache()`.
+    function _withdrawFromAdapters(uint256 amount) internal returns (uint256 totalReceived) {
+        uint256 remaining = amount;
+        uint256 len = _warmAdapters.length;
+        address legacyWarm = _cfg.warmAdapter;
+
+        if (legacyWarm != address(0) && remaining > 0 && !_isInWarmAdapters(legacyWarm, len)) {
+            try IWarmAdapter(legacyWarm).withdraw(remaining, core) returns (uint256 received) {
+                totalReceived += received;
+                remaining = amount > totalReceived ? amount - totalReceived : 0;
+            } catch {
+                // Skip failed adapter
+            }
+        }
+
+        for (uint256 i = 0; i < len && remaining > 0;) {
+            try IWarmAdapter(_warmAdapters[i]).withdraw(remaining, core) returns (uint256 received) {
+                totalReceived += received;
+                remaining = amount > totalReceived ? amount - totalReceived : 0;
+            } catch {
+                // Skip failed adapter, try next
+            }
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    /// @dev Attempts to deploy `amount` into `_warmAdapters` in order, stopping at the
+    ///      first adapter that succeeds. Generalizes the old len==1/len==2-only paths
+    ///      to an arbitrary adapter count. Returns true if any adapter accepted the
+    ///      deposit; funds stay hot if every adapter reverts.
+    function _deployToAdapters(uint256 amount) internal returns (bool deployed) {
+        uint256 len = _warmAdapters.length;
+        address primary = _warmAdapters[0];
+
+        for (uint256 i = 0; i < len;) {
+            address adapter = _warmAdapters[i];
+            try IWarmAdapter(adapter).deposit(amount) returns (uint256 received) {
+                if (i == 0) {
+                    emit WarmDeploySuccess(adapter, amount);
+                } else {
+                    emit WarmDeployFallbackUsed(primary, adapter, amount);
+                }
+                emit BufferDeployed(amount, received);
+                return true;
+            } catch {
+                // Try next adapter
+            }
+            unchecked {
+                ++i;
+            }
+        }
+
+        emit WarmDeployAllFailed(amount);
+        return false;
+    }
+
     function _clearWarmAdapters() internal {
         while (_warmAdapters.length > 0) {
             uint256 idx = _warmAdapters.length - 1;
