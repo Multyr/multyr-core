@@ -109,7 +109,7 @@ The `guardian` field in `CoreStorage.Layout` is set either directly (owner-only 
 | `vetoer` | `setVetoer(addr)` (owner-only, immediate) | None | `NotOwner()` if non-owner |
 | `guardian` | Direct setter or `setEcosystem` (owner-only, immediate) | None | `NotOwner()` if non-owner |
 
-No mechanism exists to "lock" a principal address permanently (except `sealFinalState` which locks `bufferManager`/`router` only). The owner retains ability to rotate vetoer and guardian indefinitely.
+No mechanism exists to "lock" a principal address permanently (except `sealBySealer` which locks `bufferManager`/`router` only). The owner retains ability to rotate vetoer and guardian indefinitely.
 
 ### 3.3 `roleOf[selector]` Management
 
@@ -149,18 +149,13 @@ No mechanism exists to "lock" a principal address permanently (except `sealFinal
 | `seedDeadDeposit` | AdminModule | Inflation hardening (one-shot) |
 | `freezeParams` | AdminModule | Permanent FLAG_PARAMS_FROZEN |
 | `enableComponentsTimelock` | AdminModule | FLAG_COMPONENTS_TIMELOCKED |
-| `sealFinalState` | AdminModule | Permanent FLAG_SYSTEM_SEALED |
 | `transferOwnership` | AdminModule | Step 1 of 2-step transfer |
 | `setVaultModeFixedMaturity` | FixedMaturityModule | Enter FM mode |
 | `configureFixedMaturity` | FixedMaturityModule | Set FM parameters |
 | `startFixedMaturityCycle` | FixedMaturityModule | Funding → Starting |
 | `activateFixedMaturityCycle` | FixedMaturityModule | Starting → Active |
 | `closeFixedMaturityCycle` | FixedMaturityModule | Matured → Closed |
-| `deployToStrategies` | LiquidityOpsModule | Deploy surplus to strategies |
-| `deployToStrategiesWithPlan` | LiquidityOpsModule | Deploy with external plan |
-| `realizeForQueue` | LiquidityOpsModule | Realize liquidity for queue |
-| `realizeForReserveAndOps` | LiquidityOpsModule | Realize for reserve + ops |
-| `rebalanceStrategies` | LiquidityOpsModule | V10 rebalance execution |
+| `deployToStrategies`, `realizeForQueue`, `realizeForReserveAndOps`, `rebalanceStrategies` | LiquidityOpsModule | **Correction**: these are `ROLE_PUBLIC` (keeper-triggered, allocation computed on-chain), not OWNER-only — see §4.4 |
 
 ### 4.2 GUARDIAN-only Functions (roleOf = 2)
 
@@ -177,6 +172,7 @@ No mechanism exists to "lock" a principal address permanently (except `sealFinal
 | `pauseDeposits` | AdminModule | Set FLAG_PAUSED_DEPOSITS |
 | `unpauseDeposits` | AdminModule | Clear FLAG_PAUSED_DEPOSITS |
 | `pauseWithdrawals` | AdminModule | Set FLAG_PAUSED_WITHDRAWALS |
+| `deployToStrategiesWithPlan` | LiquidityOpsModule | Deploy with a caller-supplied allocation plan. Was `ROLE_PUBLIC`; moved to OWNER_OR_GUARDIAN because a public caller could otherwise steer which registered strategies receive capital and in what proportion. |
 
 > Note: `unpauseWithdrawals` is OWNER-only (roleOf = 1). The guardian can pause withdrawals but not unpause them.
 
@@ -197,6 +193,10 @@ Key permissionless functions:
 | `refundClaim` | FixedMaturityModule | FundingFailed state only |
 | `canDeploy` | LiquidityOpsModule | View function |
 | `canRebalance` | LiquidityOpsModule | View function |
+| `deployToStrategies` | LiquidityOpsModule | Deploy surplus; allocation computed on-chain (keeper-triggered) |
+| `realizeForQueue` | LiquidityOpsModule | Realize liquidity for queue settle |
+| `realizeForReserveAndOps` | LiquidityOpsModule | Realize for hot buffer reserve |
+| `rebalanceStrategies` | LiquidityOpsModule | V10 rebalance execution |
 | `totalAssets` | ERC4626Module | Standard ERC-4626 view |
 
 ---

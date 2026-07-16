@@ -84,8 +84,9 @@ library CoreStorage {
         // Selector registry for role validation (set once, immutable)
         address selectorRegistry;
 
-        // System sealer binding - ensures sealFinalState() can only succeed after prepareSeal()
-        // This eliminates TOCTOU risk by requiring hash verification in same transaction
+        // System sealer binding - set atomically by sealBySealer() (called from
+        // SystemSealer.verifyAndSeal()) alongside FLAG_SYSTEM_SEALED, in the same call
+        // that verifies the config hash. Retained post-seal as an audit record.
         bytes32 pendingSealHash;
         address authorizedSealer; // SystemSealer contract address (set once)
 

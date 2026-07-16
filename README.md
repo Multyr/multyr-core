@@ -119,9 +119,9 @@ EIP-7201 namespaces: `CoreStorage` (main flags, routing table, params), `FeeStor
   preventing coordinated mass-exit events from draining the hot buffer in a single block.
 - **BufferManager invariant**: `BufferManager` holds no idle asset balance at rest. Excess
   hot USDC is deployed to warm adapters; the hot buffer is refilled only on settlement demand.
-- **System sealing irreversibility**: after `sealFinalState()`, the routing table and module
-  set are permanently frozen. No upgrade path exists post-seal without a governance-approved
-  Timelock proposal with a minimum 2-day delay.
+- **System sealing irreversibility**: after `sealBySealer()`, the routing table and module
+  set are permanently frozen. No upgrade path exists post-seal without a
+  governance-approved Timelock proposal with a minimum 2-day delay.
 - **ForceExit liquidity waterfall**: `forceWithdraw` and `forceWithdrawAll` pull liquidity
   from warm adapters first, then from strategies in allocation order. The sequence is
   deterministic and cannot be short-circuited.
@@ -314,8 +314,12 @@ placed under a secondary `componentsTimelock` flag.
 
 After initial deployment, `StrategyBootstrapper` role grants are revoked and `paramMinDelay`
 is raised from 0 to the production value. Once the routing table is final, `freezeRouting()`
-is called (irreversible). System sealing (`prepareSeal` then `sealFinalState`) can be
-applied to permanently lock the vault configuration.
+is called (irreversible). System sealing — `SystemSealer.verifyAndSeal()`, which atomically
+verifies invariants and calls `CoreVault.sealBySealer()` in a single timelock call — can be
+applied to permanently lock the vault configuration. (An older two-call `prepareSeal` /
+`sealFinalState` design was removed ahead of audit: its config hash depended on
+`block.timestamp`, which made the batch un-executable across the timelock delay, and once
+its `SystemSealer` half was replaced, the `CoreVault` half had no remaining caller.)
 
 | Role | Address type | Capabilities |
 |---|---|---|

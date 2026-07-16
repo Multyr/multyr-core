@@ -60,8 +60,6 @@ contract CoreVault is ERC4626, ICoreVault {
     error SealerAlreadySet();
     error NotAuthorizedSealer();
     error InvalidConfigHash();
-    error SealNotPrepared();
-    error SealHashMismatch(bytes32 pending, bytes32 expected);
     error RoutingNotFrozen();
     error NotAuthorizedModule();
 
@@ -358,33 +356,15 @@ contract CoreVault is ERC4626, ICoreVault {
         emit Events.AuthorizedSealerSet(sealer);
     }
 
-    function prepareSeal(bytes32 configHash) external {
-        CoreStorage.Layout storage core = CoreStorage.layout();
-        if (core.packedFlags & CoreStorage.FLAG_SYSTEM_SEALED != 0) revert SystemSealed();
-        if (msg.sender != core.authorizedSealer) revert NotAuthorizedSealer();
-        if (configHash == bytes32(0)) revert InvalidConfigHash();
-        if (core.packedFlags & CoreStorage.FLAG_ROUTING_FROZEN == 0) revert RoutingNotFrozen();
-        core.pendingSealHash = configHash;
-        emit Events.SealPrepared(msg.sender, configHash);
-    }
-
-    function sealFinalState(bytes32 expectedHash) external onlyOwner {
-        CoreStorage.Layout storage core = CoreStorage.layout();
-        if (core.packedFlags & CoreStorage.FLAG_SYSTEM_SEALED != 0) revert SystemSealed();
-        if (core.pendingSealHash == bytes32(0)) revert SealNotPrepared();
-        if (core.pendingSealHash != expectedHash) {
-            revert SealHashMismatch(core.pendingSealHash, expectedHash);
-        }
-        core.packedFlags |= CoreStorage.FLAG_SYSTEM_SEALED;
-        emit Events.SystemSealed(msg.sender, expectedHash, block.timestamp);
-    }
-
     /**
      * @notice Atomically record the verified config hash and seal in one call.
      * @dev Called by SystemSealer.verifyAndSeal() as a single timelock operation.
-     *      Unlike the two-step prepareSeal/sealFinalState pattern, this function
-     *      sets pendingSealHash and immediately activates the sealed flag so no
-     *      separate executeBatch step is required.
+     *      Sets pendingSealHash and immediately activates the sealed flag so no
+     *      separate executeBatch step is required. This is the only sealing path;
+     *      the prior two-step prepareSeal()/sealFinalState() pattern was removed
+     *      as dead code (SystemSealer.prepareSeal(), the only caller, was removed
+     *      when its block.timestamp-dependent hash made the two-call timelock
+     *      batch permanently un-executable — see SystemSealer.sol for details).
      */
     function sealBySealer(bytes32 configHash) external {
         CoreStorage.Layout storage core = CoreStorage.layout();

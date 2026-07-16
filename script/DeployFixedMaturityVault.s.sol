@@ -171,7 +171,7 @@ contract DeployFixedMaturityVault is Script {
         console.log("[1.1] GlobalConfig:", address(result.globalConfig));
 
         // FeeCollector -- governor IMMUTABLE = timelock
-        // SystemSealer.prepareSeal() verifies fc.governor() == config.rootTimelock
+        // SystemSealer.verifyAndSeal() verifies fc.governor() == config.rootTimelock
         result.feeCollector = new FeeCollector(
             cfg.timelock, // IMMUTABLE
             cfg.treasury,

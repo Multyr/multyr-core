@@ -27,7 +27,7 @@ pragma solidity ^0.8.24;
 //
 // FIXES APPLIED:
 // ─────────────
-// Fix A (QueueModule._crystallize, PerfFeeMixin._crystallize):
+// Fix A (QueueModule._crystallize):
 //   In the drawdown branch, leave the HWM unchanged:
 //     if (pps <= old) {
 //         f.lastCrystallize = uint64(block.timestamp);
@@ -35,10 +35,15 @@ pragma solidity ^0.8.24;
 //         return (old, 0);   // HWM is preserved
 //     }
 //
-// Fix B (QueueModule._crystallize, PerfFeeMixin._crystallize):
+// Fix B (QueueModule._crystallize):
 //   Interval guard moved inside _crystallize(), applied after the drawdown check
 //   so drawdown crystallisations are still recorded but fee-charging calls within
 //   the minimum interval are silently rejected.
+//
+// NOTE: PerfFeeMixin._crystallize() carried the identical pair of bugs and received
+// the identical pair of fixes, but as a dead-code cleanup pass ahead of audit it has
+// since been removed entirely (src/core/mixins/PerfFeeMixin.sol) — it had no active
+// caller; QueueModule._crystallize() is the only implementation now.
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { Test } from "lib/forge-std/src/Test.sol";

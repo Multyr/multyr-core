@@ -57,7 +57,8 @@ import { DeployTypes } from "@multyr-core/libs/DeployTypes.sol";
 ///                  DEPLOY_INCENTIVES (opt), DEPLOY_UPKEEP (opt), DEPLOY_WARM_ADAPTERS (opt),
 ///                  CHAINLINK_USDC_FEED (opt), OUTPUT_JSON (opt)
 /// @custom:post-deploy 1) Run DeployUsdcLendingStrategy.s.sol with vault+ecosystem addresses
-///                     2) Timelock: acceptOwnerTransfer + setAuthorizedSealer + sealFinalState
+///                     2) Timelock: acceptOwnerTransfer + setAuthorizedSealer + systemSealer.verifyAndSeal(config)
+///                        (single atomic call — see docs/architecture.md §10)
 ///                     3) Verify all contracts on Arbiscan
 /// @custom:replaces script/DeployCoreSystem.s.sol (legacy monorepo path)
 contract DeployCoreSystem is Script {
@@ -246,7 +247,7 @@ contract DeployCoreSystem is Script {
         console.log("      Will transfer to:", cfg.governor);
 
         // 1.3 FeeCollector - governor is IMMUTABLE = ROOT_TIMELOCK
-        // SystemSealer.prepareSeal() verifies fc.governor() == config.rootTimelock
+        // SystemSealer.verifyAndSeal() verifies fc.governor() == config.rootTimelock
         result.feeCollector = new FeeCollector(
             cfg.timelock, // IMMUTABLE governor = ROOT_TIMELOCK
             cfg.treasury,
@@ -794,7 +795,8 @@ contract DeployCoreSystem is Script {
         console.log("   SYSTEM_SEALER_ADDRESS=", address(result.systemSealer));
         console.log("   GUARDIAN_ADDRESS=", cfg.guardian);
         console.log("   TIMELOCK_ADDRESS=", cfg.timelock);
-        console.log("2. Timelock: acceptOwnerTransfer + setAuthorizedSealer + sealFinalState");
+        console.log("2. Timelock: acceptOwnerTransfer + setAuthorizedSealer + systemSealer.verifyAndSeal(config)");
+        console.log("   (single atomic call, no separate prepare/seal step)");
         console.log("3. Verify all contracts on Arbiscan");
         console.log("4. See docs/09-audit/deployment-flow.md for full Modular Path B sequence");
     }

@@ -200,7 +200,6 @@ library Events {
     // --- Selector Registry & System Seal events ---
     event SelectorRegistrySet(address indexed registry);
     event AuthorizedSealerSet(address indexed sealer);
-    event SealPrepared(address indexed sealer, bytes32 configHash);
     event SystemSealed(address indexed sealer, bytes32 configHash, uint256 timestamp);
 
     // --- Module Authorization events ---

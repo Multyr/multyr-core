@@ -228,18 +228,23 @@ newHwm = totalAssets / (totalSupply + 1_980_198e12)  ≈ 1.0078 USDC/share
 Pre-conditions for fee to be minted:
 1. `totalSupply > 0`
 2. `pps > highWaterMark`
-3. `feeAssets > 0` (profit is non-zero)
-4. `feeShares > 0` (conversion does not produce zero)
+3. `block.timestamp >= lastCrystallize + minCrystallizeInterval` (skipped on the very first crystallize, i.e. `highWaterMark == 0`) — see §5.3
+4. `feeAssets > 0` (profit is non-zero)
+5. `feeShares > 0` (conversion does not produce zero)
 
-If any condition fails, `highWaterMark` is updated to current PPS but no shares are minted. `lastCrystallize` is always updated.
+Branch behavior when `pps <= highWaterMark` (no profit): `highWaterMark` is **left unchanged** at its prior peak and `lastCrystallize` is updated; no shares are minted. Previously `highWaterMark` was incorrectly overwritten with the (lower or equal) current `pps`, which broke HWM monotonicity — a subsequent crystallize at a `pps` between the old and new (lower) HWM would wrongly charge a performance fee on assets the vault had already been credited for. This was fixed by writing the prior `old` value back instead of `pps`. `Events.Crystallized(old, pps, 0)` is still emitted with the (unchanged) current `pps` as its second argument for observability, even though storage does not move.
+
+Branch behavior when the interval guard (condition 3) blocks a would-be-profitable crystallize: the call returns early with `(old, 0)` — **neither `highWaterMark` nor `lastCrystallize` is updated** in this case, unlike the no-profit branch above.
 
 ### 5.3 Minimum crystallize interval
 
-`minCrystallizeInterval` (`FeeStorage.Layout.minCrystallizeInterval`) is not enforced by `_crystallize()` itself — the interval is a governance parameter. In practice, `settleFeesAndProcessQueue` can be called multiple times per day, so crystallization occurs on every successful settle batch.
+`minCrystallizeInterval` (`FeeStorage.Layout.minCrystallizeInterval`) **is now enforced by `_crystallize()`**: if `pps > highWaterMark` (profitable) but `block.timestamp < lastCrystallize + minCrystallizeInterval`, the call returns without minting a fee or advancing `highWaterMark`/`lastCrystallize`, deferring fee extraction to a later settle. The guard is skipped on the very first ever crystallize (`highWaterMark == 0`). Previously this parameter was accepted by governance (`submitPerfParams`/`acceptPerfParams`) but had no runtime effect — `_crystallize()` never read it, so `settleFeesAndProcessQueue` could crystallize performance fees on every call regardless of the configured minimum interval.
 
 ### 5.4 PerfFeeMixin (legacy)
 
 `src/core/mixins/PerfFeeMixin.sol:73` contains an older `_crystallize()` using a `Perf` struct stored in contract storage (not EIP-7201 namespaced). This mixin is **not imported by any active module** on `c39f9462`. The active perf fee logic is in `QueueModule._crystallize()` (`src/core/modules/QueueModule.sol:763`), which uses `FeeStorage.Layout`. See Footer §Discrepancies.
+
+This branch applied the same HWM-monotonicity and min-interval-enforcement fixes (§5.2, §5.3) to `PerfFeeMixin._crystallize()` for consistency, even though it remains dead code with no active caller.
 
 ---
 
@@ -271,8 +276,8 @@ totalForceBps = witBps + forceExitPenaltyBps + preMaturityForceExitPenaltyBps
 |----|-----------|-------------|
 | **F1** | `depBps`, `witBps`, `immediateExitPenaltyBps`, `forceExitPenaltyBps` ≤ 1000 bps | `submitFeeParams` validation, `FeeCapExceeded` revert |
 | **F2** | Fee parameters only change after `paramMinDelay` and within `MAX_WINDOW` | `_validateEta` in `acceptFeeParams` |
-| **F3** | Performance fee minted only when `pps > highWaterMark` and `totalSupply > 0` | `_crystallize()` guard |
-| **F4** | `highWaterMark` is updated after every crystallize attempt (even if no fee minted) | `_crystallize()` unconditionally sets `f.highWaterMark = newHwm` |
+| **F3** | Performance fee minted only when `pps > highWaterMark`, `totalSupply > 0`, and the min-crystallize-interval has elapsed since `lastCrystallize` (skipped on first-ever crystallize) | `_crystallize()` guard |
+| **F4** | `highWaterMark` is monotonically non-decreasing; it is only ever raised (on a successful fee mint) or left unchanged — never lowered | `_crystallize()`: no-profit branch writes `old` back (not `pps`); interval-guard branch and profit branch never lower it |
 | **F5** | Only owner can submit/accept fee changes; owner OR vetoer can revoke | `_onlyOwner()` / `_onlyOwnerOrVetoer()` checks in AdminModule |
 | **F6** | Exit fee shares transferred from user, not minted | `_transferShares()` not `_mint()` for exit fees |
 

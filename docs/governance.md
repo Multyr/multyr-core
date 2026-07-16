@@ -62,7 +62,7 @@ The owner (role 1 = `OWNER`) has authority over:
 - All parameter timelock submissions and acceptances (`submitFeeParams`, `acceptFeeParams`, `submitPerfParams`, `acceptPerfParams`, `submitMinDelay`, `acceptMinDelay`)
 - Component assignments (`setParams`, `setBufferManager`, `setRouter`, `setHealthRegistry`, `setIncentives`, `setIncentivesEngine`, `setRewardsPayoutManager`, `setRebalancePolicy`, `setRebalanceGuard`, `setExecutionMemory`, `setStrictExecutionMemory`, `setFeeCollector`, `setVetoer`)
 - Bootstrap one-shots (`setInitialFees`, `setInitialPerfParams`, `seedDeadDeposit`)
-- Irreversible state transitions (`freezeParams`, `enableComponentsTimelock`, `sealFinalState`)
+- Irreversible state transitions (`freezeParams`, `enableComponentsTimelock`, `sealBySealer`)
 - FixedMaturity lifecycle (`setVaultModeFixedMaturity`, `configureFixedMaturity`, `startFixedMaturityCycle`, `activateFixedMaturityCycle`, `closeFixedMaturityCycle`)
 - Ecosystem batch init (`setEcosystem`)
 
@@ -208,7 +208,7 @@ This prevents accidental race between two parameter windows.
 
 There is a notable **bootstrapping asymmetry**: the initial value of `paramMinDelay` controls the delay for all subsequent param changes — including changes to `paramMinDelay` itself. Setting a very short initial delay is dangerous: an attacker with owner access could immediately reduce the delay further, making all future timelocks ineffective.
 
-Best practice: set `paramMinDelay >= 2 days` before calling `sealFinalState()`. The seal enforces a floor of `1 day` for future `submitMinDelay` calls (H3), but does not retroactively raise a too-short existing delay.
+Best practice: set `paramMinDelay >= 2 days` before sealing (`sealBySealer()`). The seal enforces a floor of `1 day` for future `submitMinDelay` calls (H3), but does not retroactively raise a too-short existing delay.
 
 ### 3.7 `setEcosystem` — Batch Init
 
@@ -218,7 +218,7 @@ Best practice: set `paramMinDelay >= 2 days` before calling `sealFinalState()`. 
 - Sets: `bufferManager`, `router`, `guardian`, `healthRegistry`, `incentives`, `feeCollector` (if non-zero in config)
 - Emits individual events for each component set
 
-This function is subject to the same access control as individual component setters (OWNER). After `enableComponentsTimelock()`, setting `bufferManager` and `router` via `setEcosystem` would violate the timelock gate — deployment scripts must call `setEcosystem` before enabling the components timelock.
+This function is subject to the same access control as individual component setters (OWNER). `setEcosystem` now explicitly reverts with `ComponentsTimelocked()` if called after `enableComponentsTimelock()` — previously it had no such check and could set `bufferManager`/`router` directly, bypassing the submit/accept timelock gate that `setBufferManager`/`setRouter` enforce (G8). Deployment scripts must still call `setEcosystem` before enabling the components timelock; after that point, `bufferManager`/`router` changes must go through `submitBufferManager`/`acceptBufferManager` or `submitRouter`/`acceptRouter`.
 
 **Source**: `src/core/modules/AdminModule.sol:73`.
 
@@ -280,21 +280,30 @@ function _requireNotFrozen() internal view {
 
 Use case: post-audit immutability commitment. The fee/perf structure is locked forever.
 
-### 4.5 sealFinalState (FLAG_SYSTEM_SEALED)
+### 4.5 sealBySealer (FLAG_SYSTEM_SEALED)
 
-`sealFinalState()` sets `FLAG_SYSTEM_SEALED` permanently:
+`sealBySealer()`, called atomically from `SystemSealer.verifyAndSeal()` in a single
+timelock call (see `docs/architecture.md` §10), sets `FLAG_SYSTEM_SEALED` permanently:
 
 - `setBufferManager`, `setRouter` revert with `SystemSealed()` (even without `enableComponentsTimelock`)
 - `submitMinDelay` requires `newDelay >= 1 days` (prevents setting delay to 0 after seal — H3)
 - Does NOT block param timelocks (that is `freezeParams`)
 - **Irreversible**
 
+An earlier `prepareSeal`/`sealFinalState` pair required two separate timelock-executed
+calls with a hash committed in between. Its contract-side helper,
+`SystemSealer.prepareSeal()`, computed that hash including `block.timestamp`, which made
+the batch un-executable (the hash could never be known ahead of `executeBatch()`). Once
+`SystemSealer.prepareSeal()` was removed, `CoreVault.prepareSeal()`/`sealFinalState()`
+had no remaining caller and were deleted as dead code ahead of audit — `sealBySealer()`
+is now the only sealing path.
+
 ```mermaid
 stateDiagram-v2
     [*] --> Mutable : deploy
     Mutable --> ComponentsTimelocked : enableComponentsTimelock()
-    ComponentsTimelocked --> Sealed : sealFinalState()
-    Mutable --> Sealed : sealFinalState() (skip components timelock)
+    ComponentsTimelocked --> Sealed : sealBySealer()
+    Mutable --> Sealed : sealBySealer() (skip components timelock)
     Mutable --> ParamsFrozen : freezeParams()
     ComponentsTimelocked --> ParamsFrozen : freezeParams()
     Sealed --> ParamsFrozen : freezeParams()
@@ -345,7 +354,7 @@ stateDiagram-v2
 
 ## 6. Bootstrap Lifecycle
 
-During initial deployment, certain one-shot operations must be called before `sealFinalState()`:
+During initial deployment, certain one-shot operations must be called before `sealBySealer()`:
 
 | Step | Function | Flag set | Effect |
 |------|----------|----------|--------|
@@ -353,7 +362,7 @@ During initial deployment, certain one-shot operations must be called before `se
 | 2 | `setInitialPerfParams(...)` | `FLAG_PERF_INITIALIZED` | Sets FeeStorage perf params without timelock. One-shot. |
 | 3 | `seedDeadDeposit(assets)` | `FLAG_DEAD_DEPOSIT_DONE` | Mints shares to `0xdEaD`. Inflation attack hardening. One-shot, pre-seal. |
 | 4 | `enableComponentsTimelock()` | `FLAG_COMPONENTS_TIMELOCKED` | After this, `setBufferManager`/`setRouter` require timelock submit/accept. |
-| 5 | `sealFinalState()` | `FLAG_SYSTEM_SEALED` | Locks component changes permanently. |
+| 5 | `sealBySealer()` via `SystemSealer.verifyAndSeal()` | `FLAG_SYSTEM_SEALED` | Locks component changes permanently. |
 
 All one-shot functions revert with a dedicated error if called a second time (checked via their flag bit). `setInitialFees` and `setInitialPerfParams` additionally require `FLAG_SYSTEM_SEALED == 0` (must be called pre-seal).
 
@@ -366,13 +375,13 @@ All one-shot functions revert with a dedicated error if called a second time (ch
 | ID | Invariant | Source |
 |----|-----------|--------|
 | G1 | `FLAG_PARAMS_FROZEN` is monotone: once set, never cleared | `AdminModule.freezeParams()` |
-| G2 | `FLAG_SYSTEM_SEALED` is monotone: once set, never cleared | `AdminModule.sealFinalState()` |
-| G3 | At most one pending fee param set exists at any time (H4) | `AdminModule:PendingParamsNotResolved()` |
+| G2 | `FLAG_SYSTEM_SEALED` is monotone: once set, never cleared | `CoreVault.sealBySealer()` |
+| G3 | At most one pending param set exists at any time, per category — fee, perf, min-delay, buffer manager, router (H4) | `AdminModule:PendingParamsNotResolved()` in `submitFeeParams`, `submitPerfParams`, `submitMinDelay`, `submitBufferManager`, `submitRouter` |
 | G4 | After seal, `submitMinDelay` requires `newDelay >= 1 days` (H3) | `AdminModule:MinDelayTooShort()` |
 | G5 | `acceptFeeParams` only succeeds within `[ETA, ETA + MAX_WINDOW]` | `AdminModule:_validateEta()` |
 | G6 | `seedDeadDeposit` mints to `0xdEaD` only once, pre-seal | `AdminModule:FLAG_DEAD_DEPOSIT_DONE` |
 | G7 | Owner transfer requires explicit two-step acceptance by `pendingOwner` | `CoreStorage.owner`, `pendingOwner` |
-| G8 | `setBufferManager`/`setRouter` require timelock after `FLAG_COMPONENTS_TIMELOCKED` | `AdminModule:ComponentsTimelocked()` |
+| G8 | `setBufferManager`/`setRouter`/`setEcosystem` require timelock (or revert) after `FLAG_COMPONENTS_TIMELOCKED` | `AdminModule:ComponentsTimelocked()` |
 | G9 | FixedMaturity state transitions are monotone (no backward transitions) | `FixedMaturityModule` state checks |
 | G10 | `refundClaim` applies zero fees in `FundingFailed` state | `FixedMaturityModule.refundClaim()` |
 
@@ -394,7 +403,7 @@ All one-shot functions revert with a dedicated error if called a second time (ch
 | `Paused` | `pause()` | — |
 | `Unpaused` | `unpause()` | — |
 | `ParamsFrozen` | `freezeParams()` | — |
-| `SystemSealed` | `sealFinalState()` | — |
+| `SystemSealed` | `sealBySealer()` (via `SystemSealer.verifyAndSeal()`) | — |
 | `OwnershipTransferStarted` | `transferOwnership` | `newOwner` |
 | `OwnershipTransferred` | `acceptOwnership` | `previousOwner`, `newOwner` |
 | `FixedMaturityStateTransition` | FM state changes | `from`, `to` |
@@ -424,7 +433,7 @@ All one-shot functions revert with a dedicated error if called a second time (ch
 
 ### 9.4 Bootstrap Sequence Error
 
-**Risk**: `sealFinalState()` called before `seedDeadDeposit()` — inflation attack window open.
+**Risk**: `sealBySealer()` called before `seedDeadDeposit()` — inflation attack window open.
 **Mitigation**: `seedDeadDeposit` requires `FLAG_SYSTEM_SEALED == 0`. If seal is applied first, dead deposit can never be seeded. Deployment scripts must respect the bootstrap order (§6). This is a deployment-time risk, not a runtime one.
 
 ### 9.5 FixedMaturity Maturity Timestamp
@@ -485,7 +494,7 @@ Day 2: team investigates, owner resubmits with correct params
 ### 10.4 Post-Seal Min Delay Attack (H3 Defence)
 
 ```
-Attacker compromises owner key after sealFinalState() is called.
+Attacker compromises owner key after sealBySealer() is called.
 Attack: try submitMinDelay(0)  ← set delay to 0, then accept immediately
 Result: revert MinDelayTooShort()  ← newDelay=0 < 1 days floor
 Attack is blocked — paramMinDelay cannot be zeroed post-seal.
@@ -579,7 +588,7 @@ Note: Before Step 2 completes, Alice remains owner — Safe cannot be
 | `AdminModule.submitPerfParams` | `src/core/modules/AdminModule.sol:161` | Submit perf rate/HWM params |
 | `AdminModule.submitMinDelay` | `src/core/modules/AdminModule.sol:212` | H3 post-seal floor enforced here |
 | `AdminModule.freezeParams` | `src/core/modules/AdminModule.sol:432` | Sets FLAG_PARAMS_FROZEN irreversibly |
-| `AdminModule.sealFinalState` | `src/core/CoreVault.sol:371` | Sets FLAG_SYSTEM_SEALED irreversibly |
+| `CoreVault.sealBySealer` | `src/core/CoreVault.sol:369` | Sets FLAG_SYSTEM_SEALED irreversibly; called atomically by `SystemSealer.verifyAndSeal()` — the only sealing path (legacy `prepareSeal`/`sealFinalState` removed as dead code) |
 | `AdminModule.enableComponentsTimelock` | `src/core/modules/AdminModule.sol:596` | Sets FLAG_COMPONENTS_TIMELOCKED |
 | `AdminModule.seedDeadDeposit` | `src/core/modules/AdminModule.sol:450` | Pre-seal inflation hardening |
 | `AdminModule.setInitialFees` | `src/core/modules/AdminModule.sol:500` | One-shot pre-seal fee bootstrap |
