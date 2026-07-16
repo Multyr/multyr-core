@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.28;
 
 import { IStrategyRouter, IStrategy } from "../../interfaces/IStrategyRouter.sol";
 import { IParamsProvider } from "../../interfaces/IParamsProvider.sol";

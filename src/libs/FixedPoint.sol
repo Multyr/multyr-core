@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.28;
 
 /// @title FixedPoint
 /// @notice Library for fixed-point arithmetic with explicit rounding direction
