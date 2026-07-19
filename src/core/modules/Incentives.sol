@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.28;
 
 /// @notice Modulo Incentivi (Loyalty Boost) per CoreVault:
 /// - Cliff (Tc) = 30d, Full (Tf) = 180d, Bmax = +3% APY (configurabili)

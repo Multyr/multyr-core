@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.28;
 
 /// @title IWarmAdapter - Interfaccia adapter T+0 (Aave/Morpho no-borrow)
 interface IWarmAdapter {

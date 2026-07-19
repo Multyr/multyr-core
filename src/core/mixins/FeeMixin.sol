@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.28;
 import { Events } from "../libraries/Events.sol";
 import { ParamsFrozen, RecipientFrozen } from "../libraries/Errors.sol";
 import { Percentage } from "../../libs/Percentage.sol";

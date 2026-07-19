@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.28;
 
 /// @notice Interfaccia del modulo Incentivi (Loyalty Boost).
 /// Tutti gli importi esposti/attesi sono in WAD (1e18) salvo diversa nota.
