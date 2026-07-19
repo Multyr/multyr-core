@@ -175,9 +175,10 @@ library DeployLib {
             }
         }
         for (uint256 i; i < liquidityOpsSelectors.length;) {
-            vault.setModule(
-                liquidityOpsSelectors[i], address(liquidityOpsModule), SelectorLib.ROLE_PUBLIC
-            );
+            uint8 role = liquidityOpsSelectors[i] == LiquidityOpsModule.deployToStrategiesWithPlan.selector
+                ? SelectorLib.ROLE_OWNER_OR_GUARDIAN
+                : SelectorLib.ROLE_PUBLIC;
+            vault.setModule(liquidityOpsSelectors[i], address(liquidityOpsModule), role);
             unchecked {
                 ++i;
             }

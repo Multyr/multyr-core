@@ -278,7 +278,7 @@ contract Hardening_MintFeeAlignment is Test {
         uint256 shares1 = v.deposit(amount, payer);
         uint256 fee1 = v.balanceOf(feeCollector) - fc1;
 
-        // depositFor (payer != receiver)
+        // depositFor: payer=msg.sender (same as deposit, receiver can differ)
         uint256 fc2 = v.balanceOf(feeCollector);
         vm.prank(payer);
         uint256 shares2 = v.deposit(amount, receiver);

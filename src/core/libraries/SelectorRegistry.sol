@@ -151,7 +151,7 @@ contract SelectorRegistry {
 
         // Standard ERC4626
         if (selector == 0x6e553f65) return ROLE_PUBLIC; // deposit(uint256,address)
-        if (selector == 0xe63db82d) return ROLE_PUBLIC; // depositFor(uint256,address,address)
+        if (selector == bytes4(keccak256("depositFor(uint256,address)"))) return ROLE_PUBLIC; // depositFor(uint256,address)
         if (selector == 0x94bf804d) return ROLE_PUBLIC; // mint(uint256,address)
         if (selector == 0xb460af94) return ROLE_PUBLIC; // withdraw(uint256,address,address)
         if (selector == 0xba087652) return ROLE_PUBLIC; // redeem(uint256,address,address)
@@ -166,12 +166,16 @@ contract SelectorRegistry {
         if (selector == 0x439fdeb4) return ROLE_PUBLIC; // forceWithdraw(uint256,address,address,(address,uint256)[],uint256)
 
         // ─────────────────────────────────────────────────────────────────────────
-        // LIQUIDITYOPSMODULE SELECTORS (3 total) - MUST BE ROLE_PUBLIC
-        // Deploy surplus to strategies (keeper/permissionless)
+        // LIQUIDITYOPSMODULE SELECTORS
+        // deployToStrategies / canDeploy / realize* / rebalance* are keeper-public.
+        // deployToStrategiesWithPlan accepts a caller-supplied allocation plan and
+        // must be ROLE_OWNER_OR_GUARDIAN -- even with strategy address validation a
+        // permissionless caller could manipulate which registered strategies receive
+        // capital and in what proportion.
         // ─────────────────────────────────────────────────────────────────────────
         if (selector == LiquidityOpsModule.canDeploy.selector) return ROLE_PUBLIC;
         if (selector == LiquidityOpsModule.deployToStrategies.selector) return ROLE_PUBLIC;
-        if (selector == LiquidityOpsModule.deployToStrategiesWithPlan.selector) return ROLE_PUBLIC;
+        if (selector == LiquidityOpsModule.deployToStrategiesWithPlan.selector) return ROLE_OWNER_OR_GUARDIAN;
         if (selector == LiquidityOpsModule.realizeForQueue.selector) return ROLE_PUBLIC;
         if (selector == LiquidityOpsModule.realizeForReserveAndOps.selector) return ROLE_PUBLIC;
         if (selector == LiquidityOpsModule.canRebalanceStrategies.selector) return ROLE_PUBLIC;
@@ -384,6 +388,9 @@ contract SelectorRegistry {
      * @notice Get count of all registered selectors
      * @return count Total number of registered selectors
      */
+    // TODO: this could be a useless function, and it's already lagging as we have 7 LiquidityOps slectors but only 6 are here.
+    // @dev If we keep this, we need to maintain it manually as selectors are added/removed -
+    // consider if it's worth the maintenance burden.
     function totalRegisteredSelectors() external pure returns (uint256) {
         // 34 owner + 15 admin view + 6 queue write + 5 queue view + 11 ERC4626 + 6 LiquidityOps + 14 FM = 91
         return 91;

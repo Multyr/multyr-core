@@ -71,7 +71,7 @@ Handles all user-facing deposit and force-exit operations. Standard `withdraw()`
 | Function | Selector | Access | Description |
 |---|---|---|---|
 | `deposit(uint256,address)` | `0x6e553f65` | PUBLIC | Deposit assets, receive shares |
-| `depositFor(uint256,address,address)` | `0xe63db82d` | PUBLIC | Deposit on behalf of payer |
+| `depositFor(uint256,address)` | `0x36efd16f` | PUBLIC | Deposit on behalf of `receiver`; `msg.sender` is always the payer (router model) |
 | `mint(uint256,address)` | `0x94bf804d` | PUBLIC | Mint exact shares, pay gross assets |
 | `deposit(uint256,address,uint256)` | `0x0efe6a8b` | PUBLIC | Deposit with min-shares slippage guard |
 | `mint(uint256,address,uint256)` | `0x2a1f2a0c` | PUBLIC | Mint with max-assets slippage guard |
@@ -80,7 +80,7 @@ Handles all user-facing deposit and force-exit operations. Standard `withdraw()`
 | `withdraw(uint256,address,address,uint256)` | `0x9a0e7d66` | PUBLIC | **Always reverts** `AsyncWithdrawalRequired` |
 | `redeem(uint256,address,address,uint256)` | `0xc6e6f592` | PUBLIC | **Always reverts** `AsyncWithdrawalRequired` |
 | `forceWithdraw(uint256,address,address,(address,uint256)[],uint256)` | `0x439fdeb4` | PUBLIC | Guaranteed exit with user plan |
-| `forceWithdrawAll(address)` | `0x0f0824be` | PUBLIC | Guaranteed exit: burns all shares |
+| `forceWithdrawAll(address)` | `0x0f0824be` | PUBLIC | Best-effort exit: burns only the proportional slice of shares/fees matching assets actually raised |
 
 Source: `src/core/modules/ERC4626Module.sol:81-332`.
 
@@ -473,7 +473,7 @@ Handles all strategy capital flows: deploy surplus to strategies, realize assets
 |---|---|---|
 | `canDeploy()` | PUBLIC view | Returns true if surplus deployable |
 | `deployToStrategies(uint256 amount)` | PUBLIC | Deploy `amount` to strategies (keeper-triggered) |
-| `deployToStrategiesWithPlan(AllocationTypes.AllocPlan)` | PUBLIC | Deploy with explicit allocation plan (V10) |
+| `deployToStrategiesWithPlan(AllocationTypes.AllocPlan)` | ROLE_OWNER_OR_GUARDIAN | Deploy with explicit, caller-supplied allocation plan (V10) |
 | `realizeForQueue(uint256 amount)` | PUBLIC | Realize assets from strategies for queue settle |
 | `realizeForReserveAndOps(uint256 maxAmount)` | PUBLIC | Realize for hot buffer reserve maintenance |
 | `canRebalanceStrategies()` | PUBLIC view | Returns true if rebalance warranted |
@@ -491,6 +491,8 @@ Deploy surplus = `hot - opsReserveTargetBps% - warmHeadroom`.
 OpenEnded-only check: `_checkOpenEndedDeployAllowed(fm)` reverts if FixedMaturity vault tries to deploy (capital must flow to `fixedTermStrategy` via FixedMaturityModule, not general router). Source: `src/core/modules/LiquidityOpsModule.sol:18-20`.
 
 ### 7.4 V10 Portfolio-Grade Allocation (Optional)
+
+`deployToStrategiesWithPlan()` accepts an externally supplied allocation plan (`plan[i].strat`, `plan[i].amount`) rather than deriving it on-chain, so it is restricted to `ROLE_OWNER_OR_GUARDIAN` — with a caller-supplied plan, a `ROLE_PUBLIC` caller could steer which registered strategies receive capital and in what proportion, even though each `strat` is validated to be enabled (`UnregisteredStrategy` revert otherwise). `deployToStrategies()` remains `ROLE_PUBLIC`/keeper-triggered because its allocation is computed internally, not caller-supplied.
 
 If `rebalancePolicy`, `rebalanceGuard`, and `executionMemory` are set in `CoreStorage`, `deployToStrategiesWithPlan()` and `rebalanceStrategies()` use the portfolio-grade allocation engine:
 1. `RouterAllocationPolicy` computes an optimal allocation plan.

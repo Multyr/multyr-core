@@ -22,6 +22,14 @@ library DeployTypes {
         address selectorRegistry; // address(0) = skip guardrail
     }
 
+    struct VaultRegistrationConfig {
+        IERC20Metadata asset;
+        string name;
+        string symbol;
+        address owner;
+        address feeCollector;
+    }
+
     struct DeployResult {
         CoreVault vault;
         QueueModule queueModule;

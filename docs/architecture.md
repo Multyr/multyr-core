@@ -127,7 +127,7 @@ The following functions are NOT routed via the module dispatch — they are impl
 | `beginOwnerTransfer()`, `acceptOwnerTransfer()` | Ownership transfer |
 | `processorMint()`, `processorBurn()`, `processorTransfer()`, `processorSpendAllowance()` | Module callbacks for share accounting |
 | `authorizeModule()`, `isModuleAuthorized()` | Module authorization for processor functions |
-| `setAuthorizedSealer()`, `prepareSeal()`, `sealFinalState()` | System sealing |
+| `setAuthorizedSealer()`, `sealBySealer()` | System sealing |
 | `mintRewardShares()` | Dedicated reward minting (via RewardsPayoutManager) |
 
 ---
@@ -178,7 +178,7 @@ mapping(bytes4 => address) moduleOf;
 mapping(bytes4 => uint8)   roleOf;
 ```
 
-Once `freezeRouting()` is called (`src/core/CoreVault.sol:304-309`), the routing table is permanently frozen — no further `setModule()` calls are accepted. This is a precondition for `prepareSeal()` (see §10).
+Once `freezeRouting()` is called (`src/core/CoreVault.sol:304-309`), the routing table is permanently frozen — no further `setModule()` calls are accepted. This is a precondition for `sealBySealer()` (see §10).
 
 The routing table is populated during deployment by `setModulesBatch()`. Typical mappings:
 
@@ -561,7 +561,28 @@ Source: `src/core/modules/FixedMaturityModule.sol:37-80` (governance), `src/core
 
 ## 10. System Sealing
 
-The system sealing mechanism provides a tamper-proof finalization for production deployments:
+The system sealing mechanism provides a tamper-proof finalization for production deployments. There are now two supported paths:
+
+### 10.1 Atomic seal (production path): `SystemSealer.verifyAndSeal()`
+
+```
+ROOT_TIMELOCK schedules a single-call batch:
+  systemSealer.verifyAndSeal(config)
+    - Verifies all deployment invariants (owner, guardian, vetoer, components, ...)
+    - Computes configHash = keccak256(config addresses)   — NO block.timestamp
+    - Calls vault.sealBySealer(configHash), which atomically:
+        - checks msg.sender == authorizedSealer
+        - checks FLAG_ROUTING_FROZEN is set
+        - sets pendingSealHash = configHash
+        - sets FLAG_SYSTEM_SEALED
+  - Permanent — no reversal
+```
+
+`sealBySealer()` (`src/core/CoreVault.sol:369`) is the **only** sealing path — invoked entirely from within `SystemSealer.verifyAndSeal()`.
+
+### 10.2 Removed: legacy two-step `prepareSeal` / `sealFinalState`
+
+An earlier design split sealing into two owner-facing calls on `CoreVault`:
 
 ```
 Owner calls prepareSeal(configHash):
@@ -575,11 +596,15 @@ Owner calls sealFinalState(expectedHash):
   - Permanent — no reversal
 ```
 
+The contract-side half of this pattern, `SystemSealer.prepareSeal()`, computed `configHash` including `block.timestamp`, which made the hash unrecoverable at `executeBatch()` time: `scheduleBatch()` and `executeBatch()` run at different blocks separated by the full timelock delay, so no operator could ever encode the matching hash in advance and the batch always reverted (see `test/sprint-test/SystemSealer_TimestampHash_POC.t.sol`). `verifyAndSeal()`/`sealBySealer()` fixed this by excluding `block.timestamp` from the hash and sealing atomically in one call.
+
+Once the atomic path existed, `CoreVault.prepareSeal()` and `CoreVault.sealFinalState()` had no remaining caller (`SystemSealer.prepareSeal()` was already gone) and were **removed** as dead code ahead of audit, along with their now-unused `SealHashMismatch`/`SealNotPrepared` errors and `SealPrepared` event.
+
 After sealing:
 - `authorizeModule()` reverts (`SystemSealed`).
 - Further sealer assignment reverts.
 
-The two-step `prepareSeal / sealFinalState` pattern eliminates TOCTOU risk by requiring the hash commitment and verification in separate transactions with admin-controlled timing. Source: `src/core/CoreVault.sol:348-380`.
+Source: `src/core/SystemSealer.sol`, `src/core/CoreVault.sol:343-378`.
 
 ---
 
@@ -674,8 +699,7 @@ This table covers the 30 most important functions. For the complete selector reg
 | `guardianPause()` | CoreVault | GUARDIAN | `GuardianPauseActivated` | `GuardianCooldownActive` |
 | `setModule(bytes4,address,uint8)` | CoreVault | OWNER | `ModuleSet` | `RoutingFrozen`, `InvalidRoleForSelector` |
 | `freezeRouting()` | CoreVault | OWNER | `RoutingFrozen` | `RoutingFrozen` (if already frozen) |
-| `prepareSeal(bytes32)` | CoreVault | SEALER | `SealPrepared` | `RoutingNotFrozen`, `SystemSealed` |
-| `sealFinalState(bytes32)` | CoreVault | OWNER | `SystemSealed` | `SealHashMismatch`, `SealNotPrepared` |
+| `sealBySealer(bytes32)` | CoreVault | SEALER | `SystemSealed` | `RoutingNotFrozen`, `SystemSealed`, `InvalidConfigHash` |
 
 ---
 
@@ -757,7 +781,7 @@ In `FixedMaturity/Active` state, `markMatured()` is callable by anyone once `blo
 | Epoch cap | Maximum fraction of NAV withdrawable via INSTANT exits per epoch (configurable via `capPerEpochBps`). |
 | HWM | High-water mark for performance fee crystallization. |
 | paramMinDelay | Minimum timelock delay for fee/governance param changes (bootstrap: 0, production: ≥2 days). |
-| Sealer | SystemSealer contract authorized to call `prepareSeal()`. |
+| Sealer | SystemSealer contract authorized to call `sealBySealer()` (via `verifyAndSeal()`). |
 | Dead deposit | A "dead" share minted by owner at genesis to prevent the ERC-4626 inflation attack. |
 | Lock period | Minimum time between deposit and claim eligibility (anti-MEV). |
 | W2 policy | "Never block exits": all exit paths continue on error, never revert due to NAV staleness. |

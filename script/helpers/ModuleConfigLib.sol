@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import { CoreVault } from "@multyr-core/core/CoreVault.sol";
 import { SelectorLib } from "@multyr-core/core/libraries/SelectorLib.sol";
+import { LiquidityOpsModule } from "@multyr-core/core/modules/LiquidityOpsModule.sol";
 
 /// @title ModuleConfigLib -- CoreVault module routing helper
 /// @notice Helper library for configuring CoreVault selector-to-module routing in deploy scripts.
@@ -28,9 +29,18 @@ library ModuleConfigLib {
         bytes4[] memory adminViewSels = SelectorLib.getAdminModuleViewSelectors();
         _setModulesBatch(router, adminViewSels, adminModule, SelectorLib.ROLE_PUBLIC);
 
-        // Configure LiquidityOpsModule selectors (PUBLIC - keeper/permissionless)
+        // Configure LiquidityOpsModule selectors (mixed roles: deployToStrategiesWithPlan = OWNER_OR_GUARDIAN)
         bytes4[] memory liquidityOpsSels = SelectorLib.getLiquidityOpsModuleSelectors();
-        _setModulesBatch(router, liquidityOpsSels, liquidityOpsModule, SelectorLib.ROLE_PUBLIC);
+        uint256 loLen = liquidityOpsSels.length;
+        address[] memory loModules = new address[](loLen);
+        uint8[]   memory loRoles   = new uint8[](loLen);
+        for (uint256 i; i < loLen; i++) {
+            loModules[i] = liquidityOpsModule;
+            loRoles[i] = liquidityOpsSels[i] == LiquidityOpsModule.deployToStrategiesWithPlan.selector
+                ? SelectorLib.ROLE_OWNER_OR_GUARDIAN
+                : SelectorLib.ROLE_PUBLIC;
+        }
+        router.setModulesBatch(liquidityOpsSels, loModules, loRoles);
     }
 
     /// @notice Helper to batch set modules with same module and role

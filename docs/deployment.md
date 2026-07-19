@@ -125,7 +125,7 @@ flowchart TD
 | `StrategyHealthRegistry` | `multyr-core/script/DeployCoreSystem.s.sol:267` | Owner = deployer; guardian = SAFE_GUARDIAN |
 
 > **Critical invariant**: `FeeCollector.governor` is **immutable** post-deploy. If ROOT_TIMELOCK
-> address is wrong, re-deploy the entire system. Verified by `SystemSealer.prepareSeal()`
+> address is wrong, re-deploy the entire system. Verified by `SystemSealer.verifyAndSeal()`
 > (`multyr-core/script/DeployCoreSystem.s.sol:249`).
 
 ---
@@ -455,7 +455,8 @@ multyr-core/script/DeployCoreSystem.s.sol:769 — _printNextSteps() output:
    PRICE_ORACLE_ADDRESS = <priceOracle>
    → Run: multyr-strategies/script/DeployUsdcLendingStrategy.s.sol
 
-2. Timelock: acceptOwnerTransfer + setAuthorizedSealer + sealFinalState
+2. Timelock: acceptOwnerTransfer + setAuthorizedSealer + systemSealer.verifyAndSeal(config)
+   (single atomic call — see `docs/architecture.md` §10.1)
 
 3. Verify all contracts on Arbiscan
 ```

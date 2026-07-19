@@ -215,22 +215,32 @@ vault.setSelectorRegistry(address(selectorRegistry));
 
 ### Step 7.4: Set Authorized Sealer
 
-`src/core/CoreVault.sol:353`. Can be set only once (reverts if `authorizedSealer != address(0)` and
+`src/core/CoreVault.sol:351`. Can be set only once (reverts if `authorizedSealer != address(0)` and
 not sealed).
 
 ```solidity
 vault.setAuthorizedSealer(address(systemSealer));
 ```
 
-### Step 7.5: Prepare + Seal (via ROOT_TIMELOCK)
+### Step 7.5: Verify + Seal, atomically (via ROOT_TIMELOCK)
 
-`src/core/CoreVault.sol:361` (prepareSeal) and `:371` (sealFinalState):
+`src/core/SystemSealer.sol` (`verifyAndSeal`) and `src/core/CoreVault.sol:369` (`sealBySealer`) — the only sealing path. Scheduled as a **single-call** timelock batch — no separate hash-prepare step:
 
 ```solidity
-systemSealer.prepareSeal(configHash);     // called by authorizedSealer
-vault.sealFinalState(configHash);         // called by owner (ROOT_TIMELOCK via proposal)
+systemSealer.verifyAndSeal(config);   // ROOT_TIMELOCK-only; verifies invariants and
+                                       // atomically calls vault.sealBySealer(configHash)
 require(vault.isSystemSealed(), "not sealed");
 ```
+
+An earlier two-call pattern (`systemSealer.prepareSeal(config)` returning a hash, then a
+separate `vault.sealFinalState(hash)` call) was never usable in production: its
+`configHash` included `block.timestamp`, which cannot be predicted at `scheduleBatch()`
+time since `executeBatch()` runs at a later block after the full timelock delay — every
+such batch reverted with `SealHashMismatch`. `verifyAndSeal()`/`sealBySealer()` removed
+`block.timestamp` from the hash and folded prepare+seal into one call, so it succeeds in a single
+`scheduleBatch`/`executeBatch` cycle. See `test/sprint-test/SystemSealer_TimestampHash_POC.t.sol`.
+
+`CoreVault.prepareSeal()`/`sealFinalState()` (the two-call pattern's `CoreVault` half) had no remaining caller once `SystemSealer.prepareSeal()` was removed, and have since been deleted as dead code.
 
 ---
 
@@ -407,7 +417,7 @@ retains BOOTSTRAP_ROLE. Verifiable via `strategy.getRoleMemberCount(BOOTSTRAP_RO
 At any point before `freezeRouting()` is called, the following recovery operations are available:
 
 1. Re-route selectors: `vault.setModulesBatch(sels, newModule, role)` — `src/core/CoreVault.sol:272`
-2. Transfer vault ownership: `vault.beginOwnerTransfer(newOwner)` → `vault.acceptOwnerTransfer()` — `src/core/CoreVault.sol:394-400`
+2. Transfer vault ownership: `vault.beginOwnerTransfer(newOwner)` → `vault.acceptOwnerTransfer()` — `src/core/CoreVault.sol:392-398`
 3. Transfer router ownership: `router.transferOwnership(newOwner)` — `src/core/modules/StrategyRouter.sol:253`
 4. Transfer bufferManager: `bufferManager.transferOwnership(newOwner)` — `src/core/modules/BufferManager.sol:123`
 5. Transfer healthRegistry: `healthRegistry.transferOwnership(newOwner)` — `src/core/modules/StrategyHealthRegistry.sol:181`
@@ -416,8 +426,8 @@ At any point before `freezeRouting()` is called, the following recovery operatio
 
 ### Post-Seal (Limited Recovery Only)
 
-After `freezeRouting()` (`src/core/CoreVault.sol:304`) and `sealFinalState()`
-(`src/core/CoreVault.sol:371`):
+After `freezeRouting()` (`src/core/CoreVault.sol:302`) and `sealBySealer()`
+(`src/core/CoreVault.sol:369`, the only sealing path):
 
 - **Selector re-routing: IMPOSSIBLE** — `FLAG_ROUTING_FROZEN` blocks `setModulesBatch`
 - **Module changes: require timelock** — `FLAG_COMPONENTS_TIMELOCKED` requires ROOT_TIMELOCK proposal

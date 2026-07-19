@@ -57,7 +57,8 @@ import { DeployTypes } from "@multyr-core/libs/DeployTypes.sol";
 ///                  DEPLOY_INCENTIVES (opt), DEPLOY_UPKEEP (opt), DEPLOY_WARM_ADAPTERS (opt),
 ///                  CHAINLINK_USDC_FEED (opt), OUTPUT_JSON (opt)
 /// @custom:post-deploy 1) Run DeployUsdcLendingStrategy.s.sol with vault+ecosystem addresses
-///                     2) Timelock: acceptOwnerTransfer + setAuthorizedSealer + sealFinalState
+///                     2) Timelock: acceptOwnerTransfer + setAuthorizedSealer + systemSealer.verifyAndSeal(config)
+///                        (single atomic call — see docs/architecture.md §10)
 ///                     3) Verify all contracts on Arbiscan
 /// @custom:replaces script/DeployCoreSystem.s.sol (legacy monorepo path)
 contract DeployCoreSystem is Script {
@@ -246,7 +247,7 @@ contract DeployCoreSystem is Script {
         console.log("      Will transfer to:", cfg.governor);
 
         // 1.3 FeeCollector - governor is IMMUTABLE = ROOT_TIMELOCK
-        // SystemSealer.prepareSeal() verifies fc.governor() == config.rootTimelock
+        // SystemSealer.verifyAndSeal() verifies fc.governor() == config.rootTimelock
         result.feeCollector = new FeeCollector(
             cfg.timelock, // IMMUTABLE governor = ROOT_TIMELOCK
             cfg.treasury,
@@ -314,16 +315,12 @@ contract DeployCoreSystem is Script {
 
         // 3.1b CRITICAL: Register vault in factory IMMEDIATELY (subgraph event ordering)
         {
-            DeployTypes.DeployConfig memory regCfg = DeployTypes.DeployConfig({
+            DeployTypes.VaultRegistrationConfig memory regCfg = DeployTypes.VaultRegistrationConfig({
                 asset: IERC20Metadata(USDC),
                 name: "Multyr Earn USDC",
                 symbol: "meUSDC",
                 owner: cfg.governor,
-                feeCollector: address(result.feeCollector),
-                paramsProvider: address(result.globalConfig),
-                ecosystem: IAdminModule.EcosystemConfig(address(0), address(0), address(0), address(0), address(0), address(0)),
-                freezeRouting: false,
-                selectorRegistry: address(result.selectorRegistry)
+                feeCollector: address(result.feeCollector)
             });
             result.vaultFactory.registerVault(address(result.vault), abi.encode(regCfg));
             require(result.vaultFactory.isDeployedVault(address(result.vault)), "GATE: vault not in factory");
@@ -615,7 +612,7 @@ contract DeployCoreSystem is Script {
         console.log("  ERC4626Module selectors:", erc4626Sels.length);
 
         bytes4[] memory liquidityOpsSels = SelectorLib.getLiquidityOpsModuleSelectors();
-        _setModulesBatch(result.vault, liquidityOpsSels, address(result.liquidityOpsModule), SelectorLib.ROLE_PUBLIC);
+        _setLiquidityOpsModulesBatch(result.vault, liquidityOpsSels, address(result.liquidityOpsModule));
         console.log("  LiquidityOpsModule selectors:", liquidityOpsSels.length);
 
         result.vault.authorizeModule(address(result.erc4626Module), true);
@@ -640,6 +637,23 @@ contract DeployCoreSystem is Script {
         for (uint256 i; i < len; i++) {
             modules[i] = module;
             roles[i] = role;
+        }
+        vault.setModulesBatch(selectors, modules, roles);
+    }
+
+    function _setLiquidityOpsModulesBatch(
+        CoreVault vault,
+        bytes4[] memory selectors,
+        address module
+    ) internal {
+        uint256 len = selectors.length;
+        address[] memory modules = new address[](len);
+        uint8[] memory roles = new uint8[](len);
+        for (uint256 i; i < len; i++) {
+            modules[i] = module;
+            roles[i] = selectors[i] == LiquidityOpsModule.deployToStrategiesWithPlan.selector
+                ? SelectorLib.ROLE_OWNER_OR_GUARDIAN
+                : SelectorLib.ROLE_PUBLIC;
         }
         vault.setModulesBatch(selectors, modules, roles);
     }
@@ -781,7 +795,8 @@ contract DeployCoreSystem is Script {
         console.log("   SYSTEM_SEALER_ADDRESS=", address(result.systemSealer));
         console.log("   GUARDIAN_ADDRESS=", cfg.guardian);
         console.log("   TIMELOCK_ADDRESS=", cfg.timelock);
-        console.log("2. Timelock: acceptOwnerTransfer + setAuthorizedSealer + sealFinalState");
+        console.log("2. Timelock: acceptOwnerTransfer + setAuthorizedSealer + systemSealer.verifyAndSeal(config)");
+        console.log("   (single atomic call, no separate prepare/seal step)");
         console.log("3. Verify all contracts on Arbiscan");
         console.log("4. See docs/09-audit/deployment-flow.md for full Modular Path B sequence");
     }

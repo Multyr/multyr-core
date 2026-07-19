@@ -79,7 +79,7 @@ flowchart TD
     SRC2 --> PULL[_forcePullAllLiquidity\nrouter.forceRedeemForWithdraw\ngreedy, no LossCap]
 
     PLAN --> TRANSFER[_transferShares fee\n_burn baseShares\nsafeTransfer exact assets]
-    PULL --> TRANSFER2[_transferShares fee\n_burn netShares\nsafeTransfer min hot targetAssets]
+    PULL --> TRANSFER2[fillRatio = received/target\n_transferShares fee × fillRatio\n_burn netShares × fillRatio\nsafeTransfer min hot targetAssets]
 
     TRANSFER --> EVENTS[ForceWithdrawExecuted\nForceExit]
     TRANSFER2 --> EVENTS2[ForceWithdrawAllExecuted\nForceExit]
@@ -192,7 +192,7 @@ Setting `maxShares = type(uint256).max` disables slippage protection — accepta
 function forceWithdrawAll(address receiver) external;
 ```
 
-No plan or slippage parameter — `forceWithdrawAll` pulls all caller shares and sources liquidity automatically via the router.
+No plan or slippage parameter — `forceWithdrawAll` pulls all caller shares and sources liquidity automatically via the router. As of this branch, the burn/fee is **proportional** to how much of the ask was actually filled, rather than always burning 100% of the caller's shares for a partial payout.
 
 ### 4.2 Execution flow
 
@@ -205,22 +205,31 @@ No plan or slippage parameter — `forceWithdrawAll` pulls all caller shares and
  6. feeShares = mulBpsUp(shares, witBps + forceExitPenaltyBps [+ preMaturityBps])
  7. netShares  = shares - feeShares
  8. targetAssets = convertToAssets(netShares)
- 9. _checkWithdrawalLimitsForForce(targetAssets)
-10. _transferShares(msg.sender, feeCollector, feeShares)
-    → emit WithdrawFeeTaken(msg.sender, feeShares)
-11. _forcePullAllLiquidity(targetAssets)
+ 9. _checkWithdrawalLimitsForForce(targetAssets)   — checked against the FULL ask
+10. _forcePullAllLiquidity(targetAssets)
     → router.forceRedeemForWithdraw(targetAssets)  — greedy, no LossCap
-12. assetsReceived = min(IERC20(_asset()).balanceOf(vault), targetAssets)   // best-effort
-13. _burn(msg.sender, netShares)
-14. token.safeTransfer(receiver, assetsReceived)
-15. emit ForceWithdrawAllExecuted(msg.sender, assetsReceived, shares, feeShares)
-    emit ForceExit(msg.sender, receiver, assetsReceived)
+    (pulled BEFORE sizing the burn/fee — best-effort, no plan)
+11. assetsReceived = min(IERC20(_asset()).balanceOf(vault), targetAssets)   // best-effort
+12. fillRatio = targetAssets == 0 ? 1 : assetsReceived / targetAssets
+    netSharesToBurn      = netShares      × fillRatio
+    feeSharesToTransfer  = totalFeeShares × fillRatio
+13. _transferShares(msg.sender, feeCollector, feeSharesToTransfer)
+    → emit WithdrawFeeTaken(msg.sender, feeShares × fillRatio) [if witBps > 0]
+    → emit ForceExitPenaltyTaken(msg.sender, ... × fillRatio) [if forceBps > 0]
+14. if assetsReceived > 0: _notifyIncentivesExit(msg.sender, assetsReceived)
+15. _burn(msg.sender, netSharesToBurn)
+16. token.safeTransfer(receiver, assetsReceived)
+17. emit ForceWithdrawAllExecuted(msg.sender, receiver, sharesConsumed, assetsReceived, targetAssets)
+    emit ForceExit(msg.sender, sharesConsumed, assetsReceived, feeSharesToTransfer)
+    // sharesConsumed = netSharesToBurn + feeSharesToTransfer
 ```
 
 Key difference from `forceWithdraw`:
 - **No plan** — `router.forceRedeemForWithdraw` is greedy: it redeems as much as possible from all strategies, up to `targetAssets`
-- **Best-effort**: `assetsReceived = min(hot, targetAssets)` — user receives what the vault could source; no revert if `assetsReceived < targetAssets`
+- **Best-effort pull, proportional burn**: if the pull falls short of `targetAssets` (e.g. a frozen/illiquid strategy), only the filled slice of shares and fees is consumed (`netShares/totalFeeShares × assetsReceived/targetAssets`). The **unfilled remainder of the caller's shares is left untouched** — no value is destroyed by a partial pull. The caller retains a live, residual claim they can redeem later via another `forceWithdrawAll` call (once liquidity frees up) or the normal queue. `targetAssets == 0` (dust-sized `netShares`) is treated as fully filled to avoid a divide-by-zero.
 - **No LossCap**: `forceRedeemForWithdraw` ignores per-strategy loss caps (`IStrategyRouter.sol:L80–L81`)
+
+Prior to this branch, `forceWithdrawAll` unconditionally burned 100% of `netShares` and transferred 100% of `totalFeeShares` regardless of `assetsReceived` — meaning a partial pull destroyed the caller's full share claim while paying out only a fraction of the assets. See `test/sprint-test/ForceWithdrawAll_SlippagePOC.t.sol`.
 
 ### 4.3 Best-effort vs exact
 
@@ -262,6 +271,7 @@ Example: witBps=50, forceExitPenaltyBps=200, preMaturityBps=500
 | **FX3** | Fee shares transferred, not minted | `_transferShares(owner_, feeCollector, feeShares)` |
 | **FX4** | `forceWithdraw` delivers exact `assets` or reverts | `if got < assets: revert InsufficientAssets(got, assets)` |
 | **FX5** | `forceWithdrawAll` cannot over-pay (never sends > `targetAssets`) | `min(hot, targetAssets)` ensures no overshoot |
+| **FX8** | `forceWithdrawAll` burns shares/transfers fees proportional to the fill ratio (`assetsReceived / targetAssets`); never destroys unfilled share value | `netSharesToBurn = netShares × fillRatio`, `feeSharesToTransfer = totalFeeShares × fillRatio` |
 | **FX6** | FORCE exits only permitted in OpenEnded or FixedMaturity/Active | `_checkForceExitAllowed()` guard |
 | **FX7** | `plan.length ≤ MAX_FORCE_LEGS (10)` | `_sourceLiquidityForForceWithdraw` validation |
 
@@ -286,7 +296,7 @@ Example: witBps=50, forceExitPenaltyBps=200, preMaturityBps=500
 | `WithdrawFeeTaken(user, feeShares)` | Fee transfer in both force functions |
 | `ForceExitPenaltyApplied(user, penaltyAssets)` | When penalty > 0 (penaltyAssets = gross × penaltyBps) |
 | `ForceWithdrawExecuted(user, assets, baseShares, feeShares)` | `forceWithdraw` completion |
-| `ForceWithdrawAllExecuted(user, assetsReceived, allShares, feeShares)` | `forceWithdrawAll` completion |
+| `ForceWithdrawAllExecuted(user, receiver, sharesConsumed, assetsReceived, targetAssets)` | `forceWithdrawAll` completion; `sharesConsumed` is proportional to fill ratio, not `shares` |
 | `ForceExit(owner, receiver, assets)` | Both force paths |
 
 ---
@@ -422,7 +432,7 @@ Step 8: caller(bob) != owner_(alice)
 |------|-----------|
 | **FORCE** | Exit mode that bypasses epoch cap and lock period |
 | **forceWithdraw** | Exact-amount FORCE exit with user-supplied `Pull[]` liquidity plan |
-| **forceWithdrawAll** | Best-effort FORCE exit burning all caller shares |
+| **forceWithdrawAll** | Best-effort FORCE exit burning shares/fees proportional to the fill ratio; unfilled shares are left untouched |
 | **Pull** | `{address strat, uint256 amount}` — one leg of a liquidity sourcing plan |
 | **MAX_FORCE_LEGS** | 10 — maximum legs in a `Pull[]` plan |
 | **preMaturityForceExitPenaltyBps** | Additive surcharge for FixedMaturity/Active FORCE exits |
@@ -472,6 +482,6 @@ Step 8: caller(bob) != owner_(alice)
 
 **Discrepancies** (ADR-015 §5):
 
-1. `forceWithdrawAll` step 12 uses `min(IERC20(_asset()).balanceOf(vault), targetAssets)` as `assetsReceived`. This means the user may receive less than `targetAssets` if the router cannot fully source the required liquidity. This behavior is documented and intentional ("best-effort"), but callers should verify `assetsReceived` in the emitted `ForceWithdrawAllExecuted` event rather than assuming `targetAssets` was fully delivered.
+1. `forceWithdrawAll` step 11 uses `min(IERC20(_asset()).balanceOf(vault), targetAssets)` as `assetsReceived`. This means the user may receive less than `targetAssets` if the router cannot fully source the required liquidity. This behavior is documented and intentional ("best-effort"), but callers should verify `assetsReceived` in the emitted `ForceWithdrawAllExecuted` event rather than assuming `targetAssets` was fully delivered. As of this branch, `assetsReceived < targetAssets` no longer burns 100% of the caller's shares — burn/fee scale with `assetsReceived / targetAssets` (proportional burn, §4.2), so a partial pull no longer destroys the unfilled portion of the caller's share balance.
 
 2. The `_sourceLiquidityForForceWithdraw` function validates `plan.length > 0` and `plan.length <= MAX_FORCE_LEGS`. However, it does not validate that `sum(plan[i].amount) >= assets`. A plan that provides insufficient liquidity will cause `executeRedeemBatch` to return `got < assets`, triggering `InsufficientAssets`. Users must pre-simulate to size plans correctly.

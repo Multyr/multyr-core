@@ -352,6 +352,17 @@ contract FixedMaturityModule {
 
     /// @dev Apply final performance fee using the immutable snapshot in finalPerformanceFeeBaseAssets.
     ///      CEI pattern: set applied=true BEFORE any external calls.
+    ///
+    ///      This mints fee shares the same way QueueModule._crystallize() does (preview
+    ///      deposit, mint to feeCollector), but it is NOT a duplicate of that function and
+    ///      does not need its HWM-monotonicity or min-crystallize-interval fixes:
+    ///      - No persistent high-water mark: profit is `finalPerformanceFeeBaseAssets -
+    ///        fixedTermPrincipalBaseAssets`, a one-shot delta between two immutable
+    ///        snapshots taken at fixed points in the FM lifecycle, not a running peak that
+    ///        could be lowered on a drawdown.
+    ///      - No repeat-extraction surface: `finalPerformanceFeeApplied` latches after the
+    ///        first (and only) call, so there is nothing for a min-interval guard to
+    ///        rate-limit.
     function _applyFinalPerformanceFee() internal {
         FixedMaturityStorage.Layout storage fm = FixedMaturityStorage.layout();
         if (fm.finalPerformanceFeeApplied) revert FinalPerformanceFeeAlreadyApplied();

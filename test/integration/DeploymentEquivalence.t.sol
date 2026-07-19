@@ -236,28 +236,26 @@ contract DeploymentEquivalence_Test is Test {
         result.vault.setAuthorizedSealer(address(result.systemSealer));
         vm.stopPrank();
 
-        // prepareSeal + sealFinalState with hash binding (FULL deployment path)
+        // verifyAndSeal: single call verifies all invariants and seals atomically
         vm.startPrank(rootTimelock);
-        bytes32 configHash = result.systemSealer
-            .prepareSeal(
-                SystemSealer.SealConfig({
-                    vault: address(result.vault),
-                    strategyRouter: address(result.strategyRouter),
-                    bufferManager: address(result.bufferManager),
-                    healthRegistry: address(result.healthRegistry),
-                    globalConfig: address(result.globalConfig),
-                    feeCollector: address(result.feeCollector),
-                    rootTimelock: rootTimelock,
-                    guardian: guardian,
-                    vetoer: vetoer,
-                    strategy: result.strategy,
-                    incentives: address(0),
-                    incentivesEngine: address(0),
-                    rewardsPayoutManager: address(0),
-                    deployer: deployer
-                })
-            );
-        result.vault.sealFinalState(configHash);
+        result.systemSealer.verifyAndSeal(
+            SystemSealer.SealConfig({
+                vault: address(result.vault),
+                strategyRouter: address(result.strategyRouter),
+                bufferManager: address(result.bufferManager),
+                healthRegistry: address(result.healthRegistry),
+                globalConfig: address(result.globalConfig),
+                feeCollector: address(result.feeCollector),
+                rootTimelock: rootTimelock,
+                guardian: guardian,
+                vetoer: vetoer,
+                strategy: result.strategy,
+                incentives: address(0),
+                incentivesEngine: address(0),
+                rewardsPayoutManager: address(0),
+                deployer: deployer
+            })
+        );
         vm.stopPrank();
 
         return result;
@@ -396,28 +394,26 @@ contract DeploymentEquivalence_Test is Test {
         result.vault.setAuthorizedSealer(address(result.systemSealer));
         vm.stopPrank();
 
-        // prepareSeal + sealFinalState with hash binding (MODULAR deployment path)
+        // verifyAndSeal: single call verifies all invariants and seals atomically
         vm.startPrank(rootTimelock);
-        bytes32 configHash = result.systemSealer
-            .prepareSeal(
-                SystemSealer.SealConfig({
-                    vault: address(result.vault),
-                    strategyRouter: address(result.strategyRouter),
-                    bufferManager: address(result.bufferManager),
-                    healthRegistry: address(result.healthRegistry),
-                    globalConfig: address(result.globalConfig),
-                    feeCollector: address(result.feeCollector),
-                    rootTimelock: rootTimelock,
-                    guardian: guardian,
-                    vetoer: vetoer,
-                    strategy: result.strategy,
-                    incentives: address(0),
-                    incentivesEngine: address(0),
-                    rewardsPayoutManager: address(0),
-                    deployer: deployer
-                })
-            );
-        result.vault.sealFinalState(configHash);
+        result.systemSealer.verifyAndSeal(
+            SystemSealer.SealConfig({
+                vault: address(result.vault),
+                strategyRouter: address(result.strategyRouter),
+                bufferManager: address(result.bufferManager),
+                healthRegistry: address(result.healthRegistry),
+                globalConfig: address(result.globalConfig),
+                feeCollector: address(result.feeCollector),
+                rootTimelock: rootTimelock,
+                guardian: guardian,
+                vetoer: vetoer,
+                strategy: result.strategy,
+                incentives: address(0),
+                incentivesEngine: address(0),
+                rewardsPayoutManager: address(0),
+                deployer: deployer
+            })
+        );
         vm.stopPrank();
 
         return result;

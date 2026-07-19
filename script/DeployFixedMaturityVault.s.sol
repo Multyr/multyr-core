@@ -171,7 +171,7 @@ contract DeployFixedMaturityVault is Script {
         console.log("[1.1] GlobalConfig:", address(result.globalConfig));
 
         // FeeCollector -- governor IMMUTABLE = timelock
-        // SystemSealer.prepareSeal() verifies fc.governor() == config.rootTimelock
+        // SystemSealer.verifyAndSeal() verifies fc.governor() == config.rootTimelock
         result.feeCollector = new FeeCollector(
             cfg.timelock, // IMMUTABLE
             cfg.treasury,
@@ -285,8 +285,8 @@ contract DeployFixedMaturityVault is Script {
             address(result.adminModule), SelectorLib.ROLE_PUBLIC);
         _setModulesBatch(result.vault, SelectorLib.getERC4626ModuleSelectors(),
             address(result.erc4626Module), SelectorLib.ROLE_PUBLIC);
-        _setModulesBatch(result.vault, SelectorLib.getLiquidityOpsModuleSelectors(),
-            address(result.liquidityOpsModule), SelectorLib.ROLE_PUBLIC);
+        _setLiquidityOpsModulesBatch(result.vault, SelectorLib.getLiquidityOpsModuleSelectors(),
+            address(result.liquidityOpsModule));
         _setModulesBatch(result.vault, SelectorLib.getFixedMaturityModuleSelectors(),
             address(result.fixedMaturityModule), SelectorLib.ROLE_PUBLIC);
 
@@ -511,6 +511,23 @@ contract DeployFixedMaturityVault is Script {
         for (uint256 i; i < len; i++) {
             modules[i] = module;
             roles[i]   = role;
+        }
+        vault_.setModulesBatch(selectors, modules, roles);
+    }
+
+    function _setLiquidityOpsModulesBatch(
+        CoreVault vault_,
+        bytes4[] memory selectors,
+        address module
+    ) internal {
+        uint256 len = selectors.length;
+        address[] memory modules = new address[](len);
+        uint8[]   memory roles   = new uint8[](len);
+        for (uint256 i; i < len; i++) {
+            modules[i] = module;
+            roles[i]   = selectors[i] == LiquidityOpsModule.deployToStrategiesWithPlan.selector
+                ? SelectorLib.ROLE_OWNER_OR_GUARDIAN
+                : SelectorLib.ROLE_PUBLIC;
         }
         vault_.setModulesBatch(selectors, modules, roles);
     }

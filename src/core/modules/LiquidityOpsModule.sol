@@ -39,6 +39,7 @@ contract LiquidityOpsModule {
     error NavQueryFailed();
     error AssetQueryFailed();
     error PlanExceedsSurplus(uint256 planTotal, uint256 surplus);
+    error UnregisteredStrategy(address strat);
 
     // ═══════════════════════════════════════════════════════════════════════════════
     // CONSTANTS
@@ -637,6 +638,10 @@ contract LiquidityOpsModule {
             plan = externalPlan;
             uint256 planTotal;
             for (uint256 i = 0; i < plan.length;) {
+                if (!r.isStrategyEnabled(plan[i].strat)) {
+                    cs.packedFlags &= ~CoreStorage.FLAG_REENTRANCY_LOCKED;
+                    revert UnregisteredStrategy(plan[i].strat);
+                }
                 planTotal += plan[i].amount;
                 unchecked {
                     ++i;

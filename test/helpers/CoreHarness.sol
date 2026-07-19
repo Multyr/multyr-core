@@ -13,6 +13,7 @@ import { IStrategyRouter } from "../../src/interfaces/IStrategyRouter.sol";
 import { IParamsProvider } from "../../src/interfaces/IParamsProvider.sol";
 import { StrategyRouter } from "../../src/core/modules/StrategyRouter.sol";
 import { QueueModule } from "../../src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "../../src/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "../../src/core/modules/AdminModule.sol";
 import { ERC4626Module } from "../../src/core/modules/ERC4626Module.sol";
 import { LiquidityOpsModule } from "../../src/core/modules/LiquidityOpsModule.sol";
@@ -27,6 +28,7 @@ contract CoreHarness is CoreVault {
 
     // Track deployed modules for selector registration
     QueueModule public queueModule;
+    EpochedQueueModule public queueEpochModule;
     AdminModule public adminModule;
     ERC4626Module public erc4626Module;
     LiquidityOpsModule public liquidityOpsModule;
@@ -50,6 +52,7 @@ contract CoreHarness is CoreVault {
     {
         // Deploy modules
         queueModule = new QueueModule();
+        queueEpochModule = new EpochedQueueModule();
         adminModule = new AdminModule();
         erc4626Module = new ERC4626Module();
         liquidityOpsModule = new LiquidityOpsModule();
@@ -70,6 +73,22 @@ contract CoreHarness is CoreVault {
         _setModuleUnsafe(QueueModule.queueLength.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(QueueModule.nextClaimId.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(QueueModule.compactQueue.selector, address(queueModule), ROLE_PUBLIC);
+
+        // Wire up epoch-bucket queue module (EpochedQueueModule) selectors (PUBLIC)
+        _setModuleUnsafe(EpochedQueueModule.requestEpochWithdrawal.selector, address(queueEpochModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.cancelEpochWithdrawal.selector, address(queueEpochModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.closeCurrentEpoch.selector, address(queueEpochModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.fundEpoch.selector, address(queueEpochModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.claimEpochAssets.selector, address(queueEpochModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.batchClaimEpochAssets.selector, address(queueEpochModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.requestInstantWithdrawal.selector, address(queueEpochModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.currentEpochId.selector, address(queueEpochModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.epochData.selector, address(queueEpochModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.epochClaim.selector, address(queueEpochModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.nextClaimIdForEpoch.selector, address(queueEpochModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.totalEscrowedShares.selector, address(queueEpochModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.epochDeficit.selector, address(queueEpochModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.canCloseCurrentEpoch.selector, address(queueEpochModule), ROLE_PUBLIC);
 
         // Wire up admin module owner selectors (OWNER)
         _setModuleUnsafe(AdminModule.submitFeeParams.selector, address(adminModule), ROLE_OWNER);
@@ -107,7 +126,7 @@ contract CoreHarness is CoreVault {
         // Use raw selectors for overloaded functions
         _setModuleUnsafe(bytes4(keccak256("deposit(uint256,address)")), address(erc4626Module), ROLE_PUBLIC);
         _setModuleUnsafe(bytes4(keccak256("deposit(uint256,address,uint256)")), address(erc4626Module), ROLE_PUBLIC);
-        _setModuleUnsafe(bytes4(keccak256("depositFor(uint256,address,address)")), address(erc4626Module), ROLE_PUBLIC);
+        _setModuleUnsafe(bytes4(keccak256("depositFor(uint256,address)")), address(erc4626Module), ROLE_PUBLIC);
         _setModuleUnsafe(bytes4(keccak256("mint(uint256,address)")), address(erc4626Module), ROLE_PUBLIC);
         _setModuleUnsafe(bytes4(keccak256("mint(uint256,address,uint256)")), address(erc4626Module), ROLE_PUBLIC);
         _setModuleUnsafe(bytes4(keccak256("withdraw(uint256,address,address)")), address(erc4626Module), ROLE_PUBLIC);
@@ -116,13 +135,15 @@ contract CoreHarness is CoreVault {
         _setModuleUnsafe(bytes4(keccak256("redeem(uint256,address,address,uint256)")), address(erc4626Module), ROLE_PUBLIC);
         _setModuleUnsafe(ERC4626Module.forceWithdrawAll.selector, address(erc4626Module), ROLE_PUBLIC);
 
-        // Wire up LiquidityOpsModule selectors (PUBLIC)
+        // Wire up LiquidityOpsModule selectors
+        // deployToStrategiesWithPlan is ROLE_OWNER_OR_GUARDIAN: caller-supplied plans
+        // control allocation across strategies and must not be permissionless.
         _setModuleUnsafe(LiquidityOpsModule.canDeploy.selector, address(liquidityOpsModule), ROLE_PUBLIC);
         _setModuleUnsafe(LiquidityOpsModule.deployToStrategies.selector, address(liquidityOpsModule), ROLE_PUBLIC);
         _setModuleUnsafe(
             LiquidityOpsModule.deployToStrategiesWithPlan.selector,
             address(liquidityOpsModule),
-            ROLE_PUBLIC
+            ROLE_OWNER_OR_GUARDIAN
         );
         _setModuleUnsafe(LiquidityOpsModule.realizeForQueue.selector, address(liquidityOpsModule), ROLE_PUBLIC);
         _setModuleUnsafe(
@@ -205,6 +226,10 @@ contract CoreHarness is CoreVault {
 
     function setStrategyRouterUnsafe(address r) external {
         CoreStorage.layout().router = IStrategyRouter(r);
+    }
+
+    function setGuardianUnsafe(address g) external {
+        CoreStorage.layout().guardian = g;
     }
 
     // ---- Ops reserve params (for tests expectations) ----

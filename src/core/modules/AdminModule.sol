@@ -164,6 +164,7 @@ contract AdminModule {
 
         CoreStorage.Layout storage core = CoreStorage.layout();
         FeeStorage.Layout storage f = FeeStorage.layout();
+        if (f.pendingPerf.exists) revert PendingParamsNotResolved();
 
         uint64 eta = uint64(block.timestamp) + core.paramMinDelay;
         f.pendingPerf.rateX = rateX;
@@ -222,6 +223,7 @@ contract AdminModule {
 
         CoreStorage.Layout storage core = CoreStorage.layout();
         FeeStorage.Layout storage f = FeeStorage.layout();
+        if (f.pendingDelay.exists) revert PendingParamsNotResolved();
 
         uint64 eta = uint64(block.timestamp) + core.paramMinDelay;
         f.pendingDelay.newDelay = newDelay;
@@ -369,11 +371,11 @@ contract AdminModule {
     /// @param config Ecosystem configuration struct
     function setEcosystem(EcosystemConfig calldata config) external {
         _requireNotSealed();
+        CoreStorage.Layout storage core = CoreStorage.layout();
+        if (core.packedFlags & CoreStorage.FLAG_COMPONENTS_TIMELOCKED != 0) revert ComponentsTimelocked();
         if (config.bufferManager == address(0)) revert ZeroAddress();
         if (config.strategyRouter == address(0)) revert ZeroAddress();
         if (config.guardian == address(0)) revert ZeroAddress();
-
-        CoreStorage.Layout storage core = CoreStorage.layout();
 
         core.bufferManager = IBufferManager(config.bufferManager);
         core.router = IStrategyRouter(config.strategyRouter);
@@ -615,6 +617,8 @@ contract AdminModule {
         }
 
         FeeStorage.Layout storage f = FeeStorage.layout();
+        if (f.pendingBuffer.exists) revert PendingParamsNotResolved();
+
         uint64 eta = uint64(block.timestamp) + core.paramMinDelay;
         f.pendingBuffer.newBuffer = newBuffer;
         f.pendingBuffer.eta = eta;
@@ -679,6 +683,8 @@ contract AdminModule {
         }
 
         FeeStorage.Layout storage f = FeeStorage.layout();
+        if (f.pendingRouter.exists) revert PendingParamsNotResolved();
+
         uint64 eta = uint64(block.timestamp) + core.paramMinDelay;
         f.pendingRouter.newRouter = newRouter;
         f.pendingRouter.eta = eta;
