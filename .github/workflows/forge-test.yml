@@ -19,7 +19,10 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly
+          # Pinned to the stable release the suite is validated against (716/716).
+          # `nightly` introduced stricter cheatcode/gas behavior that breaks
+          # test harnesses without any production-code change — do not float this.
+          version: "v1.7.1"
 
       - name: forge --version
         run: forge --version
