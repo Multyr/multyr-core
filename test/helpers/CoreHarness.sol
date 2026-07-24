@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import { Vm } from "forge-std/Vm.sol";
 import { CoreVault } from "../../src/core/CoreVault.sol";
 import { CoreStorage } from "../../src/core/storage/CoreStorage.sol";
 import { FeeStorage } from "../../src/core/storage/FeeStorage.sol";
@@ -23,6 +24,10 @@ import { MockBufferManagerForTests } from "./MockBufferManagerForTests.sol";
 /// @notice Test harness for the new Diamond-lite CoreVault
 /// @dev Provides unsafe setters for testing and wires up modules automatically
 contract CoreHarness is CoreVault {
+    // Foundry cheatcode address — used only to warp past StrategyRouter's allowlist
+    // timelock in addStrategyUnsafe(); this contract is test-only and never deployed on-chain.
+    Vm internal constant vm = Vm(0x7109709ECfa91a80626fF3989D68f67F5b1DD12D);
+
     uint16 private _opsTargetBps = 300; // 3%
     uint16 private _opsFloorBps = 100; // 1%
 
@@ -195,7 +200,11 @@ contract CoreHarness is CoreVault {
     function addStrategyUnsafe(address strat) external {
         _ensureRouter();
         CoreStorage.Layout storage core = CoreStorage.layout();
-        StrategyRouter(address(core.router)).register(strat, 0, 10000);
+        StrategyRouter router = StrategyRouter(address(core.router));
+        router.proposeStrategyAllowlist(strat);
+        vm.warp(block.timestamp + router.strategyAllowlistDelay());
+        router.executeStrategyAllowlist(strat);
+        router.register(strat, 0, 10000);
     }
 
     function setIntakeUnsafe(address strat) external {
