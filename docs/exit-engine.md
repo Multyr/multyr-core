@@ -101,7 +101,7 @@ INSTANT is the immediate path, available when three conditions hold simultaneous
 
 FORCE is the emergency withdrawal path. It bypasses the epoch cap and lock period.
 
-- Entry: `forceWithdraw(assets, receiver, owner, plan, maxShares)` or `forceWithdrawAll(receiver)`
+- Entry: `forceWithdraw(assets, receiver, owner, plan, maxShares)` or `forceWithdrawAll(receiver, minAssetsOut)`
 - Requires vault to be in OpenEnded mode, or FixedMaturity/Active state (`_checkForceExitAllowed()` in `FixedMaturityStorage.sol`)
 - Does **not** call `consumeEpochCap` — `epochWithdrawn` is unchanged
 - Does **not** check `lockPeriod`
@@ -138,8 +138,8 @@ Entry points for each mode:
 | `requestClaim(bool immediate, uint256 shares)` | QueueModule | — | STANDARD or INSTANT |
 | `cancelClaim(uint256 claimId)` | QueueModule | — | — (reversal) |
 | `settleFeesAndProcessQueue(uint256 maxClaims)` | QueueModule | — | settles STANDARD + INSTANT from queue |
-| `forceWithdraw(uint256 assets, address receiver, address owner, Pull[] plan, uint256 maxShares)` | ERC4626Module | `0x0f0824be` | FORCE |
-| `forceWithdrawAll(address receiver)` | ERC4626Module | — | FORCE (all shares) |
+| `forceWithdraw(uint256 assets, address receiver, address owner, Pull[] plan, uint256 maxShares)` | ERC4626Module | `0x439fdeb4` | FORCE |
+| `forceWithdrawAll(address receiver, uint256 minAssetsOut)` | ERC4626Module | `0xe375b48f` | FORCE (all shares, reverts below `minAssetsOut` — F-03) |
 | `simulateExit(uint256 shares, bool immediate, bool isForce, address vault)` | ExitEngineLib (view) | — | preview only |
 
 Note: `withdraw(uint256, address, address)` and `redeem(uint256, address, address)` always revert (`AsyncWithdrawalRequired`) — see Invariant E1.
@@ -619,7 +619,7 @@ NOTE: feeShares transferred (no mint) — totalSupply net delta = -9_900_990e12 
 ```
 User holds 5_000e18 shares; PPS = 1.01; witBps=50; forceExitPenaltyBps=200
 
-User: forceWithdrawAll(receiver=alice)
+User: forceWithdrawAll(receiver=alice, minAssetsOut=0)
 
 Step 1: shares = balanceOf(alice) = 5_000e18
 Step 2: feeShares = mulBpsUp(5_000e18, 250) = 125e18
@@ -627,13 +627,16 @@ Step 3: netShares = 5_000e18 - 125e18 = 4_875e18
 Step 4: targetAssets = convertToAssets(4_875e18)
          = 4_875e18 * totalAssets / totalSupply ≈ 4_924_999 USDC
 Step 5: _checkWithdrawalLimitsForForce(targetAssets)
-Step 6: _transferShares(alice, feeCollector, 125e18)
-Step 7: _forcePullAllLiquidity(targetAssets)
+Step 6: _forcePullAllLiquidity(targetAssets)
          → router.forceRedeemForWithdraw(targetAssets)
-Step 8: assetsReceived = min(hot, targetAssets)   // best-effort
-Step 9: _burn(alice, netShares=4_875e18)
-Step 10: token.safeTransfer(alice, assetsReceived)
-Step 11: Emit ForceWithdrawAllExecuted, ForceExit
+Step 7: assetsReceived = min(hot, targetAssets)   // best-effort
+Step 7a: if assetsReceived < minAssetsOut: revert SlippageExceeded()   // F-03
+Step 8: fillRatio = assetsReceived / targetAssets (1.0 here — fully filled)
+         netSharesToBurn = netShares × fillRatio = 4_875e18
+Step 9: _transferShares(alice, feeCollector, 125e18 × fillRatio)
+Step 10: _burn(alice, netSharesToBurn)
+Step 11: token.safeTransfer(alice, assetsReceived)
+Step 12: Emit ForceWithdrawAllExecuted, ForceExit
 ```
 
 ---
@@ -647,10 +650,12 @@ Step 11: Emit ForceWithdrawAllExecuted, ForceExit
 | Settle loop: `capRem=0` during batch | INSTANT claims (`c.immediate=true`) skipped; STANDARD claims proceed via lockPeriod check only |
 | `hot < gross` for a claim in settle loop | Claim skipped; `QueueClaimSkippedInsufficientHot` emitted; claim remains at queue position for next batch |
 | All claims ineligible for 32 consecutive entries | `hitEarlyExit=true`; pre-scan terminates; `_settleLoop` runs on zero eligible entries (no-op) |
-| `totalSupply = 0` at crystallize | HWM reset to WAD, zero perf fee, `lastCrystallize` updated |
+| `totalSupply = 0` at crystallize, vault also holds 0 assets | Genuine fresh start: HWM reset to WAD, zero perf fee, `lastCrystallize` updated |
+| `totalSupply = 0` at crystallize, but dust assets remain | HWM preserved (not reset to WAD); zero perf fee; `lastCrystallize` left untouched (no-op — prevents free griefing of the interval clock via a `ROLE_PUBLIC` caller) |
 | FORCE on FixedMaturity/Funding | `_checkForceExitAllowed()` reverts |
 | FORCE on FixedMaturity/Matured | Passes; `preMaturityForceExitPenaltyBps = 0` (maturity removes the pre-maturity surcharge) |
-| `forceWithdrawAll`: hot < targetAssets | Best-effort: `assetsReceived = min(hot, targetAssets)` after `_forcePullAllLiquidity`; no revert |
+| `forceWithdrawAll`: hot < targetAssets, `assetsReceived >= minAssetsOut` | Best-effort: `assetsReceived = min(hot, targetAssets)` after `_forcePullAllLiquidity`; proportional burn, no revert |
+| `forceWithdrawAll`: `assetsReceived < minAssetsOut` | Reverts `SlippageExceeded` (F-03); no shares burned, no fees transferred, no state changed |
 | `witBps=0` and `forceExitPenaltyBps=0` | `feeShares=0`; fee transfer skipped; user receives full `grossShares` |
 | Epoch multi-skip (vault inactive N epochs) | `rollEpochIfNeeded` iterates until `epochStart` is within one duration of `block.timestamp` |
 
@@ -701,7 +706,7 @@ Key functions with canonical file paths (for auditor cross-referencing):
 | `_trySoftRefreshWarmNav` | `src/core/modules/QueueModule.sol:628` | L626 |
 | `_crystallize` | `src/core/modules/QueueModule.sol:763` | L763 |
 | `forceWithdraw` | `src/core/modules/ERC4626Module.sol:166` | L100 |
-| `forceWithdrawAll` | `src/core/modules/ERC4626Module.sol:257` | L220 |
+| `forceWithdrawAll` | `src/core/modules/ERC4626Module.sol:272` | L220 |
 | `_checkForceExitAllowed` | `src/core/storage/FixedMaturityStorage.sol:111` | L105 |
 | `InternalFeeParams` struct | `src/core/storage/FeeStorage.sol:12` | L20 |
 | `QueueStorage.Layout` | `src/core/storage/QueueStorage.sol:24` | L10 |

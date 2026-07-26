@@ -21,7 +21,7 @@ interface IQueueModule {
 }
 
 interface IForceWithdrawAll {
-    function forceWithdrawAll(address receiver) external returns (uint256);
+    function forceWithdrawAll(address receiver, uint256 minAssetsOut) external returns (uint256);
 }
 
 /// @title DepositRouter + ExitEngineLib integration test (mock-based, no periphery import)
@@ -201,7 +201,7 @@ contract ExitEngine_DepositRouter is Test {
         // FORCE withdraw — user2
         uint256 user2UsdcBefore = usdc.balanceOf(users[2]);
         vm.prank(users[2]);
-        IForceWithdrawAll(address(vault)).forceWithdrawAll(users[2]);
+        IForceWithdrawAll(address(vault)).forceWithdrawAll(users[2], 0);
         uint256 user2Received = usdc.balanceOf(users[2]) - user2UsdcBefore;
         assertEq(vault.balanceOf(users[2]), 0, "force: user2 fully exited");
         assertGt(user2Received, 0, "force: user2 received USDC");

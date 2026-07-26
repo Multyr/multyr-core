@@ -254,7 +254,7 @@ contract ForceWithdrawAll_SlippagePOC is Test {
         uint256 fairValue        = VAULT_TOTAL;     // 1 000 000 USDC at PPS = 1
 
         vm.prank(user);
-        uint256 received = ERC4626Module(address(core)).forceWithdrawAll(user);
+        uint256 received = ERC4626Module(address(core)).forceWithdrawAll(user, 0);
 
         uint256 userSharesAfter = core.balanceOf(user);
         uint256 userUSDCAfter   = IERC20(USDC_UNDERLYING).balanceOf(user);
@@ -323,7 +323,7 @@ contract ForceWithdrawAll_SlippagePOC is Test {
         uint256 expectedPaid = HOT_BALANCE + stratPull;         // 190 000 USDC
 
         vm.prank(user);
-        uint256 received = ERC4626Module(address(core)).forceWithdrawAll(user);
+        uint256 received = ERC4626Module(address(core)).forceWithdrawAll(user, 0);
 
         uint256 userUSDCAfter  = IERC20(USDC_UNDERLYING).balanceOf(user);
         uint256 userSharesAfter = core.balanceOf(user);
@@ -378,7 +378,7 @@ contract ForceWithdrawAll_SlippagePOC is Test {
         uint256 fairValue       = VAULT_TOTAL;
 
         vm.prank(user);
-        uint256 received = ERC4626Module(address(core)).forceWithdrawAll(user);
+        uint256 received = ERC4626Module(address(core)).forceWithdrawAll(user, 0);
 
         uint256 userSharesAfter = core.balanceOf(user);
         uint256 userUSDCAfter   = IERC20(USDC_UNDERLYING).balanceOf(user);
@@ -413,7 +413,7 @@ contract ForceWithdrawAll_SlippagePOC is Test {
 
         // First call: strategy returns nothing, only the hot balance is raised.
         vm.prank(user);
-        uint256 firstReceived = ERC4626Module(address(core)).forceWithdrawAll(user);
+        uint256 firstReceived = ERC4626Module(address(core)).forceWithdrawAll(user, 0);
         assertEq(firstReceived, HOT_BALANCE, "first call only raises the hot balance");
 
         uint256 residualShares = core.balanceOf(user);
@@ -430,7 +430,7 @@ contract ForceWithdrawAll_SlippagePOC is Test {
 
         // Second call: recovers the residual claim in full.
         vm.prank(user);
-        uint256 secondReceived = ERC4626Module(address(core)).forceWithdrawAll(user);
+        uint256 secondReceived = ERC4626Module(address(core)).forceWithdrawAll(user, 0);
 
         assertEq(core.balanceOf(user), 0, "FIX CONFIRMED: residual fully claimed, no shares left");
 
@@ -442,5 +442,114 @@ contract ForceWithdrawAll_SlippagePOC is Test {
             "FIX CONFIRMED: two proportional calls recover full fair value, zero permanent loss"
         );
         assertGt(secondReceived, 0, "second call delivered the residual");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // TEST 5 — F-03: minAssetsOut reverts on an insufficient fill
+    //
+    // Proportional burn (Tests 1-4) makes a partial fill loss-free, but the
+    // caller still had no way to say "only proceed if you can raise at least
+    // X" -- forceWithdrawAll(receiver) would silently succeed and deliver an
+    // arbitrarily small fraction of fair value if strategies were frozen or
+    // illiquid at call time. F-03 adds a mandatory floor: pass minAssetsOut,
+    // and the call reverts (SlippageExceeded) if the actual fill falls short,
+    // with NO state changed -- no shares burned, no fees transferred, nothing
+    // pulled from strategies survives the revert.
+    // ═════════════════════════════════════════════════════════════════════════
+    function test_f03_minAssetsOut_reverts_on_insufficient_fill() public {
+        _baseSetUp();
+
+        MockFrozenStrategy frozen = new MockFrozenStrategy(USDC_UNDERLYING);
+        core.addStrategyUnsafe(address(frozen));
+        _depositAndAllocate(address(frozen));
+
+        uint256 userSharesBefore = core.balanceOf(user);
+        uint256 userUSDCBefore = IERC20(USDC_UNDERLYING).balanceOf(user);
+        uint256 feeCollectorSharesBefore = core.balanceOf(address(this));
+
+        // Only HOT_BALANCE (10% of fair value) is actually raisable; demand
+        // more than that as the floor.
+        uint256 tooHigh = HOT_BALANCE + 1;
+
+        vm.prank(user);
+        vm.expectRevert(ERC4626Module.SlippageExceeded.selector);
+        ERC4626Module(address(core)).forceWithdrawAll(user, tooHigh);
+
+        // FIX CONFIRMED: the revert leaves everything untouched -- no shares
+        // burned, no USDC moved, no fee shares transferred. The liquidity
+        // pulled from the (frozen, so none anyway) strategy is also reverted
+        // atomically along with the rest of the call.
+        assertEq(core.balanceOf(user), userSharesBefore, "FIX CONFIRMED: no shares burned on revert");
+        assertEq(
+            IERC20(USDC_UNDERLYING).balanceOf(user),
+            userUSDCBefore,
+            "FIX CONFIRMED: no USDC delivered on revert"
+        );
+        assertEq(
+            core.balanceOf(address(this)),
+            feeCollectorSharesBefore,
+            "FIX CONFIRMED: no fee shares transferred on revert"
+        );
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // TEST 6 — F-03: minAssetsOut succeeds at (and below) the exact fill amount
+    //
+    // The guard is a hard floor, not an off-by-one trap: demanding exactly
+    // what is actually raisable must succeed, not revert.
+    // ═════════════════════════════════════════════════════════════════════════
+    function test_f03_minAssetsOut_succeeds_at_exact_fill_amount() public {
+        _baseSetUp();
+
+        MockFrozenStrategy frozen = new MockFrozenStrategy(USDC_UNDERLYING);
+        core.addStrategyUnsafe(address(frozen));
+        _depositAndAllocate(address(frozen));
+
+        vm.prank(user);
+        uint256 received = ERC4626Module(address(core)).forceWithdrawAll(user, HOT_BALANCE);
+
+        assertEq(received, HOT_BALANCE, "FIX CONFIRMED: exact-threshold minAssetsOut succeeds, not reverts");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // TEST 7 — F-03: minAssetsOut = 0 preserves the legacy best-effort behaviour
+    //
+    // Explicitly opting into "accept any fill, no matter how small" must still
+    // work exactly as forceWithdrawAll behaved before F-03 (Tests 1-4, which
+    // all pass minAssetsOut = 0, already exercise this -- this test just pins
+    // the zero-floor semantics down directly against the frozen-strategy case).
+    // ═════════════════════════════════════════════════════════════════════════
+    function test_f03_minAssetsOut_zero_accepts_any_fill() public {
+        _baseSetUp();
+
+        MockFrozenStrategy frozen = new MockFrozenStrategy(USDC_UNDERLYING);
+        core.addStrategyUnsafe(address(frozen));
+        _depositAndAllocate(address(frozen));
+
+        vm.prank(user);
+        uint256 received = ERC4626Module(address(core)).forceWithdrawAll(user, 0);
+
+        assertEq(received, HOT_BALANCE, "minAssetsOut=0: 10% fill still succeeds, opting into any fill");
+        assertGt(core.balanceOf(user), 0, "residual shares remain, retriable as always");
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // TEST 8 — CONTROL: minAssetsOut does not interfere with a fully-filled,
+    // healthy-strategy withdrawal
+    // ═════════════════════════════════════════════════════════════════════════
+    function test_f03_minAssetsOut_control_healthy_strategy_full_fill() public {
+        _baseSetUp();
+
+        MockHealthyStrategy healthy = new MockHealthyStrategy(USDC_UNDERLYING);
+        core.addStrategyUnsafe(address(healthy));
+        _depositAndAllocate(address(healthy));
+
+        uint256 fairValue = VAULT_TOTAL;
+
+        vm.prank(user);
+        uint256 received = ERC4626Module(address(core)).forceWithdrawAll(user, fairValue);
+
+        assertEq(received, fairValue, "healthy strategy: full fair value meets minAssetsOut == fairValue");
+        assertEq(core.balanceOf(user), 0, "all shares burned on a full fill");
     }
 }

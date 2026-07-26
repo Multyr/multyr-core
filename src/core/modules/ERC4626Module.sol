@@ -269,7 +269,16 @@ contract ERC4626Module {
     ///      a partial pull, and the caller retains a residual claim they can
     ///      retry (forceWithdrawAll again once liquidity frees up) or exit via
     ///      the normal queue.
-    function forceWithdrawAll(address receiver) external returns (uint256 assetsReceived) {
+    /// @param receiver Address to receive assets
+    /// @param minAssetsOut Minimum assets that must be raised, or the call reverts
+    ///        with SlippageExceeded (F-03: proportional burn makes a partial fill
+    ///        loss-free, but a caller can still silently receive an arbitrarily
+    ///        small fill if strategies are frozen/illiquid. Pass 0 to explicitly
+    ///        accept any fill, no matter how small.)
+    function forceWithdrawAll(address receiver, uint256 minAssetsOut)
+        external
+        returns (uint256 assetsReceived)
+    {
         // FixedMaturity gate: same as forceWithdraw — only Active state or OpenEnded.
         _checkForceExitAllowed(FixedMaturityStorage.layout());
 
@@ -307,6 +316,14 @@ contract ERC4626Module {
         address assetAddr = _asset();
         uint256 hot = IERC20(assetAddr).balanceOf(address(this));
         assetsReceived = hot >= targetAssets ? targetAssets : hot;
+
+        // F-03: hard floor on the fill. Proportional burn already makes a partial
+        // fill loss-free (see below), but without this check a caller could still
+        // silently receive an arbitrarily small fraction of fair value if
+        // strategies are frozen/illiquid at call time. Revert BEFORE any shares
+        // are burned or fees transferred -- the pulled liquidity simply stays put
+        // (this whole call, including the pull above, is undone by the revert).
+        if (assetsReceived < minAssetsOut) revert SlippageExceeded();
 
         // Proportional fill: scale shares burned and fee charged by how much of
         // targetAssets was actually raised. targetAssets == 0 only happens for

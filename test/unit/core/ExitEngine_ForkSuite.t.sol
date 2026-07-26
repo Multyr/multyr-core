@@ -21,7 +21,7 @@ interface IQueueModule {
 }
 
 interface IForceWithdrawAll {
-    function forceWithdrawAll(address receiver) external returns (uint256);
+    function forceWithdrawAll(address receiver, uint256 minAssetsOut) external returns (uint256);
 }
 
 /// @title ExitEngine Fork Test Suite - 10 Mandatory Tests
@@ -258,7 +258,7 @@ contract ExitEngine_ForkSuite is Test {
         uint256 usdcBefore = usdc.balanceOf(user3);
 
         vm.prank(user3);
-        IForceWithdrawAll(address(vault)).forceWithdrawAll(user3);
+        IForceWithdrawAll(address(vault)).forceWithdrawAll(user3, 0);
 
         uint256 user3SharesAfter = vault.balanceOf(user3);
         uint256 usdcAfter = usdc.balanceOf(user3);
@@ -319,7 +319,7 @@ contract ExitEngine_ForkSuite is Test {
 
         // Force withdraw - supply must decrease further
         vm.prank(user3);
-        IForceWithdrawAll(address(vault)).forceWithdrawAll(user3);
+        IForceWithdrawAll(address(vault)).forceWithdrawAll(user3, 0);
         uint256 supplyAfterForce = vault.totalSupply();
         assertLt(supplyAfterForce, supplyAfterSettle, "supply decreased after force");
 
@@ -405,7 +405,7 @@ contract ExitEngine_ForkSuite is Test {
         // Mode 3: FORCE withdrawal (same epoch)
         uint256 user3UsdcBefore = usdc.balanceOf(user3);
         vm.prank(user3);
-        IForceWithdrawAll(address(vault)).forceWithdrawAll(user3);
+        IForceWithdrawAll(address(vault)).forceWithdrawAll(user3, 0);
         assertGt(usdc.balanceOf(user3), user3UsdcBefore, "force: received USDC");
         assertEq(vault.balanceOf(user3), 0, "force: user3 fully exited");
 
@@ -457,7 +457,7 @@ contract ExitEngine_ForkSuite is Test {
 
         uint256 user3UsdcBefore = usdc.balanceOf(user3);
         vm.prank(user3);
-        IForceWithdrawAll(address(vault)).forceWithdrawAll(user3);
+        IForceWithdrawAll(address(vault)).forceWithdrawAll(user3, 0);
         assertGt(usdc.balanceOf(user3), user3UsdcBefore, "force exit works with stale NAV");
     }
 }

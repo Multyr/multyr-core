@@ -21,7 +21,7 @@ interface IQueueModule {
 }
 
 interface IForceWithdrawAll {
-    function forceWithdrawAll(address receiver) external returns (uint256);
+    function forceWithdrawAll(address receiver, uint256 minAssetsOut) external returns (uint256);
 }
 
 /// @title Hardening: Gas Characterization + Chaos + Low TVL
@@ -148,7 +148,7 @@ contract Hardening_GasAndChaos is Test {
 
         // Force exit on remaining
         vm.prank(user1);
-        IForceWithdrawAll(address(vault)).forceWithdrawAll(user1);
+        IForceWithdrawAll(address(vault)).forceWithdrawAll(user1, 0);
         assertEq(vault.balanceOf(user1), 0, "user1 fully exited");
 
         // Supply only decreased
@@ -197,7 +197,7 @@ contract Hardening_GasAndChaos is Test {
         // Wave 4: force exits
         for (uint256 i = 15; i < 18; i++) {
             vm.prank(users[i]);
-            IForceWithdrawAll(address(vault)).forceWithdrawAll(users[i]);
+            IForceWithdrawAll(address(vault)).forceWithdrawAll(users[i], 0);
             assertEq(vault.balanceOf(users[i]), 0, "force exit complete");
         }
 

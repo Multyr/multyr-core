@@ -374,7 +374,7 @@ Deterministic pricing: `cachedTA` and `cachedTS` (totalAssets, totalSupply) are 
 - Applies `witBps + forceExitPenaltyBps` fee (and `preMaturityForceExitPenaltyBps` in FM/Active state).
 - Maximum 10 strategy legs (`MAX_FORCE_LEGS = 10`, `src/core/modules/ERC4626Module.sol:74`).
 
-`forceWithdrawAll(address receiver)` (`src/core/modules/ERC4626Module.sol:257-332`) is a no-plan variant: burns all caller shares, attempts hot → warm → strategy liquidity waterfall in sequence.
+`forceWithdrawAll(address receiver, uint256 minAssetsOut)` (`src/core/modules/ERC4626Module.sol:272-367`) is a no-plan variant: attempts hot → warm → strategy liquidity waterfall in sequence, then burns shares/fees proportional to the fill ratio actually raised (unfilled shares are left live and retriable). Reverts with `SlippageExceeded` if the fill is below the caller's `minAssetsOut` (F-03), with no state changed.
 
 ---
 
@@ -676,7 +676,7 @@ This table covers the 30 most important functions. For the complete selector reg
 | `withdraw(...)` | ERC4626Module | PUBLIC | — | `AsyncWithdrawalRequired` (always) |
 | `redeem(...)` | ERC4626Module | PUBLIC | — | `AsyncWithdrawalRequired` (always) |
 | `forceWithdraw(...)` | ERC4626Module | PUBLIC | `ForceWithdrawExecuted`, `ForceExit` | `Paused`, `ZeroAmount`, `EmptyPlan`, `InsufficientLiquidity` |
-| `forceWithdrawAll(address)` | ERC4626Module | PUBLIC | `ForceWithdrawAllExecuted`, `ForceExit` | `Paused`, `ZeroAmount` |
+| `forceWithdrawAll(address,uint256)` | ERC4626Module | PUBLIC | `ForceWithdrawAllExecuted`, `ForceExit` | `Paused`, `ZeroAmount`, `SlippageExceeded` (F-03) |
 | `requestClaim(bool,uint256)` | QueueModule | PUBLIC | `ClaimRequested`, `InstantExit` or `ClaimQueued` | `ZeroAmount`, `ClaimTooSmall`, `ClaimCooldownActive` |
 | `cancelClaim(uint256)` | QueueModule | PUBLIC | `ClaimCancelled`, `SharesUnfrozen` | `NotClaimOwner`, `AlreadySettled` |
 | `settleFeesAndProcessQueue(uint256)` | QueueModule | PUBLIC | `ClaimSettled`, `EpochRolled`, `VaultPpsSnapshot` | `ZeroAmount` |

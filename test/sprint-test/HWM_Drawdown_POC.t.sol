@@ -329,7 +329,7 @@ contract HWM_Drawdown_POC is Test {
 
         // Sole holder fully exits -- totalSupply drops to 0
         vm.prank(user);
-        ERC4626Module(address(core)).forceWithdrawAll(user);
+        ERC4626Module(address(core)).forceWithdrawAll(user, 0);
         assertEq(core.totalSupply(), 0, "user was sole holder: totalSupply must be 0 after full exit");
 
         // Simulate dust arriving after the vault is empty (e.g. late/leftover yield)
