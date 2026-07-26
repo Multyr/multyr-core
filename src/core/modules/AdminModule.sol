@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { IERC4626 } from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import { CoreStorage } from "../storage/CoreStorage.sol";
 import { FeeStorage } from "../storage/FeeStorage.sol";
@@ -12,6 +13,7 @@ import { IStrategyRouter } from "../../interfaces/IStrategyRouter.sol";
 import { IStrategyHealthRegistry } from "../../interfaces/IStrategyHealthRegistry.sol";
 import { IIncentives } from "../../interfaces/IIncentives.sol";
 import { IIncentivesEngine } from "../../interfaces/IIncentivesEngine.sol";
+import { ICoreVault } from "../../interfaces/ICoreVault.sol";
 
 /// @title AdminModule
 /// @notice Handles all timelock-protected admin functions
@@ -827,27 +829,21 @@ contract AdminModule {
         }
     }
 
-    /// @dev Get asset address via staticcall (works in delegatecall context)
+    /// @dev Direct interface call (works in delegatecall context: address(this)
+    ///      is the vault). Same semantics as a staticcall + require(success),
+    ///      cheaper -- no manual ABI encode/decode boilerplate.
     function _asset() internal view returns (address) {
-        (bool success, bytes memory data) =
-            address(this).staticcall(abi.encodeWithSignature("asset()"));
-        require(success, "asset call failed");
-        return abi.decode(data, (address));
+        return IERC4626(address(this)).asset();
     }
 
-    /// @dev Raw asset-to-share conversion via staticcall (works in delegatecall context)
+    /// @dev Raw asset-to-share conversion (works in delegatecall context)
     ///      Uses convertToShares (no deposit fee) for dead deposit seeding.
     function _previewDeposit(uint256 assets) internal view returns (uint256) {
-        (bool success, bytes memory data) =
-            address(this).staticcall(abi.encodeWithSignature("convertToShares(uint256)", assets));
-        require(success, "convertToShares call failed");
-        return abi.decode(data, (uint256));
+        return IERC4626(address(this)).convertToShares(assets);
     }
 
-    /// @dev Call processorMint via call (works in delegatecall context)
+    /// @dev Direct interface call (works in delegatecall context)
     function _processorMint(address to, uint256 amount) internal {
-        (bool success,) = address(this)
-            .call(abi.encodeWithSignature("processorMint(address,uint256)", to, amount));
-        require(success, "processorMint call failed");
+        ICoreVault(address(this)).processorMint(to, amount);
     }
 }
