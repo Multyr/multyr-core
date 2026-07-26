@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { IERC4626 } from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import { FixedMaturityStorage, VaultMode, VaultState } from "../storage/FixedMaturityStorage.sol";
@@ -11,6 +12,8 @@ import { FixedMaturityLogicLib } from "../libraries/FixedMaturityLogicLib.sol";
 import { Events } from "../libraries/Events.sol";
 import { IBufferManager } from "../../interfaces/IBufferManager.sol";
 import { IStrategyRouter } from "../../interfaces/IStrategyRouter.sol";
+import { IQueueModule } from "../../interfaces/IQueueModule.sol";
+import { ICoreVault } from "../../interfaces/ICoreVault.sol";
 import { FixedPoint } from "../../libs/FixedPoint.sol";
 
 // Errors from FixedMaturityStorage.sol (imported via transitive import):
@@ -156,10 +159,9 @@ contract FixedMaturityModule {
         if (fm.vaultState != VaultState.Matured) revert InvalidVaultState();
 
         // pendingShares == 0 is the only hard requirement. Dust assets are allowed.
-        (bool ok, bytes memory data) = address(this).staticcall(
-            abi.encodeWithSignature("pendingShares()")
-        );
-        if (!ok || abi.decode(data, (uint256)) != 0) revert CloseNotAllowedWithPendingShares();
+        if (IQueueModule(address(this)).pendingShares() != 0) {
+            revert CloseNotAllowedWithPendingShares();
+        }
 
         fm.vaultState = VaultState.Closed;
         emit Events.FixedMaturityClosed();
@@ -404,62 +406,40 @@ contract FixedMaturityModule {
     // DELEGATECALL HELPERS (copied pattern from QueueModule)
     // ──────────────────────────────────────────────────────────────────────────
 
+    // NOTE: direct interface calls, not low-level staticcall/call +
+    // abi.encodeWithSignature. Same external-call semantics (delegatecall
+    // context means address(this) is still the vault), but the compiler
+    // resolves the selector at compile time and skips the manual bytes-memory
+    // encode/decode + require(success, "...") boilerplate on every call site.
     function _totalAssets() internal view returns (uint256) {
-        (bool success, bytes memory data) =
-            address(this).staticcall(abi.encodeWithSignature("totalAssets()"));
-        require(success, "totalAssets call failed");
-        return abi.decode(data, (uint256));
+        return IERC4626(address(this)).totalAssets();
     }
 
     function _totalSupply() internal view returns (uint256) {
-        (bool success, bytes memory data) =
-            address(this).staticcall(abi.encodeWithSignature("totalSupply()"));
-        require(success, "totalSupply call failed");
-        return abi.decode(data, (uint256));
+        return IERC20(address(this)).totalSupply();
     }
 
     function _convertToAssets(uint256 shares) internal view returns (uint256) {
-        (bool success, bytes memory data) = address(this).staticcall(
-            abi.encodeWithSignature("convertToAssets(uint256)", shares)
-        );
-        require(success, "convertToAssets call failed");
-        return abi.decode(data, (uint256));
+        return IERC4626(address(this)).convertToAssets(shares);
     }
 
     function _previewDeposit(uint256 assets) internal view returns (uint256) {
-        (bool success, bytes memory data) = address(this).staticcall(
-            abi.encodeWithSignature("convertToShares(uint256)", assets)
-        );
-        require(success, "convertToShares call failed");
-        return abi.decode(data, (uint256));
+        return IERC4626(address(this)).convertToShares(assets);
     }
 
     function _balanceOf(address account) internal view returns (uint256) {
-        (bool success, bytes memory data) = address(this).staticcall(
-            abi.encodeWithSignature("balanceOf(address)", account)
-        );
-        require(success, "balanceOf call failed");
-        return abi.decode(data, (uint256));
+        return IERC20(address(this)).balanceOf(account);
     }
 
     function _asset() internal view returns (address) {
-        (bool success, bytes memory data) =
-            address(this).staticcall(abi.encodeWithSignature("asset()"));
-        require(success, "asset call failed");
-        return abi.decode(data, (address));
+        return IERC4626(address(this)).asset();
     }
 
     function _mint(address to, uint256 amount) internal {
-        (bool success,) = address(this).call(
-            abi.encodeWithSignature("processorMint(address,uint256)", to, amount)
-        );
-        require(success, "mint failed");
+        ICoreVault(address(this)).processorMint(to, amount);
     }
 
     function _burn(address from, uint256 amount) internal {
-        (bool success,) = address(this).call(
-            abi.encodeWithSignature("processorBurn(address,uint256)", from, amount)
-        );
-        require(success, "burn failed");
+        ICoreVault(address(this)).processorBurn(from, amount);
     }
 }
