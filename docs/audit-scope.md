@@ -171,7 +171,7 @@ Total: 51 `.sol` files in `src/core/`.
 |---|------|----------------|-------|
 | L1 | **Owner key is single point of control** | Design choice | No on-chain DAO. Mitigated by vetoer + timelock. Deployment to multi-sig (Safe) is recommended. |
 | L2 | **`FLAG_SYSTEM_SEALED` does not freeze `roleOf[selector]`** | Known gap (AC8) | Owner can change per-function roles post-seal. Timelock provides recourse window. |
-| L3 | **`forceWithdrawAll` is best-effort** | Design choice | Delivers `min(hot, targetAssets)` — may deliver less than requested if hot liquidity < target. |
+| L3 | **`forceWithdrawAll` is best-effort (F-03: resolved)** | Design choice, mitigated | Delivers `min(hot, targetAssets)` — still no guarantee of full liquidity. Previously this could silently deliver an arbitrarily small fill (up to ~90%+ of value if strategies were frozen/illiquid); now a mandatory `minAssetsOut` parameter reverts the whole call (`SlippageExceeded`, no state change) if the fill falls short. See `test/sprint-test/ForceWithdrawAll_SlippagePOC.t.sol`. |
 | L4 | **Settlement loop is partial** | Design choice | Gas safety exit at `gasleft() > 150_000`. Queue resumes in next call. Settlement is not atomic for large queues. |
 | L5 | **INSTANT fallback stores `immediate=false`** | Design choice | INSTANT requests that fall back to queue are re-classified as standard queue entries (no epoch cap). Fixed in shadow report (BUG 6). |
 | L6 | **`preMaturityForceExitPenaltyBps` max 50%** | Design constraint | Hard cap at 5000 bps validated in `configureFixedMaturity`. |
@@ -203,7 +203,7 @@ These are known and accepted before the first audit:
 | # | Item | Status |
 |---|------|--------|
 | AC8 | `FLAG_SYSTEM_SEALED` does not freeze `roleOf[selector]` | Accepted — owner can only change roles through timelock window |
-| L3 | `forceWithdrawAll` is best-effort (partial delivery possible) | Documented; by design |
+| L3 | `forceWithdrawAll` is best-effort (partial delivery possible) | **Resolved (F-03)** — no longer open. Partial delivery below a caller's stated `minAssetsOut` now reverts instead of silently succeeding. Remaining best-effort characteristic (no guarantee of full liquidity) is by design and unchanged. |
 | L9 | Fork test directory fragmentation | Technical debt; content correct |
 
 ---
@@ -266,7 +266,7 @@ Cross-referenced to test files for auditor traceability:
 | T4 | **Reentrancy via strategy callback** | MEDIUM | `FLAG_REENTRANCY_LOCKED` guards `deployToStrategies`, `rebalanceStrategies`. W2 rule: external calls are try/catch. | `CoreVault_DiamondLite_Reentrancy`; `ForceWithdraw_Reentrancy` |
 | T5 | **EIP-7201 storage slot collision** | HIGH (mitigated) | 4 namespaces verified via `EIP7201Compliance.t.sol` (5 tests). Fixed post-FINDING-OOS-03. | `test/security/EIP7201Compliance.t.sol` |
 | T6 | **Unauthorized processorMint/Burn** | CRITICAL | `isAuthorizedModule[addr]` gate — only QueueModule and FixedMaturityModule authorized at deploy. | `CoreVault_DiamondLite_AccessControl` |
-| T7 | **FixedMaturity capital lock** | MEDIUM | `markMatured()` is permissionless; `preMaturityForceExitPenaltyBps ≤ 50%` hard cap. `forceWithdrawAll` available. | FM invariant tests; `ForceWithdraw_*` |
+| T7 | **FixedMaturity capital lock** | MEDIUM | `markMatured()` is permissionless; `preMaturityForceExitPenaltyBps ≤ 50%` hard cap. `forceWithdrawAll` available, now with a `minAssetsOut` floor (F-03). | FM invariant tests; `ForceWithdraw_*` |
 | T8 | **Fee parameter ratchet via short timelock** | MEDIUM | H3: post-seal min delay floor 1 day. Guardian can pause while vetoer revokes. | `CoreVault_ParamTimelock`; `Governance_Seal_Invariants` |
 
 ---
@@ -287,7 +287,7 @@ Priority ranking based on value at risk and complexity:
 
 6. **`isAuthorizedModule` post-seal mutability** (MEDIUM): The seal does not freeze `roleOf[selector]` or `isAuthorizedModule`. Verify the threat surface of this gap.
 
-7. **Force exit best-effort delivery** (MEDIUM): `forceWithdrawAll` delivers `min(hot, target)`. Verify no accounting inconsistency when partial delivery occurs.
+7. **Force exit best-effort delivery** (MEDIUM): `forceWithdrawAll` delivers `min(hot, target)`. Verify no accounting inconsistency when partial delivery occurs, and verify the F-03 `minAssetsOut` floor reverts cleanly (no partial state mutation) when the fill falls short.
 
 ### 9.1 Audit Checklist Items
 

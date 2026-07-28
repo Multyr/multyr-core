@@ -766,21 +766,46 @@ contract QueueModule {
 
         uint256 ts = _totalSupply();
         if (ts == 0) {
-            f.highWaterMark = FixedPoint.WAD;
-            f.lastCrystallize = uint64(block.timestamp);
-            emit Events.Crystallized(0, FixedPoint.WAD, 0);
-            return (FixedPoint.WAD, 0);
+            // Escape-hatch guard: only reset the fee baseline to WAD when the vault
+            // is genuinely empty (no residual/dust assets). If assets remain while
+            // supply is zero (e.g. dust left after a full redemption), keep the
+            // existing HWM -- otherwise a forced empty-then-refill cycle could wipe
+            // an already fee-eligible high-water mark while value still sits in the
+            // vault, letting fresh "profit" be recognised on value that was never
+            // actually new.
+            uint256 assetsNow = _totalAssets();
+            if (assetsNow == 0) {
+                // Genuine fresh start: reset the baseline and record the event.
+                f.highWaterMark = FixedPoint.WAD;
+                f.lastCrystallize = uint64(block.timestamp);
+                emit Events.Crystallized(0, FixedPoint.WAD, 0);
+                return (FixedPoint.WAD, 0);
+            }
+            // Dust present: preserve the existing baseline. This is a no-op (no
+            // fee, no HWM change) so -- same reasoning as the drawdown branch
+            // below -- lastCrystallize is deliberately left untouched, and the
+            // storage slot is only written if it needs initialising.
+            uint256 preserved = f.highWaterMark == 0 ? FixedPoint.WAD : f.highWaterMark;
+            if (f.highWaterMark == 0) f.highWaterMark = preserved;
+            emit Events.Crystallized(0, preserved, 0);
+            return (preserved, 0);
         }
 
         uint256 pps = _pps();
         uint256 old = f.highWaterMark == 0 ? FixedPoint.WAD : f.highWaterMark;
 
         if (pps <= old) {
-            // HWM is monotonically non-decreasing. Write old back so the storage
-            // slot is initialised on the very first crystallise (highWaterMark == 0
-            // means "use WAD as default" but the value is never persisted until here).
-            f.highWaterMark = old;
-            f.lastCrystallize = uint64(block.timestamp);
+            // HWM is monotonically non-decreasing. Initialise the storage slot on
+            // the very first crystallise (highWaterMark == 0 means "use WAD as
+            // default" but the value is never persisted until here); otherwise
+            // this write would just re-store the same value, so it's skipped.
+            if (f.highWaterMark == 0) f.highWaterMark = old;
+            // Deliberately NOT touching lastCrystallize here: this call is a no-op
+            // (no profit crystallized). Since endEpochCrystallize() is ROLE_PUBLIC,
+            // bumping the timer on every no-op call would let anyone repeatedly
+            // push lastCrystallize forward for free, indefinitely delaying the next
+            // legitimate (profitable) crystallization. The interval clock should
+            // only advance on a real crystallization event.
             emit Events.Crystallized(old, pps, 0);
             return (old, 0);
         }
