@@ -83,7 +83,7 @@ contract DepositFor_UnauthorizedPayer_POC is Test {
         // Attacker tries to deposit using victim's approval -- now reverts
         // because msg.sender (attacker) is the payer and has no USDC.
         vm.prank(attacker);
-        vm.expectRevert(); // ERC20 transfer failure: attacker has no USDC
+        vm.expectRevert(bytes("allow")); // MockUSDC.transferFrom: attacker never approved the vault (checked before balance)
         ERC4626Module(address(core)).depositFor(ONE_MILLION_USDC, attacker);
 
         // Victim's USDC is untouched
@@ -105,7 +105,7 @@ contract DepositFor_UnauthorizedPayer_POC is Test {
         uint256 victimBefore = IERC20(USDC_UNDERLYING).balanceOf(victim);
 
         vm.prank(attacker);
-        vm.expectRevert();
+        vm.expectRevert(bytes("allow")); // MockUSDC.transferFrom: attacker never approved the vault (checked before balance)
         ERC4626Module(address(core)).depositFor(ONE_MILLION_USDC, attacker);
 
         assertEq(IERC20(USDC_UNDERLYING).balanceOf(victim), victimBefore, "FIX: victim USDC unchanged");
@@ -126,7 +126,7 @@ contract DepositFor_UnauthorizedPayer_POC is Test {
         uint256 victimBefore = IERC20(USDC_UNDERLYING).balanceOf(victim);
 
         vm.prank(attacker);
-        vm.expectRevert();
+        vm.expectRevert(bytes("allow")); // MockUSDC.transferFrom: attacker never approved the vault (checked before balance)
         ERC4626Module(address(core)).depositFor(ONE_MILLION_USDC, attacker);
 
         assertEq(
@@ -148,7 +148,7 @@ contract DepositFor_UnauthorizedPayer_POC is Test {
         uint256 attackerBefore = IERC20(USDC_UNDERLYING).balanceOf(attacker);
 
         vm.prank(attacker);
-        vm.expectRevert();
+        vm.expectRevert(bytes("allow")); // MockUSDC.transferFrom: attacker never approved the vault (checked before balance)
         ERC4626Module(address(core)).deposit(ONE_MILLION_USDC, attacker);
 
         assertEq(IERC20(USDC_UNDERLYING).balanceOf(victim),   victimBefore,   "victim USDC unchanged");
@@ -203,7 +203,7 @@ contract DepositFor_UnauthorizedPayer_POC is Test {
         // Old attack was: depositFor(partialApproval, attacker, victim)
         // New call puts attacker as payer -- reverts
         vm.prank(attacker);
-        vm.expectRevert();
+        vm.expectRevert(bytes("allow")); // MockUSDC.transferFrom: attacker never approved the vault (checked before balance)
         ERC4626Module(address(core)).depositFor(partialApproval, attacker);
 
         assertEq(

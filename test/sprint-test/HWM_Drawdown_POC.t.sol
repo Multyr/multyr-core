@@ -55,6 +55,7 @@ import { MockUSDC } from "../helpers/MockUSDC.sol";
 import { MockParamsProvider } from "../helpers/MockParamsProvider.sol";
 import { ERC4626Module } from "../../src/core/modules/ERC4626Module.sol";
 import { QueueModule } from "../../src/core/modules/QueueModule.sol";
+import { AdminModule } from "../../src/core/modules/AdminModule.sol";
 
 contract HWM_Drawdown_POC is Test {
     // ── constants ─────────────────────────────────────────────────────────────
@@ -305,5 +306,144 @@ contract HWM_Drawdown_POC is Test {
         // User deposited at PPS=1.0, vault is now at PPS~2 -- user is in profit from deposit price
         // and correctly paid zero fees (since recovery has not cleared the peak HWM of 10.0)
         assertGt(userValue, 1_000_000e6, "User is nominally above deposit price at PPS~2 with no fees extracted");
+    }
+
+    // =========================================================================
+    // TEST 5 -- Zero-supply HWM reset only fires when the vault is genuinely
+    // empty (Reservation: HWM escape hatch)
+    //
+    // If totalSupply() == 0 but the vault still holds residual/dust assets
+    // (e.g. yield that lands after the last holder fully exits), crystallize()
+    // must NOT silently reset the fee baseline to WAD -- doing so would let a
+    // forced empty-then-refill cycle wipe an already fee-eligible high-water
+    // mark while value still sits in the vault. The reset to WAD is only
+    // correct for a genuine fresh start (0 supply AND 0 assets).
+    // =========================================================================
+    function test_hwm_zero_supply_dust_does_not_reset_baseline() public {
+        // Establish HWM = 1.1 with 0 % fee
+        _addToVault(100_000e6);
+        _crystallize();
+
+        (,, uint256 hwmBefore,) = AdminModule(address(core)).getPerfParams();
+        assertEq(hwmBefore, 11e17, "setup: HWM established at 1.1");
+
+        // Sole holder fully exits -- totalSupply drops to 0
+        vm.prank(user);
+        ERC4626Module(address(core)).forceWithdrawAll(user);
+        assertEq(core.totalSupply(), 0, "user was sole holder: totalSupply must be 0 after full exit");
+
+        // Simulate dust arriving after the vault is empty (e.g. late/leftover yield)
+        _addToVault(1_000e6);
+        uint256 dustAssets = IERC20(USDC_UNDERLYING).balanceOf(address(core));
+        assertGt(dustAssets, 0, "sanity: dust assets present while supply is zero");
+
+        (,,, uint256 lastCrystBeforeDustCalls) = AdminModule(address(core)).getPerfParams();
+
+        // FIX: crystallize() with ts==0 but assets>0 must preserve the existing HWM,
+        // and (same reasoning as the interval-guard fix) repeated no-op calls in
+        // this state must NOT push lastCrystallize forward either -- it costs real
+        // capital to reach ts==0, but once there, spamming the ROLE_PUBLIC
+        // endEpochCrystallize() should still be free of side effects.
+        address griever = makeAddr("dust_griever");
+        for (uint256 i = 0; i < 3; i++) {
+            vm.warp(block.timestamp + 1 hours);
+            vm.prank(griever);
+            QueueModule(address(core)).endEpochCrystallize();
+        }
+
+        (,, uint256 hwmAfterDust, uint256 lastCrystAfterDustCalls) =
+            AdminModule(address(core)).getPerfParams();
+        assertEq(
+            hwmAfterDust,
+            hwmBefore,
+            "FIX CONFIRMED: HWM baseline preserved at 1.1 despite empty-then-dust crystallize (escape hatch closed)"
+        );
+        assertEq(
+            lastCrystAfterDustCalls,
+            lastCrystBeforeDustCalls,
+            "FIX CONFIRMED: dust-preserved no-op crystallize calls must not push lastCrystallize forward"
+        );
+
+        // Control: once the vault is TRULY empty (no dust either), crystallize()
+        // still correctly resets the baseline to WAD for a genuine fresh start,
+        // and this genuine reset DOES record lastCrystallize (it's a real event).
+        vm.prank(address(core));
+        IERC20(USDC_UNDERLYING).transfer(makeAddr("sink"), dustAssets);
+        assertEq(IERC20(USDC_UNDERLYING).balanceOf(address(core)), 0, "sanity: vault genuinely empty now");
+
+        vm.warp(block.timestamp + 1 hours);
+        _crystallize();
+        (,, uint256 hwmTrulyEmpty, uint256 lastCrystAfterReset) =
+            AdminModule(address(core)).getPerfParams();
+        assertEq(
+            hwmTrulyEmpty,
+            1e18,
+            "control: genuinely empty vault (0 supply, 0 assets) still resets baseline to WAD"
+        );
+        assertGt(
+            lastCrystAfterReset,
+            lastCrystAfterDustCalls,
+            "control: a genuine fresh-start reset DOES record lastCrystallize"
+        );
+    }
+
+    // =========================================================================
+    // TEST 6 -- Interval guard cannot be griefed by free no-op crystallize calls
+    // (Reservation: interval guard griefing)
+    //
+    // endEpochCrystallize() is ROLE_PUBLIC. Before this fix, every call --
+    // including no-op calls where pps <= HWM (no profit) -- pushed
+    // lastCrystallize forward. A griever could call it for free on a timer to
+    // keep resetting the interval clock, indefinitely delaying the NEXT
+    // legitimate (profitable) crystallization. This is a revenue-delay
+    // griefing vector only -- no user funds are at risk.
+    //
+    // FIX: no-op crystallize calls (pps <= old) no longer touch lastCrystallize.
+    // =========================================================================
+    function test_interval_guard_cannot_be_griefed_by_noop_crystallize_calls() public {
+        core.setPerfParamsUnsafe(PERF_RATE_20PCT, 7 days);
+
+        // First legitimate crystallization establishes HWM and lastCrystallize
+        _addToVault(100_000e6); // PPS = 1.1
+        uint256 feeBefore1 = core.balanceOf(address(this));
+        _crystallize();
+        uint256 feeAfter1 = core.balanceOf(address(this));
+        assertGt(feeAfter1 - feeBefore1, 0, "first crystallize: fee expected");
+
+        (,, uint256 hwmAfterFirst, uint256 lastCrystAfterFirst) =
+            AdminModule(address(core)).getPerfParams();
+
+        // Griever spams endEpochCrystallize() while PPS <= HWM (no profit) --
+        // these must be pure no-ops that do NOT push lastCrystallize forward.
+        address griever = makeAddr("griever");
+        for (uint256 i = 0; i < 5; i++) {
+            vm.warp(block.timestamp + 1 hours);
+            vm.prank(griever);
+            QueueModule(address(core)).endEpochCrystallize();
+        }
+
+        (,, uint256 hwmAfterGrief, uint256 lastCrystAfterGrief) =
+            AdminModule(address(core)).getPerfParams();
+        assertEq(hwmAfterGrief, hwmAfterFirst, "grief calls must not change HWM");
+        assertEq(
+            lastCrystAfterGrief,
+            lastCrystAfterFirst,
+            "FIX CONFIRMED: no-op crystallize calls (pps<=old) must not push lastCrystallize forward"
+        );
+
+        // Warp to exactly the interval boundary measured from the FIRST real
+        // crystallization (not from the griefer's spam calls), then add profit.
+        vm.warp(lastCrystAfterFirst + 7 days);
+        _addToVault(200_000e6); // push PPS back above HWM
+
+        uint256 feeBefore2 = core.balanceOf(address(this));
+        _crystallize();
+        uint256 feeAfter2 = core.balanceOf(address(this));
+
+        assertGt(
+            feeAfter2 - feeBefore2,
+            0,
+            "FIX CONFIRMED: legitimate crystallization succeeds on schedule despite griefer's no-op spam"
+        );
     }
 }
