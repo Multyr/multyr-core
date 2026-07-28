@@ -36,6 +36,21 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
     StrategyInfo[] private _strats; // elenco
     mapping(address => uint256) private _idx; // strat => index+1 (0 = non registrata)
 
+    /// @notice Vetted strategy addresses eligible for registration (D1: Audit Fix)
+    /// @dev A strategy must be proposed via proposeStrategyAllowlist(), wait out
+    ///      strategyAllowlistDelay, then be confirmed via executeStrategyAllowlist()
+    ///      before register() will accept it. The on-chain delay — not just a second
+    ///      function call — is what matters: propose+execute cannot be collapsed into
+    ///      one atomic (e.g. multisig-batched) transaction, so a copy-pasted wrong
+    ///      address gets a mandatory real-time review window before it can touch funds.
+    mapping(address => bool) public strategyAllowlist;
+    mapping(address => uint256) public strategyAllowlistEta; // 0 = no pending proposal
+
+    uint256 public constant MIN_ALLOWLIST_DELAY = 1 days;
+    uint256 public constant MAX_ALLOWLIST_DELAY = 30 days;
+    uint256 public constant ALLOWLIST_GRACE_PERIOD = 7 days; // proposal must be executed within this window of eta
+    uint256 public strategyAllowlistDelay = 2 days;
+
     // --- Guardrails Integration (Phase 2) ---
     IParamsProvider public params; // unified params interface
     uint64 public lastBatchTimestamp; // timestamp of last batch operation
@@ -69,6 +84,10 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
     event OwnerChanged(address indexed oldOwner, address indexed newOwner);
     event CoreSet(address indexed core);
     event StrategyRegistered(address indexed strat, uint16 priority, uint16 weightBps);
+    event StrategyAllowlistProposed(address indexed strat, uint256 eta);
+    event StrategyAllowlistCancelled(address indexed strat);
+    event StrategyAllowlistSet(address indexed strat, bool allowed);
+    event StrategyAllowlistDelaySet(uint256 oldDelay, uint256 newDelay);
     event StrategyToggled(address indexed strat, bool enabled);
     event IntakeModeSet(IntakeMode mode);
     event WeightsSet(address[] strats, uint16[] weights);
@@ -193,12 +212,63 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
         emit ScorerSet(scorer_);
     }
 
+    /// @notice Change the delay strategy allowlist proposals must wait before execution
+    function setStrategyAllowlistDelay(uint256 newDelay) external onlyOwner {
+        require(newDelay >= MIN_ALLOWLIST_DELAY && newDelay <= MAX_ALLOWLIST_DELAY, "delay-out-of-range");
+        emit StrategyAllowlistDelaySet(strategyAllowlistDelay, newDelay);
+        strategyAllowlistDelay = newDelay;
+    }
+
+    /// @notice Queue a strategy address for allowlisting (D1: Audit Fix)
+    /// @dev Starts the timelock; executeStrategyAllowlist() cannot succeed until
+    ///      strategyAllowlistDelay has elapsed. code.length check rejects EOAs
+    ///      (e.g. an obviously mistyped address) at proposal time.
+    /// @param strat Strategy address to propose
+    /// @return eta Timestamp after which the proposal may be executed
+    function proposeStrategyAllowlist(address strat) external onlyOwner returns (uint256 eta) {
+        require(strat != address(0), "strat=0");
+        require(strat.code.length > 0, "not-contract");
+        require(!strategyAllowlist[strat], "already-allowlisted");
+        eta = block.timestamp + strategyAllowlistDelay;
+        strategyAllowlistEta[strat] = eta;
+        emit StrategyAllowlistProposed(strat, eta);
+    }
+
+    /// @notice Withdraw a pending allowlist proposal before it is executed
+    function cancelStrategyAllowlistProposal(address strat) external onlyOwner {
+        require(strategyAllowlistEta[strat] != 0, "no-proposal");
+        delete strategyAllowlistEta[strat];
+        emit StrategyAllowlistCancelled(strat);
+    }
+
+    /// @notice Confirm a strategy allowlist proposal after its timelock has elapsed
+    /// @dev Must be called after eta and within ALLOWLIST_GRACE_PERIOD of it, so a
+    ///      stale proposal (conditions may have changed) cannot be executed indefinitely.
+    function executeStrategyAllowlist(address strat) external onlyOwner {
+        uint256 eta = strategyAllowlistEta[strat];
+        require(eta != 0, "no-proposal");
+        require(block.timestamp >= eta, "timelock-not-passed");
+        require(block.timestamp <= eta + ALLOWLIST_GRACE_PERIOD, "proposal-expired");
+        delete strategyAllowlistEta[strat];
+        strategyAllowlist[strat] = true;
+        emit StrategyAllowlistSet(strat, true);
+    }
+
+    /// @notice Instantly revoke allowlist trust from a strategy (no timelock — removing
+    ///         trust is a safety action and must not be delayed like granting it)
+    function revokeStrategyAllowlist(address strat) external onlyOwner {
+        strategyAllowlist[strat] = false;
+        delete strategyAllowlistEta[strat];
+        emit StrategyAllowlistSet(strat, false);
+    }
+
     function register(address strat, uint16 priority, uint16 weightBps)
         external
         override
         onlyOwner
     {
         require(strat != address(0), "strat=0");
+        require(strategyAllowlist[strat], "not-allowlisted");
         require(_idx[strat] == 0, "exists");
         // Enforce: strategy.asset() must equal core.asset() (USDC native on Arbitrum)
         (bool okCore, bytes memory dataCore) = core.staticcall(abi.encodeWithSignature("asset()"));

@@ -670,6 +670,15 @@ contract RolesTimelockInvariants is Test {
         vm.expectRevert("not-owner");
         router.setParamsProvider(attacker);
 
+        vm.expectRevert("not-owner");
+        router.proposeStrategyAllowlist(attacker);
+
+        vm.expectRevert("not-owner");
+        router.executeStrategyAllowlist(attacker);
+
+        vm.expectRevert("not-owner");
+        router.revokeStrategyAllowlist(attacker);
+
         vm.stopPrank();
     }
 

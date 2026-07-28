@@ -89,7 +89,12 @@ contract CoreVault_KeeperRouting is Test {
 
         // Note: MockParamsProvider.isAdapterAllowed() returns true for all adapters
 
-        // Register strategies with weights
+        // Register strategies with weights (allowlist timelock: propose, warp, execute)
+        router.proposeStrategyAllowlist(address(strat1));
+        router.proposeStrategyAllowlist(address(strat2));
+        vm.warp(block.timestamp + router.strategyAllowlistDelay());
+        router.executeStrategyAllowlist(address(strat1));
+        router.executeStrategyAllowlist(address(strat2));
         router.register(address(strat1), 0, 6000); // 60%
         router.register(address(strat2), 1, 4000); // 40%
 
