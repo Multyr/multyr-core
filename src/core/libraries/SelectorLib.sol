@@ -150,7 +150,9 @@ library SelectorLib {
         selectors[9] =
             bytes4(keccak256("forceWithdraw(uint256,address,address,(address,uint256)[],uint256)"));
         // Force withdraw all (guaranteed exit — W2 policy, no plan, no LossCap)
-        selectors[10] = bytes4(keccak256("forceWithdrawAll(address)"));
+        // F-03: minAssetsOut added — reverts (SlippageExceeded) instead of
+        // silently delivering an arbitrarily small fill.
+        selectors[10] = bytes4(keccak256("forceWithdrawAll(address,uint256)"));
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════

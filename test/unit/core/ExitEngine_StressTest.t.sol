@@ -23,7 +23,7 @@ interface IQueueModule {
 }
 
 interface IForceWithdrawAll {
-    function forceWithdrawAll(address receiver) external returns (uint256);
+    function forceWithdrawAll(address receiver, uint256 minAssetsOut) external returns (uint256);
 }
 
 interface IDepositFor {
@@ -299,7 +299,7 @@ contract ExitEngine_StressTest is Test {
 
         gasStart = gasleft();
         vm.prank(users[9]);
-        IForceWithdrawAll(address(vault)).forceWithdrawAll(users[9]);
+        IForceWithdrawAll(address(vault)).forceWithdrawAll(users[9], 0);
         gasUsed = gasStart - gasleft();
         console2.log("forceWithdrawAll gas:", gasUsed);
         assertLt(gasUsed, GAS_LIMIT, "forceWithdrawAll gas < 5M");
@@ -428,7 +428,7 @@ contract ExitEngine_StressTest is Test {
         // --- forceWithdrawAll gas ---
         g = gasleft();
         vm.prank(users[9]);
-        IForceWithdrawAll(address(vault)).forceWithdrawAll(users[9]);
+        IForceWithdrawAll(address(vault)).forceWithdrawAll(users[9], 0);
         console2.log("forceWithdrawAll:", g - gasleft());
         assertLt(g - gasleft(), GAS_LIMIT, "forceWithdrawAll < 5M");
 
@@ -545,7 +545,7 @@ contract ExitEngine_StressTest is Test {
         vm.warp(block.timestamp + 1 days);
 
         vm.prank(users[9]);
-        IForceWithdrawAll(address(vault)).forceWithdrawAll(users[9]);
+        IForceWithdrawAll(address(vault)).forceWithdrawAll(users[9], 0);
         assertEq(vault.balanceOf(users[9]), 0, "user9 fully exited");
 
         vm.prank(users[8]);

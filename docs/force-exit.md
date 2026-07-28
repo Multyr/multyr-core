@@ -23,8 +23,8 @@ Two functions implement force exit:
 
 | Function | Entry point | Selector | Scope |
 |----------|------------|----------|-------|
-| `forceWithdraw(assets, receiver, owner, plan, maxShares)` | `ERC4626Module` | `0x0f0824be` | Exact asset amount, user-supplied liquidity plan |
-| `forceWithdrawAll(receiver)` | `ERC4626Module` | — | All caller shares, auto-sourced liquidity |
+| `forceWithdraw(assets, receiver, owner, plan, maxShares)` | `ERC4626Module` | `0x439fdeb4` | Exact asset amount, user-supplied liquidity plan |
+| `forceWithdrawAll(receiver, minAssetsOut)` | `ERC4626Module` | `0xe375b48f` | All caller shares, auto-sourced liquidity, caller-specified fill floor (F-03) |
 
 Both paths:
 - Bypass epoch cap (do NOT call `consumeEpochCap`)
@@ -188,11 +188,13 @@ Setting `maxShares = type(uint256).max` disables slippage protection — accepta
 ### 4.1 Function signature
 
 ```solidity
-// src/core/modules/ERC4626Module.sol:257
-function forceWithdrawAll(address receiver) external;
+// src/core/modules/ERC4626Module.sol:272
+function forceWithdrawAll(address receiver, uint256 minAssetsOut) external returns (uint256 assetsReceived);
 ```
 
-No plan or slippage parameter — `forceWithdrawAll` pulls all caller shares and sources liquidity automatically via the router. As of this branch, the burn/fee is **proportional** to how much of the ask was actually filled, rather than always burning 100% of the caller's shares for a partial payout.
+No plan — `forceWithdrawAll` pulls all caller shares and sources liquidity automatically via the router. The burn/fee is **proportional** to how much of the ask was actually filled, rather than always burning 100% of the caller's shares for a partial payout.
+
+**F-03 (resolved)**: `minAssetsOut` is a mandatory hard floor — the call reverts with `SlippageExceeded` if `assetsReceived < minAssetsOut`, with no state changed (no shares burned, no fees transferred; anything pulled from strategies is undone by the revert along with the rest of the transaction). Proportional burn (above) already makes a partial fill loss-free, but without this floor a caller had no way to avoid *silently* receiving an arbitrarily small fraction of fair value if strategies were frozen/illiquid at call time. Pass `0` to explicitly opt into accepting any fill, no matter how small (preserves the pre-F-03 behavior).
 
 ### 4.2 Execution flow
 
@@ -210,6 +212,7 @@ No plan or slippage parameter — `forceWithdrawAll` pulls all caller shares and
     → router.forceRedeemForWithdraw(targetAssets)  — greedy, no LossCap
     (pulled BEFORE sizing the burn/fee — best-effort, no plan)
 11. assetsReceived = min(IERC20(_asset()).balanceOf(vault), targetAssets)   // best-effort
+11a. if assetsReceived < minAssetsOut: revert SlippageExceeded()   // F-03 — reverts BEFORE any burn/transfer below
 12. fillRatio = targetAssets == 0 ? 1 : assetsReceived / targetAssets
     netSharesToBurn      = netShares      × fillRatio
     feeSharesToTransfer  = totalFeeShares × fillRatio
@@ -235,7 +238,7 @@ Prior to this branch, `forceWithdrawAll` unconditionally burned 100% of `netShar
 
 | | `forceWithdraw` | `forceWithdrawAll` |
 |--|-----------------|-------------------|
-| Asset amount | **Exact** — reverts if plan cannot deliver | **Best-effort** — user receives what vault has |
+| Asset amount | **Exact** — reverts if plan cannot deliver | **Best-effort, floor-checked** — reverts if `assetsReceived < minAssetsOut` (F-03), otherwise delivers whatever the vault raised |
 | Plan | User-supplied, up to 10 legs | Auto via `forceRedeemForWithdraw` |
 | LossCap | Respected by `executeRedeemBatch` | Bypassed by `forceRedeemForWithdraw` |
 | Slippage protection | `maxShares` parameter | None |
@@ -272,6 +275,7 @@ Example: witBps=50, forceExitPenaltyBps=200, preMaturityBps=500
 | **FX4** | `forceWithdraw` delivers exact `assets` or reverts | `if got < assets: revert InsufficientAssets(got, assets)` |
 | **FX5** | `forceWithdrawAll` cannot over-pay (never sends > `targetAssets`) | `min(hot, targetAssets)` ensures no overshoot |
 | **FX8** | `forceWithdrawAll` burns shares/transfers fees proportional to the fill ratio (`assetsReceived / targetAssets`); never destroys unfilled share value | `netSharesToBurn = netShares × fillRatio`, `feeSharesToTransfer = totalFeeShares × fillRatio` |
+| **FX9** | `forceWithdrawAll` cannot silently under-fill below the caller's stated floor (F-03) | `if assetsReceived < minAssetsOut: revert SlippageExceeded()`, checked before any burn/transfer |
 | **FX6** | FORCE exits only permitted in OpenEnded or FixedMaturity/Active | `_checkForceExitAllowed()` guard |
 | **FX7** | `plan.length ≤ MAX_FORCE_LEGS (10)` | `_sourceLiquidityForForceWithdraw` validation |
 
@@ -432,11 +436,12 @@ Step 8: caller(bob) != owner_(alice)
 |------|-----------|
 | **FORCE** | Exit mode that bypasses epoch cap and lock period |
 | **forceWithdraw** | Exact-amount FORCE exit with user-supplied `Pull[]` liquidity plan |
-| **forceWithdrawAll** | Best-effort FORCE exit burning shares/fees proportional to the fill ratio; unfilled shares are left untouched |
+| **forceWithdrawAll** | Best-effort FORCE exit burning shares/fees proportional to the fill ratio; unfilled shares are left untouched; reverts if the fill is below the caller's `minAssetsOut` (F-03) |
 | **Pull** | `{address strat, uint256 amount}` — one leg of a liquidity sourcing plan |
 | **MAX_FORCE_LEGS** | 10 — maximum legs in a `Pull[]` plan |
 | **preMaturityForceExitPenaltyBps** | Additive surcharge for FixedMaturity/Active FORCE exits |
-| **best-effort** | `forceWithdrawAll` accepts `assetsReceived < targetAssets` without reverting |
+| **best-effort** | `forceWithdrawAll` accepts `assetsReceived < targetAssets` without reverting, as long as `assetsReceived >= minAssetsOut` (F-03) |
+| **minAssetsOut** | Caller-specified floor for `forceWithdrawAll`: reverts with `SlippageExceeded` if the fill falls short (F-03); pass `0` to accept any fill |
 | **LossCap** | Per-strategy loss tolerance enforced by `executeRedeemBatch` but bypassed by `forceRedeemForWithdraw` |
 | **`_checkForceExitAllowed`** | Gate function in `FixedMaturityStorage` — allows OpenEnded or FM/Active only |
 | **maxShares** | Slippage cap for `forceWithdraw`: reverts if `sharesSpent > maxShares` |
@@ -448,7 +453,7 @@ Step 8: caller(bob) != owner_(alice)
 | Function | File | Line |
 |----------|------|-------------|
 | `forceWithdraw` | `src/core/modules/ERC4626Module.sol:166` | L100 |
-| `forceWithdrawAll` | `src/core/modules/ERC4626Module.sol:257` | L220 |
+| `forceWithdrawAll` | `src/core/modules/ERC4626Module.sol:272` | L220 |
 | `_sourceLiquidityForForceWithdraw` | `src/core/modules/ERC4626Module.sol:396` | L260 |
 | `_forcePullAllLiquidity` | `src/core/modules/ERC4626Module.sol:343` | L295 |
 | `_checkWithdrawalLimitsForForce` | `src/core/modules/ERC4626Module.sol:370` | L255 |
@@ -482,6 +487,6 @@ Step 8: caller(bob) != owner_(alice)
 
 **Discrepancies** (ADR-015 §5):
 
-1. `forceWithdrawAll` step 11 uses `min(IERC20(_asset()).balanceOf(vault), targetAssets)` as `assetsReceived`. This means the user may receive less than `targetAssets` if the router cannot fully source the required liquidity. This behavior is documented and intentional ("best-effort"), but callers should verify `assetsReceived` in the emitted `ForceWithdrawAllExecuted` event rather than assuming `targetAssets` was fully delivered. As of this branch, `assetsReceived < targetAssets` no longer burns 100% of the caller's shares — burn/fee scale with `assetsReceived / targetAssets` (proportional burn, §4.2), so a partial pull no longer destroys the unfilled portion of the caller's share balance.
+1. `forceWithdrawAll` step 11 uses `min(IERC20(_asset()).balanceOf(vault), targetAssets)` as `assetsReceived`. This means the user may receive less than `targetAssets` if the router cannot fully source the required liquidity. This behavior remains intentional ("best-effort") — `forceWithdrawAll` still does not guarantee full liquidity — but it is no longer *silent*: `assetsReceived < targetAssets` no longer burns 100% of the caller's shares (burn/fee scale with `assetsReceived / targetAssets`, proportional burn, §4.2), and as of F-03 the caller can also require `assetsReceived >= minAssetsOut` or have the entire call revert with no state change (§4.1, §4.2 step 11a). Callers who pass `minAssetsOut = 0` are still opting into the old unbounded-partial-fill behavior and should verify `assetsReceived` in the emitted `ForceWithdrawAllExecuted` event.
 
 2. The `_sourceLiquidityForForceWithdraw` function validates `plan.length > 0` and `plan.length <= MAX_FORCE_LEGS`. However, it does not validate that `sum(plan[i].amount) >= assets`. A plan that provides insufficient liquidity will cause `executeRedeemBatch` to return `got < assets`, triggering `InsufficientAssets`. Users must pre-simulate to size plans correctly.

@@ -25,7 +25,7 @@ interface IQueueModule {
 }
 
 interface IForceWithdrawAll {
-    function forceWithdrawAll(address receiver) external returns (uint256);
+    function forceWithdrawAll(address receiver, uint256 minAssetsOut) external returns (uint256);
 }
 
 /// @title ExitEngine Audit Edge Cases
@@ -146,7 +146,7 @@ contract ExitEngine_AuditEdgeCases is Test {
         uint256 sharesBefore = vault.balanceOf(users[0]);
 
         vm.prank(users[0]);
-        IForceWithdrawAll(address(vault)).forceWithdrawAll(users[0]);
+        IForceWithdrawAll(address(vault)).forceWithdrawAll(users[0], 0);
 
         assertEq(vault.balanceOf(users[0]), 0, "A1: force exit complete despite stale NAV");
         assertGt(usdc.balanceOf(users[0]), usdcBefore, "A1: received USDC");
@@ -372,7 +372,7 @@ contract ExitEngine_AuditEdgeCases is Test {
         // Force claim: fee = witBps(25) + forcePenBps(150) = 175 bps
         uint256 usdcBefore1 = usdc.balanceOf(users[1]);
         vm.prank(users[1]);
-        IForceWithdrawAll(address(vault)).forceWithdrawAll(users[1]);
+        IForceWithdrawAll(address(vault)).forceWithdrawAll(users[1], 0);
         uint256 forceNet = usdc.balanceOf(users[1]) - usdcBefore1;
 
         // Force net per share should be LESS than instant net per share
@@ -403,7 +403,7 @@ contract ExitEngine_AuditEdgeCases is Test {
         // Force should ALWAYS work regardless of cap
         uint256 user2Before = usdc.balanceOf(users[2]);
         vm.prank(users[2]);
-        IForceWithdrawAll(address(vault)).forceWithdrawAll(users[2]);
+        IForceWithdrawAll(address(vault)).forceWithdrawAll(users[2], 0);
 
         assertEq(vault.balanceOf(users[2]), 0, "A4: force exited despite cap");
         assertGt(usdc.balanceOf(users[2]), user2Before, "A4: force received USDC");

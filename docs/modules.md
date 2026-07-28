@@ -80,7 +80,7 @@ Handles all user-facing deposit and force-exit operations. Standard `withdraw()`
 | `withdraw(uint256,address,address,uint256)` | `0x9a0e7d66` | PUBLIC | **Always reverts** `AsyncWithdrawalRequired` |
 | `redeem(uint256,address,address,uint256)` | `0xc6e6f592` | PUBLIC | **Always reverts** `AsyncWithdrawalRequired` |
 | `forceWithdraw(uint256,address,address,(address,uint256)[],uint256)` | `0x439fdeb4` | PUBLIC | Guaranteed exit with user plan |
-| `forceWithdrawAll(address)` | `0x0f0824be` | PUBLIC | Best-effort exit: burns only the proportional slice of shares/fees matching assets actually raised |
+| `forceWithdrawAll(address,uint256)` | `0xe375b48f` | PUBLIC | Best-effort exit: burns only the proportional slice of shares/fees matching assets actually raised; reverts `SlippageExceeded` if the fill is below the caller's `minAssetsOut` (F-03) |
 
 Source: `src/core/modules/ERC4626Module.sol:81-332`.
 
