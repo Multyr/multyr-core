@@ -255,11 +255,25 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
     }
 
     /// @notice Instantly revoke allowlist trust from a strategy (no timelock — removing
-    ///         trust is a safety action and must not be delayed like granting it)
+    ///         trust is a safety action and must not be delayed like granting it).
+    /// @dev If the strategy is already registered, it is also disabled (mirrors
+    ///      toggle(strat, false)) — revoking trust must stop live fund flow to the
+    ///      strategy, not just block future registrations. Without this, an already-
+    ///      registered strategy stayed live and kept receiving deposits/redeems after
+    ///      revoke, so "removing trust is instant" wasn't actually true for the
+    ///      strategies that are managing money. Forced exit of an already-managed
+    ///      strategy is unaffected — withdrawAllToCore()/emergencyRedeemBatch() don't
+    ///      filter on `enabled`.
     function revokeStrategyAllowlist(address strat) external onlyOwner {
         strategyAllowlist[strat] = false;
         delete strategyAllowlistEta[strat];
         emit StrategyAllowlistSet(strat, false);
+
+        uint256 idx1 = _idx[strat];
+        if (idx1 != 0 && _strats[idx1 - 1].enabled) {
+            _strats[idx1 - 1].enabled = false;
+            emit StrategyToggled(strat, false);
+        }
     }
 
     function register(address strat, uint16 priority, uint16 weightBps)

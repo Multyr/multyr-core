@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import { Test } from "forge-std/Test.sol";
+import { Vm } from "forge-std/Vm.sol";
 import { ERC20Mock } from "../../../src/mocks/ERC20Mock.sol";
 import { StrategyRouter } from "../../../src/core/modules/StrategyRouter.sol";
 import { StrategyMock } from "../../helpers/StrategyMock.sol";
@@ -198,6 +199,60 @@ contract StrategyRouter_Allowlist is Test {
         StrategyMock strat2 = new StrategyMock(address(usdc));
         vm.expectRevert(bytes("not-allowlisted"));
         router.register(address(strat2), 1, 1e4);
+    }
+
+    /// @dev The gap this closes: revoke used to only block FUTURE registrations —
+    ///      a strategy already registered stayed enabled (and kept receiving
+    ///      deposits/redeems) after revoke. "Removing trust is instant" wasn't
+    ///      actually true for the strategies that are managing money. Revoke must
+    ///      also disable an already-registered strategy, exactly like toggle(strat,
+    ///      false) would.
+    function test_revokeStrategyAllowlist_disablesAlreadyRegisteredStrategy() public {
+        router.proposeStrategyAllowlist(address(strat));
+        vm.warp(block.timestamp + router.strategyAllowlistDelay());
+        router.executeStrategyAllowlist(address(strat));
+        router.register(address(strat), 0, 1e4);
+        assertTrue(router.isStrategyEnabled(address(strat)), "enabled after register");
+
+        router.revokeStrategyAllowlist(address(strat));
+
+        assertFalse(router.strategyAllowlist(address(strat)), "allowlist revoked");
+        assertFalse(router.isStrategyEnabled(address(strat)), "strategy disabled by revoke, not just delisted");
+    }
+
+    /// @dev Revoking a strategy that was never registered (only proposed, or never
+    ///      even proposed) must not revert — there's no StrategyInfo entry to touch.
+    function test_revokeStrategyAllowlist_neverRegistered_doesNotRevert() public {
+        router.proposeStrategyAllowlist(address(strat));
+        vm.warp(block.timestamp + router.strategyAllowlistDelay());
+        router.executeStrategyAllowlist(address(strat));
+        // Never registered.
+
+        router.revokeStrategyAllowlist(address(strat)); // must not revert
+
+        assertFalse(router.strategyAllowlist(address(strat)));
+    }
+
+    /// @dev Revoking an already-disabled registered strategy must not emit a
+    ///      redundant StrategyToggled event — idempotency on the disable side.
+    function test_revokeStrategyAllowlist_alreadyDisabled_noRedundantToggleEvent() public {
+        router.proposeStrategyAllowlist(address(strat));
+        vm.warp(block.timestamp + router.strategyAllowlistDelay());
+        router.executeStrategyAllowlist(address(strat));
+        router.register(address(strat), 0, 1e4);
+        router.toggle(address(strat), false); // already disabled independently of revoke
+
+        vm.recordLogs();
+        router.revokeStrategyAllowlist(address(strat));
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertTrue(
+                logs[i].topics[0] != keccak256("StrategyToggled(address,bool)"),
+                "no StrategyToggled emitted when strategy was already disabled"
+            );
+        }
+        assertFalse(router.isStrategyEnabled(address(strat)));
     }
 
     function test_revokeStrategyAllowlist_clears_pending_proposal() public {
