@@ -842,22 +842,29 @@ contract CoreVault is ERC4626, ICoreVault {
     // REWARD SHARES MINTING (dedicated, minimal — only callable by authorized payout manager)
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    /// @notice Mint vault shares as incentive reward payout.
+    /// @notice Pay vault shares as incentive reward payout, transferred from the
+    ///         pre-funded rewards treasury. Non-dilutive by construction: no new
+    ///         shares are minted, so totalSupply/totalAssets — and PPS — are
+    ///         unaffected. Reverts if the treasury's balance is insufficient
+    ///         rather than falling back to minting.
     ///         Tightly-scoped: ONLY callable by authorized RewardsPayoutManager.
     ///         NOT processorMint — this is a separate, dedicated function.
     /// @param user Recipient of reward shares
     /// @param usdcEquivalent USDC-equivalent amount (6 decimals) to convert to shares
-    function mintRewardShares(address user, uint256 usdcEquivalent) external {
+    function payRewardShares(address user, uint256 usdcEquivalent) external {
         CoreStorage.Layout storage core = CoreStorage.layout();
         require(msg.sender == core.rewardsPayoutManager, "not-payout-manager");
         require(user != address(0), "user=0");
         if (usdcEquivalent == 0) return;
 
-        // Use convertToShares (no fee) — reward minting is fee-free
+        // Use convertToShares (no fee) — reward payout is fee-free
         uint256 shares = convertToShares(usdcEquivalent);
         if (shares == 0) return;
 
-        _mint(user, shares);
-        emit Events.RewardSharesMinted(user, usdcEquivalent, shares);
+        address treasury = core.rewardsTreasury;
+        require(treasury != address(0), "treasury=0");
+
+        _transfer(treasury, user, shares);
+        emit Events.RewardSharesPaid(user, treasury, usdcEquivalent, shares);
     }
 }

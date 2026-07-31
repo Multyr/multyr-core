@@ -253,6 +253,7 @@ contract DeploymentEquivalence_Test is Test {
                 incentives: address(0),
                 incentivesEngine: address(0),
                 rewardsPayoutManager: address(0),
+                rewardsTreasury: address(0),
                 deployer: deployer
             })
         );
@@ -411,6 +412,7 @@ contract DeploymentEquivalence_Test is Test {
                 incentives: address(0),
                 incentivesEngine: address(0),
                 rewardsPayoutManager: address(0),
+                rewardsTreasury: address(0),
                 deployer: deployer
             })
         );

@@ -128,7 +128,7 @@ The following functions are NOT routed via the module dispatch — they are impl
 | `processorMint()`, `processorBurn()`, `processorTransfer()`, `processorSpendAllowance()` | Module callbacks for share accounting |
 | `authorizeModule()`, `isModuleAuthorized()` | Module authorization for processor functions |
 | `setAuthorizedSealer()`, `sealBySealer()` | System sealing |
-| `mintRewardShares()` | Dedicated reward minting (via RewardsPayoutManager) |
+| `payRewardShares()` | Dedicated reward payout (via RewardsPayoutManager) — transfers from a pre-funded rewards treasury, never mints; non-dilutive by construction |
 
 ---
 

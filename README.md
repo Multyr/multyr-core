@@ -100,7 +100,9 @@ EIP-7201 namespaces: `CoreStorage` (main flags, routing table, params), `FeeStor
 
 - **PPS monotonicity**: price-per-share (`totalAssets / totalSupply`) is non-decreasing under
   normal operation. Only force-exit penalties and performance-fee crystallization affect it,
-  and both are strictly defined by on-chain parameters.
+  and both are strictly defined by on-chain parameters. Incentive reward payouts
+  (`payRewardShares()`) are share transfers from a pre-funded rewards treasury, not mints —
+  totalSupply is unchanged by a payout, so they are not an exception to this invariant.
 - **Exit guarantee (W2 policy)**: all exit paths remain open regardless of vault state.
   `DegradedMode` blocks deposits (W1 policy) but never blocks exits or force-exits.
 - **Storage isolation**: all module state uses EIP-7201 namespaced slots. Direct `sstore`

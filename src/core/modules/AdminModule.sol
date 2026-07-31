@@ -322,6 +322,13 @@ contract AdminModule {
         emit Events.RewardsPayoutManagerUpdated(newManager);
     }
 
+    /// @notice Set the rewards treasury (pre-funded share balance payRewardShares() draws from)
+    function setRewardsTreasury(address newTreasury) external {
+        _requireNotSealed();
+        CoreStorage.layout().rewardsTreasury = newTreasury;
+        emit Events.RewardsTreasuryUpdated(newTreasury);
+    }
+
     /// @notice Set the RouterAllocationPolicy (V10 engine)
     function setRebalancePolicy(address p) external {
         _requireNotSealed();

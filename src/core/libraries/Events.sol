@@ -223,7 +223,10 @@ library Events {
     // --- IncentivesEngine v2 ---
     event IncentivesEngineUpdated(address indexed newEngine);
     event RewardsPayoutManagerUpdated(address indexed newManager);
-    event RewardSharesMinted(address indexed user, uint256 usdcEquivalent, uint256 shares);
+    event RewardsTreasuryUpdated(address indexed newTreasury);
+    event RewardSharesPaid(
+        address indexed user, address indexed treasury, uint256 usdcEquivalent, uint256 shares
+    );
 
     // --- Dead Deposit (Inflation Attack Hardening) ---
     event DeadDepositSeeded(uint256 assets, uint256 shares, address indexed dead);

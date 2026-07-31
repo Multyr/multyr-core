@@ -404,6 +404,10 @@ contract CoreHarness is CoreVault {
         CoreStorage.layout().rewardsPayoutManager = manager;
     }
 
+    function setRewardsTreasuryUnsafe(address treasury) external {
+        CoreStorage.layout().rewardsTreasury = treasury;
+    }
+
     function setIncentivesEngineUnsafe(address engine) external {
         CoreStorage.layout().incentivesEngine = IIncentivesEngine(engine);
     }
