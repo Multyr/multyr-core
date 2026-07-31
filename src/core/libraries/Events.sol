@@ -138,6 +138,9 @@ library Events {
     // --- Diamond-lite routing events ---
     event ModuleSet(bytes4 indexed selector, address indexed module, uint8 role);
     event ModulesBatchSet(uint256 count);
+    event ModuleBatchSubmitted(uint256 count, uint64 eta);
+    event ModuleBatchAccepted(uint256 count);
+    event ModuleBatchRevoked(uint256 count);
     event RoleSet(bytes4 indexed selector, uint8 role);
     event RoutingFrozen();
 

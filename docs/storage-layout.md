@@ -211,7 +211,7 @@ Source: `src/core/storage/CoreStorage.sol:72-76`. These are `mapping` types and 
 | `moduleOf[bytes4]` | `mapping(bytes4 => address)` | Selector → module address |
 | `roleOf[bytes4]` | `mapping(bytes4 => uint8)` | Selector → required role |
 
-Source: `src/core/storage/CoreStorage.sol:79-80`. Populated by `setModule()` / `setModulesBatch()`. Frozen after `freezeRouting()`.
+Source: `src/core/storage/CoreStorage.sol:79-80`. Populated by `setModule()` / `setModulesBatch()` (instant, pre-`enableComponentsTimelock()`) or `submitModulesBatch()` → `acceptModulesBatch()` (timelocked, post-enable) — see `CoreStorage.PendingModuleBatch`. Frozen after `freezeRouting()`.
 
 ### 3.7 Registry and Seal
 

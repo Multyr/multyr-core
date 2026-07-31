@@ -1112,15 +1112,46 @@ For the bootstrap deployment, `paramMinDelay = 0` allows instant parameter accep
 
 ### 16.2 Module Replacement (Upgrade Path)
 
-Module addresses are mutable until routing is frozen. The recommended upgrade workflow:
+Module addresses are mutable until `freezeRouting()` is called — but the workflow differs depending on whether `enableComponentsTimelock()` has been called yet, and this matters: routing is the single most powerful lever in the system (a swapped-in malicious module can rewrite share accounting or asset custody outright), so it is protected the same way `bufferManager`/`router` are.
 
-1. Deploy new module contract.
-2. Call `vault.setModulesBatch(selectors[], newAddresses[], roles[])` — atomically updates all selectors belonging to the module.
-3. Call `vault.setAuthorizedModule(oldModule, false)` and `vault.setAuthorizedModule(newModule, true)` if the module uses `processorMint/Burn/Transfer`.
-4. Smoke-test all upgraded selectors via a read-only call.
-5. If a `paramMinDelay > 0` governs module changes, step 2 must go through the timelock submit/accept cycle in AdminModule.
+**Bootstrap (before `enableComponentsTimelock()`)** — instant, no delay:
 
-Source: `src/core/CoreVault.sol:263-309`.
+```solidity
+// 1. Deploy new module contract.
+// 2. Repoint the affected selectors — takes effect immediately.
+vault.setModulesBatch(selectors[], newAddresses[], roles[]);
+// 3. If the module uses processorMint/Burn/Transfer:
+vault.setAuthorizedModule(oldModule, false);
+vault.setAuthorizedModule(newModule, true);
+// 4. Smoke-test all upgraded selectors via a read-only call.
+```
+
+**Post-bootstrap (after `enableComponentsTimelock()`)** — `setModule`/`setModulesBatch` now revert with `ComponentsTimelocked`. Use the timelocked path instead:
+
+```solidity
+// 1. Deploy new module contract.
+// 2. Submit — starts the paramMinDelay clock. Only one batch may be pending
+//    at a time; reverts with PendingModuleBatchExists if one is already queued.
+uint64 eta = vault.submitModulesBatch(selectors[], newAddresses[], roles[]);
+
+// 3. Wait until block.timestamp >= eta (and no later than eta + 7 days, or
+//    the batch expires with EtaExpired and must be resubmitted).
+
+// 4. Apply atomically:
+vault.acceptModulesBatch();
+
+// 5. If the module uses processorMint/Burn/Transfer:
+vault.setAuthorizedModule(oldModule, false);
+vault.setAuthorizedModule(newModule, true);
+
+// 6. Smoke-test all upgraded selectors via a read-only call.
+```
+
+Cancel a queued batch (e.g. it was submitted in error, or is malicious) with `vault.revokeModulesBatch()` — callable by `owner` **or** `vetoer`, not just `owner`. This is the recourse if the owner itself is the one who submitted a bad swap. Inspect a pending batch at any time via `vault.getPendingModuleBatch()`.
+
+`freezeRouting()` itself refuses to fire while a batch is pending (`PendingModuleBatchOutstanding`) — resolve it (accept or revoke) first.
+
+Source: `src/core/CoreVault.sol:263-410`. Tests: `test/unit/core/CoreVault_ModuleRoutingTimelock.t.sol`.
 
 ### 16.3 BatchGuardrails and PriceOracleMiddleware Registration
 

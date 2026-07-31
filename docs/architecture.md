@@ -166,7 +166,7 @@ Key properties (`src/core/libraries/SelectorRegistry.sol:55-208`):
 - Total registered selectors: 91 (`src/core/libraries/SelectorRegistry.sol:388-390`).
 - Owner-critical selectors: 34 (all AdminModule governance functions + FM governance).
 
-`CoreVault.setModule()` calls `SelectorRegistry.validateRoleAssignment()` before every routing table write, preventing misrouting attacks where an owner-only function could be mistakenly set as public (`src/core/CoreVault.sol:292-302`).
+`CoreVault.setModule()` calls `SelectorRegistry.validateRoleAssignment()` before every routing table write, preventing misrouting attacks where an owner-only function could be mistakenly set as public (`src/core/CoreVault.sol:292-302`). The same validation runs for every selector in `submitModulesBatch()` too (§3.3.1).
 
 ### 3.3 Routing Table
 
@@ -181,6 +181,21 @@ mapping(bytes4 => uint8)   roleOf;
 Once `freezeRouting()` is called (`src/core/CoreVault.sol:304-309`), the routing table is permanently frozen — no further `setModule()` calls are accepted. This is a precondition for `sealBySealer()` (see §10).
 
 The routing table is populated during deployment by `setModulesBatch()`. Typical mappings:
+
+#### 3.3.1 Module Routing Timelock
+
+`setModule()`/`setModulesBatch()` write the routing table instantly — but only until `AdminModule.enableComponentsTimelock()` has been called (the same one-way flag, `FLAG_COMPONENTS_TIMELOCKED`, that gates `bufferManager`/`router` changes — see §8). After that, both revert with `ComponentsTimelocked`, and routing changes must go through:
+
+```solidity
+// CoreVault.sol:325-410
+uint64 eta = vault.submitModulesBatch(selectors, modules, roles); // eta = now + paramMinDelay
+// ... wait until block.timestamp >= eta (and <= eta + 7 days, MODULE_BATCH_MAX_WINDOW) ...
+vault.acceptModulesBatch();       // applies all selectors atomically
+vault.revokeModulesBatch();       // owner OR vetoer — cancels a pending batch
+vault.getPendingModuleBatch();    // view: current pending batch, if any
+```
+
+Rationale: routing is the single most powerful lever in the system — a malicious module can rewrite share accounting or asset custody outright — yet it previously had no delay of its own, dependent entirely on whatever `owner` happened to be. `revokeModulesBatch()` being callable by `vetoer` (not just `owner`) matters specifically because it's the recourse if `owner` itself is the one who submitted the malicious swap. One batch may be pending at a time (`PendingModuleBatchExists` guards re-submission), and `freezeRouting()` itself now refuses to fire while a batch is outstanding (`PendingModuleBatchOutstanding`) — forcing an explicit accept-or-revoke rather than silently stranding it.
 
 | Selector Group | Module | Role |
 |---|---|---|
@@ -697,8 +712,11 @@ This table covers the 30 most important functions. For the complete selector reg
 | `refundClaim()` | FixedMaturityModule | PUBLIC | `RefundClaimed` | `NotFundingFailed` |
 | `pauseAll()` | CoreVault | OWNER | `AllPaused` | — |
 | `guardianPause()` | CoreVault | GUARDIAN | `GuardianPauseActivated` | `GuardianCooldownActive` |
-| `setModule(bytes4,address,uint8)` | CoreVault | OWNER | `ModuleSet` | `RoutingFrozen`, `InvalidRoleForSelector` |
-| `freezeRouting()` | CoreVault | OWNER | `RoutingFrozen` | `RoutingFrozen` (if already frozen) |
+| `setModule(bytes4,address,uint8)` | CoreVault | OWNER | `ModuleSet` | `RoutingFrozen`, `ComponentsTimelocked`, `InvalidRoleForSelector` |
+| `submitModulesBatch(bytes4[],address[],uint8[])` | CoreVault | OWNER | `ModuleBatchSubmitted` | `RoutingFrozen`, `ComponentsNotTimelocked`, `PendingModuleBatchExists`, `LengthMismatch` |
+| `acceptModulesBatch()` | CoreVault | OWNER | `ModuleBatchAccepted` | `NotPending`, `RoutingFrozen`, `EtaNotReached`, `EtaExpired` |
+| `revokeModulesBatch()` | CoreVault | OWNER or VETOER | `ModuleBatchRevoked` | `NotOwnerOrVetoer`, `NotPending` |
+| `freezeRouting()` | CoreVault | OWNER | `RoutingFrozen` | `RoutingFrozen` (if already frozen), `PendingModuleBatchOutstanding` |
 | `sealBySealer(bytes32)` | CoreVault | SEALER | `SystemSealed` | `RoutingNotFrozen`, `SystemSealed`, `InvalidConfigHash` |
 
 ---
@@ -718,7 +736,9 @@ Invariants enforced by the protocol. For formal verification results see `docs/i
 | I7 | `maxWithdraw(address) == 0` always | `src/core/CoreVault.sol:544-547` (pure) | `test/unit/CoreVault*.t.sol` |
 | I8 | `maxRedeem(address) == 0` always | `src/core/CoreVault.sol:549-553` (pure) | `test/unit/CoreVault*.t.sol` |
 | I9 | Deposits blocked when warmNavValid=false | `_depositsAreCurrentlyAllowed()` checks `warmNavState()` | `test/unit/ERC4626Module.t.sol` (warmNav gate) |
-| I10 | Routing table write blocked after `freezeRouting()` | `FLAG_ROUTING_FROZEN` check in `setModule()` | `test/unit/AdminModule.t.sol` |
+| I10 | Routing table write blocked after `freezeRouting()` | `FLAG_ROUTING_FROZEN` check in `setModule()`, `setModulesBatch()`, `submitModulesBatch()`, `acceptModulesBatch()` | `test/unit/AdminModule.t.sol`, `test/unit/core/CoreVault_ModuleRoutingTimelock.t.sol` |
+| I11 | Instant module routing writes blocked once `enableComponentsTimelock()` is called | `FLAG_COMPONENTS_TIMELOCKED` check in `setModule()`/`setModulesBatch()`; must use `submitModulesBatch`/`acceptModulesBatch` | `test/unit/core/CoreVault_ModuleRoutingTimelock.t.sol` |
+| I12 | `freezeRouting()` cannot fire with a pending module batch outstanding | `PendingModuleBatchOutstanding` check in `freezeRouting()` | `test/unit/core/CoreVault_ModuleRoutingTimelock.t.sol` |
 | I11 | `processorMint/Burn/Transfer` only callable by authorized modules or delegatecall context | `_requireModuleAccess()` | `test/unit/CoreVault*.t.sol` (RBAC assertions) |
 | I12 | Dead deposit seeded exactly once | `FLAG_DEAD_DEPOSIT_DONE` + `DeadDepositAlreadySeeded` guard | `test/unit/AdminModule.t.sol` |
 

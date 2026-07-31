@@ -179,6 +179,7 @@ Total: 51 `.sol` files in `src/core/`.
 | L8 | **`Roles.sol` and `Ownable2StepMixin.sol` are legacy** | Legacy artifact | pragma 0.8.24, NOT imported by active modules. Present in codebase but not deployed. |
 | L9 | **Fork test directories fragmented** | Structural debt | 4 fork folders pending consolidation (STRUCTURE-02). Test coverage is correct but organisation is messy. |
 | L10 | **`EIP7201Compliance.t.sol` was added post-bug** | Reactive fix | Added after FINDING-OOS-03 found placeholder SLOT values in 3 storage contracts (fixed 2026-05-15). |
+| L11 | **Module routing had no built-in timelock** | Fixed | `setModule`/`setModulesBatch` previously took effect instantly pre-freeze with no delay of their own — unlike `bufferManager`/`router`. Now gated by `FLAG_COMPONENTS_TIMELOCKED` + `submitModulesBatch`/`acceptModulesBatch`/`revokeModulesBatch` (owner-or-vetoer), same as those components. See §5.3. |
 
 ### 5.1 Shadow Report Bugs — All Fixed
 
@@ -205,6 +206,33 @@ These are known and accepted before the first audit:
 | AC8 | `FLAG_SYSTEM_SEALED` does not freeze `roleOf[selector]` | Accepted — owner can only change roles through timelock window |
 | L3 | `forceWithdrawAll` is best-effort (partial delivery possible) | Documented; by design |
 | L9 | Fork test directory fragmentation | Technical debt; content correct |
+
+### 5.3 Governance & Upgradeability — Q&A
+
+Answers to reviewer questions on (a) whether fixes cover both vault modes and (b) what sealing actually freezes. Verified directly against `src/core/CoreVault.sol` and `src/core/storage/FixedMaturityStorage.sol` — not carried over from prior documentation.
+
+**Q1: Does a given fix cover OpenEnded only, or FixedMaturity too?**
+
+Both, by construction — this isn't something each fix has to handle individually. Per §2.2, FixedMaturity is a state-machine layer on top of the same `CoreVault` plus the same shared modules (`ERC4626Module`, `QueueModule`, `AdminModule`, `LiquidityOpsModule`, `StrategyRouter`) — there is exactly one deployed implementation of each, used by both vault modes. FM-only code is isolated to `FixedMaturityModule.sol` + `FixedMaturityStorage.sol`, plus early-return gate checks (`_checkForceExitAllowed`, `_checkDepositsAllowed`, `_checkStandardExitAllowed`, `_checkOpenEndedDeployAllowed`) sprinkled into the shared modules. A fix to shared-module logic is therefore in effect for both modes simultaneously — there is no separate "FM version" of `forceWithdrawAll` or `_crystallize()` to fix twice.
+
+Caveat — this is a structural guarantee, not a tested one, for every fix: `VaultMode.OpenEnded` is enum index 0 (`FixedMaturityStorage.sol:12`), the default for any vault with no explicit FM configuration, including `CoreHarness` as used by most of this repo's test suites. A dedicated `FixedMaturityHarness` exists (`test/unit/fixed-maturity/FixedMaturityHarness.sol`) for FM-mode testing; not every fix has a corresponding run through it. "Applies structurally to FM" and "verified under FM" are two different claims — check which one a given fix's test coverage actually makes.
+
+**Q2: What does sealing actually make immutable, and is module-swapping the only lever pre-seal?**
+
+Two separate, sequential gates, not one event:
+
+- **`freezeRouting()`** (`CoreVault.sol:302`) — `onlyOwner`, irreversible. Once called, `setModule()` / `setModulesBatch()` permanently revert with `RoutingFrozen`. This is the real cutoff for module flexibility.
+- **`sealBySealer()`** (`CoreVault.sol:369`) — requires routing to already be frozen (`revert RoutingNotFrozen()` otherwise), plus the full `SystemSealer.verifyAndSeal()` checklist (ownership on ROOT_TIMELOCK, guardian/vetoer set, dead deposit seeded, etc. — see §9).
+
+So the module-upgrade door closes at `freezeRouting()`, which in practice happens at or before the seal — not exactly "at seal."
+
+Confirmed: `CoreVault` is declared `contract CoreVault is ERC4626, ICoreVault` — direct inheritance, no proxy in front of it. Logic implemented directly on `CoreVault` (the `fallback()` dispatcher, `totalAssets()`, `previewDeposit()`, pause controls, `setModule()` itself, ERC-4626 boilerplate) has **no upgrade path at any point in the lifecycle**, seal or no seal — a bug there means a full redeploy (new address, new share token, no atomic migration mechanism in this codebase; requires pausing the old vault and moving users out). This is not a seal-specific consequence — it is true from day one, because `CoreVault` carries its own logic rather than delegating everything.
+
+Confirmed: pre-freeze, swapping a delegatecall module is the *only* lever that avoids a full `CoreVault` redeploy for a code fix — deploy the fixed module, call `setModule()` to repoint the selector, done: same address, same storage, same shares, no user migration. Logic living directly on `CoreVault` never gets that lever, at any point.
+
+Not fully immutable post-seal either — see L2/AC8 above. `FLAG_SYSTEM_SEALED` does not freeze `roleOf[selector]`: which module handles a selector is frozen forever at `freezeRouting()`, but who is allowed to call an already-routed selector can still be reassigned by `owner` post-seal. Whatever governs `owner` at that point (presumably a timelock) is the only recourse window.
+
+**Update — module routing gap closed (see L11).** The original version of this answer noted that `setModule()`/`setModulesBatch()` had *no built-in delay of their own at all*, unlike `bufferManager`/`router`, which are protected by `FLAG_COMPONENTS_TIMELOCKED` + submit/accept once enabled — meaning a compromised or malicious `owner` (if ever a raw EOA/multisig rather than a timelock contract) could instantly swap in a malicious module with zero warning window for the vetoer to react, pre-freeze. This has been fixed: `setModule`/`setModulesBatch` now revert with `ComponentsTimelocked` once `enableComponentsTimelock()` has been called, same as `bufferManager`/`router`. From that point, module routing changes must go through `submitModulesBatch()` → wait `paramMinDelay` → `acceptModulesBatch()`, and `revokeModulesBatch()` is callable by `owner` **or** `vetoer` — so a malicious owner-submitted swap can be cancelled by the vetoer even without the owner's cooperation. `freezeRouting()` itself now also refuses to fire while a batch is pending (`PendingModuleBatchOutstanding`), forcing explicit accept-or-revoke first rather than silently stranding an unresolved change. See `test/unit/core/CoreVault_ModuleRoutingTimelock.t.sol` (25 tests).
 
 ---
 

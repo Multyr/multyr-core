@@ -395,7 +395,7 @@ print(f'BPS split OK: treasury={t} safety={s} sum={t+s}')
 
 | Operation | Status | Source | Notes |
 |---|---|---|---|
-| `vault.setModulesBatch(...)` | ✅ Idempotent | `src/core/CoreVault.sol:272` | Re-setting same selector/module/role is a no-op; reverts if routing frozen |
+| `vault.setModulesBatch(...)` | ✅ Idempotent | `src/core/CoreVault.sol:272` | Re-setting same selector/module/role is a no-op; reverts if routing frozen OR if `enableComponentsTimelock()` has been called (use `submitModulesBatch`/`acceptModulesBatch` instead — see §8) |
 | `bufferManager.addWarmAdapter(addr)` | ⚠️ Check | `src/core/modules/BufferManager.sol:763` | Should not double-register; verify no re-entry path |
 | `router.register(strategy, prio, bps)` | ⚠️ Check | `src/core/modules/StrategyRouter.sol:196` | Re-registration reverts if already registered with same address |
 | `healthRegistry.setAuthorizedCaller(addr, true)` | ✅ Idempotent | `src/core/modules/StrategyHealthRegistry.sol:163` | Boolean set — safe to repeat |
@@ -416,7 +416,7 @@ retains BOOTSTRAP_ROLE. Verifiable via `strategy.getRoleMemberCount(BOOTSTRAP_RO
 
 At any point before `freezeRouting()` is called, the following recovery operations are available:
 
-1. Re-route selectors: `vault.setModulesBatch(sels, newModule, role)` — `src/core/CoreVault.sol:272`
+1. Re-route selectors: `vault.setModulesBatch(sels, newModule, role)` — `src/core/CoreVault.sol:272`. Instant **only** before `enableComponentsTimelock()` has been called; after that it reverts with `ComponentsTimelocked` and re-routing requires `vault.submitModulesBatch(...)` → wait `paramMinDelay` → `vault.acceptModulesBatch()` instead (cancellable by owner or vetoer via `vault.revokeModulesBatch()`) — `src/core/CoreVault.sol:325-410`.
 2. Transfer vault ownership: `vault.beginOwnerTransfer(newOwner)` → `vault.acceptOwnerTransfer()` — `src/core/CoreVault.sol:392-398`
 3. Transfer router ownership: `router.transferOwnership(newOwner)` — `src/core/modules/StrategyRouter.sol:253`
 4. Transfer bufferManager: `bufferManager.transferOwnership(newOwner)` — `src/core/modules/BufferManager.sol:123`
@@ -429,8 +429,8 @@ At any point before `freezeRouting()` is called, the following recovery operatio
 After `freezeRouting()` (`src/core/CoreVault.sol:302`) and `sealBySealer()`
 (`src/core/CoreVault.sol:369`, the only sealing path):
 
-- **Selector re-routing: IMPOSSIBLE** — `FLAG_ROUTING_FROZEN` blocks `setModulesBatch`
-- **Module changes: require timelock** — `FLAG_COMPONENTS_TIMELOCKED` requires ROOT_TIMELOCK proposal
+- **Selector re-routing: IMPOSSIBLE** — `FLAG_ROUTING_FROZEN` blocks `setModulesBatch` AND `submitModulesBatch`/`acceptModulesBatch` (both explicitly check the flag). `sealBySealer()` cannot even fire until routing is already frozen, so there is no post-seal state where a module swap is reachable by any path.
+- **BufferManager/Router changes: require timelock** — `FLAG_COMPONENTS_TIMELOCKED` requires the `submitBufferManager`/`submitRouter` → wait → `acceptBufferManager`/`acceptRouter` path (ROOT_TIMELOCK proposal). Distinct from module *routing* above — these are two independently-frozen things (`FLAG_ROUTING_FROZEN` vs `FLAG_COMPONENTS_TIMELOCKED`).
 - **Ownership transfer: still possible** via timelock proposal on `vault.beginOwnerTransfer`
 - **Adapter quarantine**: `strategy.quarantineAdapter(idx)` — verify function exists in `src/strategies/usdc-lending/controller/UsdcLendingStrategy.sol`
 - **Emergency exit per-adapter**: `strategy.emergencyExit(adapterIdx)` — verify in source

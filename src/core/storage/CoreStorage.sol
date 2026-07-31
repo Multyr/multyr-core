@@ -35,6 +35,20 @@ library CoreStorage {
     uint256 internal constant FLAG_FEES_INITIALIZED = 1 << 11;
     uint256 internal constant FLAG_PERF_INITIALIZED = 1 << 12;
 
+    /// @dev Pending module routing change, protected by FLAG_COMPONENTS_TIMELOCKED
+    ///      the same way pendingBuffer/pendingRouter protect those components
+    ///      (see AdminModule.sol). One outstanding batch at a time — submitting
+    ///      a new batch while one is pending must be rejected, matching the
+    ///      "resolve before resubmitting" pattern used for every other pending*
+    ///      slot in this codebase.
+    struct PendingModuleBatch {
+        bytes4[] selectors;
+        address[] modules;
+        uint8[] roles;
+        uint64 eta;
+        bool exists;
+    }
+
     struct Layout {
         // Addresses (each 20 bytes, separate slots for simplicity)
         IParamsProvider params;
@@ -80,6 +94,7 @@ library CoreStorage {
         // Module routing
         mapping(bytes4 => address) moduleOf;
         mapping(bytes4 => uint8) roleOf; // 0=PUBLIC, 1=OWNER, 2=GUARDIAN, 3=OWNER_OR_GUARDIAN
+        PendingModuleBatch pendingModuleBatch;
 
         // Selector registry for role validation (set once, immutable)
         address selectorRegistry;

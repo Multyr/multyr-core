@@ -62,6 +62,15 @@ contract CoreVault is ERC4626, ICoreVault {
     error InvalidConfigHash();
     error RoutingNotFrozen();
     error NotAuthorizedModule();
+    error ComponentsTimelocked();
+    error ComponentsNotTimelocked();
+    error NotOwnerOrVetoer();
+    error NotPending();
+    error EtaNotReached();
+    error EtaExpired();
+    error PendingModuleBatchExists();
+    error PendingModuleBatchOutstanding();
+    error LengthMismatch();
 
     // ═══════════════════════════════════════════════════════════════════════════════
     // ROLE CONSTANTS
@@ -71,6 +80,11 @@ contract CoreVault is ERC4626, ICoreVault {
     uint8 public constant ROLE_GUARDIAN = 2;
     uint8 public constant ROLE_OWNER_OR_GUARDIAN = 3;
     uint8 public constant ROLE_MODULE = 4;
+
+    /// @dev Mirrors AdminModule.MAX_WINDOW — how long after `eta` a pending
+    ///      module batch can still be accepted before it expires and must be
+    ///      re-submitted (stale approvals should not be executable indefinitely).
+    uint64 public constant MODULE_BATCH_MAX_WINDOW = 7 days;
 
     // ═══════════════════════════════════════════════════════════════════════════════
     // OPS NAV CACHE (for gas-sensitive decisions — NOT for fee/PPS math)
@@ -258,15 +272,29 @@ contract CoreVault is ERC4626, ICoreVault {
         emit Events.SelectorRegistrySet(registry);
     }
 
+    /// @notice Instant module routing write — bootstrap only.
+    /// @dev Blocked once enableComponentsTimelock() has been called (mirrors
+    ///      setBufferManager/setRouter in AdminModule): routing is arguably the
+    ///      single most powerful lever in the whole system — a swapped-in
+    ///      malicious module can rewrite share accounting or asset custody
+    ///      outright — yet unlike bufferManager/router it previously had no
+    ///      delay of its own at all, dependent entirely on whatever `owner`
+    ///      happened to be. After enabling, use submitModulesBatch/
+    ///      acceptModulesBatch instead, same as every other sensitive component.
     function setModule(bytes4 selector, address module, uint8 role) external onlyOwner {
         CoreStorage.Layout storage core = CoreStorage.layout();
         if (core.packedFlags & CoreStorage.FLAG_ROUTING_FROZEN != 0) revert RoutingFrozen();
+        if (core.packedFlags & CoreStorage.FLAG_COMPONENTS_TIMELOCKED != 0) {
+            revert ComponentsTimelocked();
+        }
         _validateRoleAssignment(core, selector, role);
         core.moduleOf[selector] = module;
         core.roleOf[selector] = role;
         emit Events.ModuleSet(selector, module, role);
     }
 
+    /// @notice Instant batch module routing write — bootstrap only.
+    /// @dev See setModule() — blocked once enableComponentsTimelock() has been called.
     function setModulesBatch(
         bytes4[] calldata selectors,
         address[] calldata modules,
@@ -274,6 +302,9 @@ contract CoreVault is ERC4626, ICoreVault {
     ) external onlyOwner {
         CoreStorage.Layout storage core = CoreStorage.layout();
         if (core.packedFlags & CoreStorage.FLAG_ROUTING_FROZEN != 0) revert RoutingFrozen();
+        if (core.packedFlags & CoreStorage.FLAG_COMPONENTS_TIMELOCKED != 0) {
+            revert ComponentsTimelocked();
+        }
 
         uint256 len = selectors.length;
         require(len == modules.length && len == roles.length, "length mismatch");
@@ -285,6 +316,96 @@ contract CoreVault is ERC4626, ICoreVault {
             unchecked { ++i; }
         }
         emit Events.ModulesBatchSet(len);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TIMELOCKED MODULE ROUTING (post-bootstrap path)
+    // ─────────────────────────────────────────────────────────────────────────
+    // Mirrors AdminModule's submitBufferManager/acceptBufferManager pattern:
+    // one outstanding batch at a time, delayed by paramMinDelay, cancellable by
+    // owner OR vetoer (so a malicious/compromised owner cannot both submit a
+    // module swap and unilaterally wait out the delay with no recourse), and
+    // expires after MODULE_BATCH_MAX_WINDOW if never accepted.
+
+    /// @notice Queue a module routing change (requires enableComponentsTimelock()).
+    /// @return eta Timestamp after which acceptModulesBatch() may be called.
+    function submitModulesBatch(
+        bytes4[] calldata selectors,
+        address[] calldata modules,
+        uint8[] calldata roles
+    ) external onlyOwner returns (uint64 eta) {
+        CoreStorage.Layout storage core = CoreStorage.layout();
+        if (core.packedFlags & CoreStorage.FLAG_ROUTING_FROZEN != 0) revert RoutingFrozen();
+        if (core.packedFlags & CoreStorage.FLAG_COMPONENTS_TIMELOCKED == 0) {
+            revert ComponentsNotTimelocked();
+        }
+        if (core.pendingModuleBatch.exists) revert PendingModuleBatchExists();
+
+        uint256 len = selectors.length;
+        if (len != modules.length || len != roles.length) revert LengthMismatch();
+
+        for (uint256 i; i < len;) {
+            _validateRoleAssignment(core, selectors[i], roles[i]);
+            unchecked { ++i; }
+        }
+
+        eta = uint64(block.timestamp) + core.paramMinDelay;
+        core.pendingModuleBatch.selectors = selectors;
+        core.pendingModuleBatch.modules = modules;
+        core.pendingModuleBatch.roles = roles;
+        core.pendingModuleBatch.eta = eta;
+        core.pendingModuleBatch.exists = true;
+
+        emit Events.ModuleBatchSubmitted(len, eta);
+    }
+
+    /// @notice Apply a pending module routing change after its timelock has elapsed.
+    function acceptModulesBatch() external onlyOwner {
+        CoreStorage.Layout storage core = CoreStorage.layout();
+        CoreStorage.PendingModuleBatch storage pending = core.pendingModuleBatch;
+        if (!pending.exists) revert NotPending();
+        if (core.packedFlags & CoreStorage.FLAG_ROUTING_FROZEN != 0) revert RoutingFrozen();
+        if (block.timestamp < pending.eta) revert EtaNotReached();
+        if (block.timestamp > pending.eta + MODULE_BATCH_MAX_WINDOW) revert EtaExpired();
+
+        uint256 len = pending.selectors.length;
+        for (uint256 i; i < len;) {
+            core.moduleOf[pending.selectors[i]] = pending.modules[i];
+            core.roleOf[pending.selectors[i]] = pending.roles[i];
+            unchecked { ++i; }
+        }
+
+        emit Events.ModuleBatchAccepted(len);
+        delete core.pendingModuleBatch;
+    }
+
+    /// @notice Cancel a pending module routing change. Callable by owner OR
+    ///         vetoer — the vetoer is the recourse if the owner itself is the
+    ///         one who submitted a malicious swap.
+    function revokeModulesBatch() external {
+        CoreStorage.Layout storage core = CoreStorage.layout();
+        if (msg.sender != core.owner && msg.sender != core.vetoer) revert NotOwnerOrVetoer();
+        if (!core.pendingModuleBatch.exists) revert NotPending();
+
+        uint256 len = core.pendingModuleBatch.selectors.length;
+        delete core.pendingModuleBatch;
+        emit Events.ModuleBatchRevoked(len);
+    }
+
+    /// @notice Inspect the currently pending module batch, if any.
+    function getPendingModuleBatch()
+        external
+        view
+        returns (
+            bytes4[] memory selectors,
+            address[] memory modules,
+            uint8[] memory roles,
+            uint64 eta,
+            bool exists
+        )
+    {
+        CoreStorage.PendingModuleBatch storage pending = CoreStorage.layout().pendingModuleBatch;
+        return (pending.selectors, pending.modules, pending.roles, pending.eta, pending.exists);
     }
 
     function _validateRoleAssignment(CoreStorage.Layout storage core, bytes4 selector, uint8 role)
@@ -302,6 +423,12 @@ contract CoreVault is ERC4626, ICoreVault {
     function freezeRouting() external onlyOwner {
         CoreStorage.Layout storage core = CoreStorage.layout();
         if (core.packedFlags & CoreStorage.FLAG_ROUTING_FROZEN != 0) revert RoutingFrozen();
+        // Force explicit accept or revoke first — freezing with an unresolved
+        // pending swap sitting there would leave permanently-dead, ambiguous
+        // state (it could never be accepted post-freeze, per acceptModulesBatch's
+        // own RoutingFrozen check, but silently stranding it is worse than
+        // requiring a deliberate decision now).
+        if (core.pendingModuleBatch.exists) revert PendingModuleBatchOutstanding();
         core.packedFlags |= CoreStorage.FLAG_ROUTING_FROZEN;
         emit Events.RoutingFrozen();
     }
