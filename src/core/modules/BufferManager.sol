@@ -32,6 +32,11 @@ contract BufferManager is IBufferManager, ReentrancyGuard {
     error SlippageExceeded(); // C2: Warm withdraw slippage exceeded
     error InsufficientHot(uint256 hot, uint256 amount); // Solvency: cannot deploy more than hot balance
 
+    // Bounds retries against a single adapter in _withdrawFromAdapterWithRetry() —
+    // caps worst-case gas if an adapter dribbles out tiny amounts per call, while
+    // comfortably covering realistic per-call-cap fragmentation (a handful of retries).
+    uint8 private constant MAX_ADAPTER_WITHDRAW_ATTEMPTS = 8;
+
     // Graceful degradation event
     event RebalanceGracefulDegradation();
 
@@ -404,48 +409,17 @@ contract BufferManager is IBufferManager, ReentrancyGuard {
     /// @notice Force refill for forceWithdraw — deterministic, no silent failures.
     /// @dev Returns result instead of reverting. No slippage check (force path).
     ///      Called by ERC4626Module.forceWithdrawAll() via delegatecall.
-    ///      INVARIANT: No try/catch that hides failures — explicit return + event.
+    ///      INVARIANT: no adapter failure is hidden — shares `_withdrawFromAdapters()`
+    ///      with refill()/rebalance()/realizeForReserveAndOps(), which retries each
+    ///      adapter on partial fills and emits `WarmWithdrawAdapterFailed` on any
+    ///      revert (see that function's docs). This function adds its own explicit
+    ///      return value + `ForceRefillFailed` event on top for the total-failure case.
     function forceRefill(uint256 amount) external override nonReentrant onlyCore returns (bool ok, uint256 pulled) {
         if (amount == 0) return (true, 0);
 
-        uint256 totalReceived = 0;
-        uint256 remaining = amount;
-        uint256 len = _warmAdapters.length;
-
-        // Legacy adapter first — skipped if already present in _warmAdapters (see
-        // _withdrawFromAdapters) to avoid calling the same underlying adapter twice.
-        address legacyWarm = _cfg.warmAdapter;
-        if (legacyWarm != address(0) && remaining > 0 && !_isInWarmAdapters(legacyWarm, len)) {
-            (bool s, bytes memory ret) = legacyWarm.call(
-                abi.encodeWithSignature("withdraw(uint256,address)", remaining, core)
-            );
-            if (s && ret.length >= 32) {
-                uint256 received = abi.decode(ret, (uint256));
-                totalReceived += received;
-                remaining = amount > totalReceived ? amount - totalReceived : 0;
-            } else {
-                emit ForceRefillAdapterFailed(legacyWarm, remaining);
-            }
-        }
-
-        // Multi-adapters
-        for (uint256 i = 0; i < len && remaining > 0;) {
-            address warm = _warmAdapters[i];
-            (bool s, bytes memory ret) = warm.call(
-                abi.encodeWithSignature("withdraw(uint256,address)", remaining, core)
-            );
-            if (s && ret.length >= 32) {
-                uint256 received = abi.decode(ret, (uint256));
-                totalReceived += received;
-                remaining = amount > totalReceived ? amount - totalReceived : 0;
-            } else {
-                emit ForceRefillAdapterFailed(warm, remaining);
-            }
-            unchecked { ++i; }
-        }
+        uint256 totalReceived = _withdrawFromAdapters(amount);
 
         // NO slippage check (force path)
-        // Update warm NAV cache
         _updateWarmNavCache();
 
         if (totalReceived > 0) {
@@ -458,7 +432,6 @@ contract BufferManager is IBufferManager, ReentrancyGuard {
     }
 
     event ForceRefillFailed(uint256 requested);
-    event ForceRefillAdapterFailed(address indexed adapter, uint256 requested);
 
     /// @notice Rebalance hot/warm buffer. Callable by keeper (VaultUpkeep) or core.
     /// @dev FIX A: Changed from onlyCore to onlyKeeperOrCore for audit-grade access control.
@@ -664,36 +637,66 @@ contract BufferManager is IBufferManager, ReentrancyGuard {
         return false;
     }
 
-    /// @dev Withdraws up to `amount` from warm adapters via try/catch, stopping once
-    ///      filled. Legacy `cfg.warmAdapter` is skipped if it is also present in
-    ///      `_warmAdapters` — otherwise it would be called a second time for the same
-    ///      underlying adapter whenever its first withdrawal under-fills, since the
-    ///      default config seeds `_warmAdapters[0]` with the legacy adapter (see
-    ///      `_setConfig`). Mirrors the dedup already used by `warmBalance()` and
-    ///      `_updateWarmNavCache()`.
+    /// @dev Withdraws up to `amount` from warm adapters, stopping once filled. Each
+    ///      adapter is retried (via `_withdrawFromAdapterWithRetry`) while it keeps
+    ///      making progress on the residual, instead of moving on after a single
+    ///      partial fill — an adapter that rations funds per call (e.g. a per-call
+    ///      cap or rate limit) is given repeated chances to deliver the full request
+    ///      before the loop advances to the next adapter. Legacy `cfg.warmAdapter` is
+    ///      skipped if it is also present in `_warmAdapters` — otherwise it would be
+    ///      retried a second time (via a different code path) for the same underlying
+    ///      adapter, since the default config seeds `_warmAdapters[0]` with the legacy
+    ///      adapter (see `_setConfig`). Mirrors the dedup already used by
+    ///      `warmBalance()` and `_updateWarmNavCache()`.
+    /// @dev Does not revert on adapter failure or under-delivery — a failing adapter
+    ///      shouldn't block trying the next one. Callers that need a delivery
+    ///      guarantee check the returned total themselves (see `refill()`'s slippage
+    ///      check); a failure is still surfaced via `WarmWithdrawAdapterFailed`
+    ///      rather than silently swallowed.
     function _withdrawFromAdapters(uint256 amount) internal returns (uint256 totalReceived) {
         uint256 remaining = amount;
         uint256 len = _warmAdapters.length;
         address legacyWarm = _cfg.warmAdapter;
 
         if (legacyWarm != address(0) && remaining > 0 && !_isInWarmAdapters(legacyWarm, len)) {
-            try IWarmAdapter(legacyWarm).withdraw(remaining, core) returns (uint256 received) {
-                totalReceived += received;
-                remaining = amount > totalReceived ? amount - totalReceived : 0;
-            } catch {
-                // Skip failed adapter
-            }
+            uint256 received = _withdrawFromAdapterWithRetry(legacyWarm, remaining);
+            totalReceived += received;
+            remaining = received >= remaining ? 0 : remaining - received;
         }
 
         for (uint256 i = 0; i < len && remaining > 0;) {
-            try IWarmAdapter(_warmAdapters[i]).withdraw(remaining, core) returns (uint256 received) {
-                totalReceived += received;
-                remaining = amount > totalReceived ? amount - totalReceived : 0;
-            } catch {
-                // Skip failed adapter, try next
-            }
+            uint256 received = _withdrawFromAdapterWithRetry(_warmAdapters[i], remaining);
+            totalReceived += received;
+            remaining = received >= remaining ? 0 : remaining - received;
             unchecked {
                 ++i;
+            }
+        }
+    }
+
+    event WarmWithdrawAdapterFailed(address indexed adapter, uint256 requested);
+
+    /// @dev Repeatedly calls `adapter.withdraw()` for the residual while it keeps
+    ///      making progress (received > 0), up to MAX_ADAPTER_WITHDRAW_ATTEMPTS.
+    ///      Stops early (no revert) on a zero-progress call or a revert — either
+    ///      means this adapter is exhausted/unavailable for now, so the caller moves
+    ///      on to the next adapter rather than getting stuck. A revert is still
+    ///      surfaced via `WarmWithdrawAdapterFailed` for visibility.
+    function _withdrawFromAdapterWithRetry(address adapter, uint256 remaining)
+        internal
+        returns (uint256 received)
+    {
+        for (uint8 attempt; attempt < MAX_ADAPTER_WITHDRAW_ATTEMPTS && remaining > 0;) {
+            try IWarmAdapter(adapter).withdraw(remaining, core) returns (uint256 got) {
+                if (got == 0) break;
+                received += got;
+                remaining = got >= remaining ? 0 : remaining - got;
+            } catch {
+                emit WarmWithdrawAdapterFailed(adapter, remaining);
+                break;
+            }
+            unchecked {
+                ++attempt;
             }
         }
     }
