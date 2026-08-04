@@ -156,7 +156,7 @@ known-waiver list used as the audit perimeter.
 | `IncentivesEngine` (v2) | External notify | Current deposit/exit incentives; called via try/catch | — |
 | `AaveV3WarmAdapter_USDC` | Warm adapter | Aave V3 USDC integration for BufferManager warm buffer | — |
 | `MorphoBlueWarmAdapter_USDC` | Warm adapter | Morpho Blue USDC integration for BufferManager warm buffer | — |
-| `SelectorRegistry` | Immutable lib | Canonical selector-to-role mapping for 91 selectors | — |
+| `SelectorRegistry` | Immutable lib | Canonical selector-to-role mapping for 92 selectors | — |
 | `GlobalConfig` | Config | Protocol-wide parameter caps (IParamsProvider) | — |
 | `VaultFactory` | Factory | Deterministic deployment of CoreVault + module set | — |
 | `CoreVaultLens` | Lens | Read-only aggregated view of vault state | — |

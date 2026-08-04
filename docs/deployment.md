@@ -339,7 +339,7 @@ flowchart TD
     A["Phase 1: Infrastructure<br/>GlobalConfig + FeeCollector + PriceOracle<br/>StrategyHealthRegistry<br/>(script/DeployFixedMaturityVault.s.sol)"] --> B
     B["Phase 2: Core + FixedMaturityModule<br/>CoreVault + Queue/Admin/ERC4626/<br/>LiquidityOps + FixedMaturityModule<br/>(includes FM mode activation)"] --> C
     C["Phase 3: Ecosystem<br/>BufferManager (hot-only, no warm) + StrategyRouter<br/>+ Permit2DepositHelper"] --> D
-    D["Phase 4: Module routing<br/>91 selectors including FM selectors"] --> E
+    D["Phase 4: Module routing<br/>92 selectors including FM selectors"] --> E
     E["Phase 5: FM config<br/>setVaultModeFixedMaturity<br/>(maturity + funding window + strategy)"] --> F
     F["Phase 6: Ecosystem wiring<br/>Governor transfer + Oracle setup"] --> G
     G["Phase 7: SelectorRegistry activation<br/>(guardrail NOW active)"] --> H

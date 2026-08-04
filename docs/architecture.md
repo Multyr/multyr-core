@@ -163,8 +163,8 @@ Key properties (`src/core/libraries/SelectorRegistry.sol:55-208`):
 - `getRequiredRole(bytes4 selector) → uint8`: O(1) switch-case lookup, pure function.
 - `validateRoleAssignment(bytes4, uint8) → bool`: reverts with `InvalidRoleForSelector` if a registered selector is assigned the wrong role.
 - `requireKnownSelector(bytes4)`: reverts with `UnknownSelector` if the selector is not in the registry (allowlist mode).
-- Total registered selectors: 91 (`src/core/libraries/SelectorRegistry.sol:388-390`).
-- Owner-critical selectors: 34 (all AdminModule governance functions + FM governance).
+- Total registered selectors: 92 (`src/core/libraries/SelectorRegistry.sol:388-390`).
+- Owner-critical selectors: 35 (all AdminModule governance functions + FM governance).
 
 `CoreVault.setModule()` calls `SelectorRegistry.validateRoleAssignment()` before every routing table write, preventing misrouting attacks where an owner-only function could be mistakenly set as public (`src/core/CoreVault.sol:292-302`).
 

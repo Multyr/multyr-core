@@ -297,6 +297,12 @@ contract SystemSealer_TimestampHash_POC is Test {
             abi.encode(address(rootTimelock))
         );
 
+        // The seal guard reads the vault's real on-chain rewardsTreasury, not the
+        // config struct field — must actually be set via AdminModule for canSeal
+        // to pass (see test_verifyAndSeal_reverts_whenTreasurySetOnlyInConfigNotOnChain).
+        vm.prank(address(rootTimelock));
+        IAdminModule(address(vault)).setRewardsTreasury(goodConfig.rewardsTreasury);
+
         (bool ok, string memory reason) = systemSealer.canSeal(goodConfig);
         assertTrue(ok, string.concat("canSeal should pass with both set: ", reason));
 
@@ -314,6 +320,47 @@ contract SystemSealer_TimestampHash_POC is Test {
         rootTimelock.executeBatch(targets, values, payloads, bytes32(0), keccak256("good-config-salt"));
 
         assertTrue(vault.isSystemSealed(), "vault must seal when both payout manager and treasury are set");
+    }
+
+    /// @notice Closes the cosmetic-guard gap: the seal check must not trust the
+    ///         caller-supplied config.rewardsTreasury field. A proposer passing a
+    ///         plausible non-zero address there, while the vault's real on-chain
+    ///         rewardsTreasury is still address(0) (never actually set via
+    ///         AdminModule.setRewardsTreasury), must still be rejected — otherwise
+    ///         the vault seals with a permanently broken payRewardShares() path
+    ///         (setRewardsTreasury is blocked post-seal).
+    function test_verifyAndSeal_reverts_whenTreasurySetOnlyInConfigNotOnChain() public {
+        SystemSealer.SealConfig memory badConfig = sealConfig;
+        badConfig.rewardsPayoutManager = makeAddr("payoutManager");
+        badConfig.rewardsTreasury = makeAddr("rewardsTreasury"); // plausible, but never set on-chain
+
+        vm.mockCall(
+            badConfig.rewardsPayoutManager,
+            abi.encodeWithSignature("governance()"),
+            abi.encode(address(rootTimelock))
+        );
+
+        assertEq(vault.rewardsTreasury(), address(0), "sanity: on-chain rewardsTreasury must still be unset");
+
+        (bool ok, string memory reason) = systemSealer.canSeal(badConfig);
+        assertFalse(ok, "canSeal must not trust config.rewardsTreasury over the real on-chain value");
+        assertEq(reason, "RewardsTreasury not set but RewardsPayoutManager is deployed");
+
+        address[] memory targets  = new address[](1);
+        uint256[] memory values   = new uint256[](1);
+        bytes[]   memory payloads = new bytes[](1);
+        targets[0]  = address(systemSealer);
+        payloads[0] = abi.encodeCall(SystemSealer.verifyAndSeal, (badConfig));
+
+        vm.prank(deployer);
+        rootTimelock.scheduleBatch(targets, values, payloads, bytes32(0), keccak256("cosmetic-guard-salt"), TIMELOCK_DELAY);
+        vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
+
+        vm.prank(deployer);
+        vm.expectRevert();
+        rootTimelock.executeBatch(targets, values, payloads, bytes32(0), keccak256("cosmetic-guard-salt"));
+
+        assertFalse(vault.isSystemSealed(), "vault must not seal on a config-only (non-real) treasury value");
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────

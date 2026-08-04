@@ -640,15 +640,16 @@ contract DeploymentEquivalence_Test is Test {
             modularState.ownerSelectorCount,
             "ownerSelectorCount mismatch"
         );
-        // 34 owner-level selectors as of this baseline (SelectorLib.ADMIN_MODULE_OWNER_SELECTORS=34).
+        // 35 owner-level selectors as of this baseline (SelectorLib.ADMIN_MODULE_OWNER_SELECTORS=35).
         // Indices 0-26: original set (fee/perf/minDelay timelocks, ecosystem wiring, component timelocks,
         //   seedDeadDeposit, setInitialFees).
         // Index 27: setInitialPerfParams (one-shot perf setup, added FIX-EIP7201-SLOTS-01).
-        // Indices 28-29: setIncentivesEngine + setRewardsPayoutManager (FIX-FEECOLLECTOR-AUTOHARVEST-01).
-        // Indices 30-33: setRebalancePolicy + setRebalanceGuard + setExecutionMemory +
+        // Indices 28-30: setIncentivesEngine + setRewardsPayoutManager + setRewardsTreasury
+        //   (FIX-FEECOLLECTOR-AUTOHARVEST-01; setRewardsTreasury added for non-dilutive reward payouts).
+        // Indices 31-34: setRebalancePolicy + setRebalanceGuard + setExecutionMemory +
         //   setStrictExecutionMemory (V10 portfolio-grade allocation engine).
-        assertEq(fullState.ownerSelectorCount, 34, "ownerSelectorCount != 34");
-        console2.log("  [OK] ownerSelectorCount == 34");
+        assertEq(fullState.ownerSelectorCount, 35, "ownerSelectorCount != 35");
+        console2.log("  [OK] ownerSelectorCount == 35");
 
         assertTrue(fullState.allOwnerSelectorsCorrect, "full: owner selectors incorrect");
         assertTrue(modularState.allOwnerSelectorsCorrect, "modular: owner selectors incorrect");

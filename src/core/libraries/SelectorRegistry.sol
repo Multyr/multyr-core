@@ -102,6 +102,7 @@ contract SelectorRegistry {
         // IncentivesEngine v2 + RewardsPayoutManager
         if (selector == AdminModule.setIncentivesEngine.selector) return ROLE_OWNER;
         if (selector == AdminModule.setRewardsPayoutManager.selector) return ROLE_OWNER;
+        if (selector == AdminModule.setRewardsTreasury.selector) return ROLE_OWNER;
         // V10 Portfolio-Grade Allocation Engine (Policy + Guard + ExecutionMemory)
         if (selector == AdminModule.setRebalancePolicy.selector) return ROLE_OWNER;
         if (selector == AdminModule.setRebalanceGuard.selector) return ROLE_OWNER;
@@ -323,7 +324,7 @@ contract SelectorRegistry {
      * @return selectors Array of all selectors that require ROLE_OWNER
      */
     function getOwnerSelectors() external pure returns (bytes4[] memory selectors) {
-        selectors = new bytes4[](34);
+        selectors = new bytes4[](35);
 
         // Fee params
         selectors[0] = AdminModule.submitFeeParams.selector;
@@ -369,11 +370,12 @@ contract SelectorRegistry {
         selectors[27] = AdminModule.setInitialPerfParams.selector;
         selectors[28] = AdminModule.setIncentivesEngine.selector;
         selectors[29] = AdminModule.setRewardsPayoutManager.selector;
+        selectors[30] = AdminModule.setRewardsTreasury.selector;
         // V10 Portfolio-Grade Allocation Engine
-        selectors[30] = AdminModule.setRebalancePolicy.selector;
-        selectors[31] = AdminModule.setRebalanceGuard.selector;
-        selectors[32] = AdminModule.setExecutionMemory.selector;
-        selectors[33] = AdminModule.setStrictExecutionMemory.selector;
+        selectors[31] = AdminModule.setRebalancePolicy.selector;
+        selectors[32] = AdminModule.setRebalanceGuard.selector;
+        selectors[33] = AdminModule.setExecutionMemory.selector;
+        selectors[34] = AdminModule.setStrictExecutionMemory.selector;
     }
 
     /**
@@ -381,7 +383,7 @@ contract SelectorRegistry {
      * @return count Number of selectors requiring ROLE_OWNER
      */
     function ownerSelectorCount() external pure returns (uint256) {
-        return 34;
+        return 35;
     }
 
     /**
@@ -392,7 +394,7 @@ contract SelectorRegistry {
     // @dev If we keep this, we need to maintain it manually as selectors are added/removed -
     // consider if it's worth the maintenance burden.
     function totalRegisteredSelectors() external pure returns (uint256) {
-        // 34 owner + 15 admin view + 6 queue write + 5 queue view + 11 ERC4626 + 6 LiquidityOps + 14 FM = 91
-        return 91;
+        // 35 owner + 15 admin view + 6 queue write + 5 queue view + 11 ERC4626 + 6 LiquidityOps + 14 FM = 92
+        return 92;
     }
 }

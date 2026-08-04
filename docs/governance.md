@@ -60,7 +60,7 @@ graph TD
 The owner (role 1 = `OWNER`) has authority over:
 
 - All parameter timelock submissions and acceptances (`submitFeeParams`, `acceptFeeParams`, `submitPerfParams`, `acceptPerfParams`, `submitMinDelay`, `acceptMinDelay`)
-- Component assignments (`setParams`, `setBufferManager`, `setRouter`, `setHealthRegistry`, `setIncentives`, `setIncentivesEngine`, `setRewardsPayoutManager`, `setRebalancePolicy`, `setRebalanceGuard`, `setExecutionMemory`, `setStrictExecutionMemory`, `setFeeCollector`, `setVetoer`)
+- Component assignments (`setParams`, `setBufferManager`, `setRouter`, `setHealthRegistry`, `setIncentives`, `setIncentivesEngine`, `setRewardsPayoutManager`, `setRewardsTreasury`, `setRebalancePolicy`, `setRebalanceGuard`, `setExecutionMemory`, `setStrictExecutionMemory`, `setFeeCollector`, `setVetoer`)
 - Bootstrap one-shots (`setInitialFees`, `setInitialPerfParams`, `seedDeadDeposit`)
 - Irreversible state transitions (`freezeParams`, `enableComponentsTimelock`, `sealBySealer`)
 - FixedMaturity lifecycle (`setVaultModeFixedMaturity`, `configureFixedMaturity`, `startFixedMaturityCycle`, `activateFixedMaturityCycle`, `closeFixedMaturityCycle`)
@@ -122,6 +122,7 @@ Beyond parameter timelocks, the owner controls a set of component addresses used
 | `incentives` | `setIncentives` | — | Incentives contract |
 | `incentivesEngine` | `setIncentivesEngine` | — | Incentives engine |
 | `rewardsPayoutManager` | `setRewardsPayoutManager` | — | Rewards manager |
+| `rewardsTreasury` | `setRewardsTreasury` | Blocked post-seal | Pre-funded share balance `payRewardShares()` draws from |
 | `rebalancePolicy` | `setRebalancePolicy` | — | V10 rebalance policy |
 | `rebalanceGuard` | `setRebalanceGuard` | — | V10 rebalance guard |
 | `executionMemory` | `setExecutionMemory` | — | Execution memory recorder |

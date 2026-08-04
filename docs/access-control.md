@@ -139,6 +139,7 @@ No mechanism exists to "lock" a principal address permanently (except `sealBySea
 | `setIncentives` | AdminModule | Incentives contract |
 | `setIncentivesEngine` | AdminModule | Incentives engine |
 | `setRewardsPayoutManager` | AdminModule | Rewards manager |
+| `setRewardsTreasury` | AdminModule | Pre-funded share balance `payRewardShares()` draws from |
 | `setRebalancePolicy` | AdminModule | V10 rebalance policy |
 | `setRebalanceGuard` | AdminModule | V10 rebalance guard |
 | `setExecutionMemory` | AdminModule | Execution memory recorder |

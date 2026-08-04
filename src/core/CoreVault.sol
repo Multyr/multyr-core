@@ -485,6 +485,7 @@ contract CoreVault is ERC4626, ICoreVault {
     function healthRegistry() external view returns (IStrategyHealthRegistry) { return CoreStorage.layout().healthRegistry; }
     function incentives() external view returns (IIncentives) { return CoreStorage.layout().incentives; }
     function vetoer() external view returns (address) { return CoreStorage.layout().vetoer; }
+    function rewardsTreasury() external view returns (address) { return CoreStorage.layout().rewardsTreasury; }
 
     // ═══════════════════════════════════════════════════════════════════════════════
     // TOTAL ASSETS — CANONICAL (ERC-4626, LIVE, never stale)

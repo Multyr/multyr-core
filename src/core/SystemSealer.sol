@@ -248,7 +248,11 @@ contract SystemSealer {
         // INVARIANT 8d: RewardsTreasury must be funded before a live RewardsPayoutManager
         // is sealed in — payRewardShares() reverts on treasury=0 and setRewardsTreasury()
         // is blocked post-seal, so an unset treasury here would be permanently unfixable.
-        if (config.rewardsPayoutManager != address(0) && config.rewardsTreasury == address(0)) {
+        // Reads the vault's actual on-chain value rather than trusting config.rewardsTreasury
+        // (a caller-supplied field) — otherwise a proposer could pass a plausible non-zero
+        // address here while storage is still address(0), sealing in a permanently broken
+        // payout path.
+        if (config.rewardsPayoutManager != address(0) && vault.rewardsTreasury() == address(0)) {
             revert InvariantViolation("RewardsTreasury not set but RewardsPayoutManager is deployed");
         }
 
@@ -441,8 +445,9 @@ contract SystemSealer {
             }
         }
 
-        // RewardsTreasury must be funded before a live RewardsPayoutManager is sealed in
-        if (config.rewardsPayoutManager != address(0) && config.rewardsTreasury == address(0)) {
+        // RewardsTreasury must be funded before a live RewardsPayoutManager is sealed in.
+        // Reads the vault's actual on-chain value rather than trusting config.rewardsTreasury.
+        if (config.rewardsPayoutManager != address(0) && vault.rewardsTreasury() == address(0)) {
             return (false, "RewardsTreasury not set but RewardsPayoutManager is deployed");
         }
 
