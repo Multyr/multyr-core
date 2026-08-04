@@ -255,6 +255,34 @@ contract StrategyRouter_Allowlist is Test {
         assertFalse(router.isStrategyEnabled(address(strat)));
     }
 
+    /// @dev The gap this closes: disabling an already-registered strategy on
+    ///      revoke (see test_revokeStrategyAllowlist_disablesAlreadyRegisteredStrategy)
+    ///      also broke forced exit, since forceRedeemForWithdraw() built its
+    ///      extraction list by filtering on `enabled` — after revoke, a revoked
+    ///      strategy dropped out of that list entirely and its funds became
+    ///      unreachable via the forced-exit path. Revoking trust must close
+    ///      deposits/registration without also trapping funds already deployed
+    ///      to the strategy: forceRedeemForWithdraw() must still pull from a
+    ///      revoked (disabled) strategy.
+    function test_revokeStrategyAllowlist_forcedExitStillWorksAfterRevoke() public {
+        router.proposeStrategyAllowlist(address(strat));
+        vm.warp(block.timestamp + router.strategyAllowlistDelay());
+        router.executeStrategyAllowlist(address(strat));
+        router.register(address(strat), 0, 1e4);
+
+        uint256 seeded = 1_000e6;
+        usdc._mint(address(strat), seeded);
+
+        router.revokeStrategyAllowlist(address(strat));
+        assertFalse(router.isStrategyEnabled(address(strat)), "sanity: strategy disabled by revoke");
+
+        vm.prank(address(core));
+        uint256 got = router.forceRedeemForWithdraw(seeded);
+
+        assertEq(got, seeded, "forced exit must still pull funds from a revoked strategy");
+        assertEq(usdc.balanceOf(address(core)), seeded, "core must receive the redeemed funds");
+    }
+
     function test_revokeStrategyAllowlist_clears_pending_proposal() public {
         router.proposeStrategyAllowlist(address(strat));
         router.revokeStrategyAllowlist(address(strat)); // revoke before ever executed
