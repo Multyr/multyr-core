@@ -736,10 +736,12 @@ All external calls made by the vault system and their safety properties:
 | `getDepositLimits()`, `getWithdrawalParams()` | `ERC4626Module`, `QueueModule` | `IParamsProvider` | ~5K | View; trust required (admin-set) |
 | `forceRedeemForWithdraw()` | `ERC4626Module._forcePullAllLiquidity()` | `StrategyRouter` | ~300K | Best-effort; called last |
 | `executeDepositBatch()` | `LiquidityOpsModule` | `StrategyRouter` | ~500K | Bounded by plan |
-| `bm.refill()` | `QueueModule._settleScan()` | `BufferManager` | ~200K | try/catch; non-blocking |
-| `bm.forceRefill()` | `ERC4626Module._forcePullAllLiquidity()` | `BufferManager` | ~200K | Best-effort |
+| `bm.refill()` | `QueueModule._settleScan()` | `BufferManager` | ~200K best case; up to ~200K × 8 × adapter count worst case[^gas1] | try/catch; non-blocking |
+| `bm.forceRefill()` | `ERC4626Module._forcePullAllLiquidity()` | `BufferManager` | ~200K best case; up to ~200K × 8 × adapter count worst case[^gas1] | Best-effort |
 | `inc.onDeposit()` | `ERC4626Module._notifyIncentivesDeposit()` | `IIncentives` | ~50K | try/catch; non-blocking |
 | `eng.onDeposit/onExit()` | `ERC4626Module` | `IIncentivesEngine` | ~50K | try/catch; non-blocking |
+
+[^gas1]: `bm.refill()`/`bm.forceRefill()` (and `bm.rebalance()`'s refill branch, and `realizeForReserveAndOps()`) all share `_withdrawFromAdapters()`, which retries each configured adapter up to `MAX_ADAPTER_WITHDRAW_ATTEMPTS` (8) times on partial fills before moving to the next adapter — an adapter that rations funds per call (a per-call cap or rate limit) is retried rather than abandoned after a single under-filled attempt. Worst-case external-call count is `(legacy adapter + len(_warmAdapters)) × 8`, not the single call per adapter this estimate previously assumed. `_warmAdapters` has no enforced max length (owner-configured), so this scales with adapter count.
 
 ---
 
