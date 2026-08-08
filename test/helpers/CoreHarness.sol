@@ -201,9 +201,16 @@ contract CoreHarness is CoreVault {
         _ensureRouter();
         CoreStorage.Layout storage core = CoreStorage.layout();
         StrategyRouter router = StrategyRouter(address(core.router));
+        // Warp forward only long enough to clear the allowlist timelock, then warp
+        // back — callers shouldn't observe a jump in block.timestamp just from
+        // registering a strategy in setup. A leaked forward-warp here would silently
+        // corrupt any time-sensitive assertions (cooldowns, epoch boundaries, other
+        // timelocks) made later in the same test.
+        uint256 originalTimestamp = block.timestamp;
         router.proposeStrategyAllowlist(strat);
-        vm.warp(block.timestamp + router.strategyAllowlistDelay());
+        vm.warp(originalTimestamp + router.strategyAllowlistDelay());
         router.executeStrategyAllowlist(strat);
+        vm.warp(originalTimestamp);
         router.register(strat, 0, 10000);
     }
 

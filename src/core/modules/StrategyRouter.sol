@@ -255,11 +255,27 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
     }
 
     /// @notice Instantly revoke allowlist trust from a strategy (no timelock — removing
-    ///         trust is a safety action and must not be delayed like granting it)
+    ///         trust is a safety action and must not be delayed like granting it).
+    /// @dev If the strategy is already registered, it is also disabled (mirrors
+    ///      toggle(strat, false)) — revoking trust must stop live fund flow to the
+    ///      strategy, not just block future registrations. Without this, an already-
+    ///      registered strategy stayed live and kept receiving deposits/redeems after
+    ///      revoke, so "removing trust is instant" wasn't actually true for the
+    ///      strategies that are managing money. Forced exit of an already-managed
+    ///      strategy is unaffected: neither withdrawAllToCore()/emergencyRedeemBatch()
+    ///      (caller-supplied strategy, never filtered) nor forceRedeemForWithdraw()
+    ///      (iterates all registered strategies, not just enabled ones) require
+    ///      `enabled` — deposits close on revoke, exits don't.
     function revokeStrategyAllowlist(address strat) external onlyOwner {
         strategyAllowlist[strat] = false;
         delete strategyAllowlistEta[strat];
         emit StrategyAllowlistSet(strat, false);
+
+        uint256 idx1 = _idx[strat];
+        if (idx1 != 0 && _strats[idx1 - 1].enabled) {
+            _strats[idx1 - 1].enabled = false;
+            emit StrategyToggled(strat, false);
+        }
     }
 
     function register(address strat, uint16 priority, uint16 weightBps)
@@ -1154,9 +1170,11 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
 
     /// @notice Force redeem for forceWithdrawAll — greedy extraction, NO LossCap.
     /// @dev Called by ERC4626Module via delegatecall (onlyCore).
-    ///      Extracts liquidity greedily: iterates enabled strategies sorted by
-    ///      available liquidity (desc), pulls as much as possible from each.
-    ///      Skips reverting strategies without blocking the entire batch.
+    ///      Extracts liquidity greedily: iterates ALL registered strategies (not
+    ///      just enabled ones — a revoked/disabled strategy can still hold funds
+    ///      that must remain forcibly exitable, see revokeStrategyAllowlist()),
+    ///      sorted by available liquidity (desc), pulls as much as possible from
+    ///      each. Skips reverting strategies without blocking the entire batch.
     ///      NO loss cap check — force exit path must never be blocked.
     /// @param amount Target USDC to extract
     /// @return got Total USDC actually received
@@ -1172,31 +1190,27 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
         uint256 balanceBefore = _balance(to);
         uint256 remaining = amount;
 
-        // Build list of enabled strategies with their available liquidity
+        // Build list of ALL registered strategies with their available liquidity —
+        // deliberately not filtered by `enabled`, so forced exit stays open even
+        // for a revoked strategy.
         uint256 stratsLen = _strats.length;
-        uint256 enabledCount = 0;
 
         // Temp arrays for greedy sort
         address[] memory addrs = new address[](stratsLen);
         uint256[] memory avail = new uint256[](stratsLen);
 
         for (uint256 i = 0; i < stratsLen;) {
-            if (_strats[i].enabled) {
-                addrs[enabledCount] = _strats[i].strat;
-                // Get available assets (best-effort query)
-                (bool ok, bytes memory ret) = _strats[i].strat.staticcall(
-                    abi.encodeWithSignature("totalAssets()")
-                );
-                avail[enabledCount] = (ok && ret.length >= 32)
-                    ? abi.decode(ret, (uint256))
-                    : 0;
-                enabledCount++;
-            }
+            addrs[i] = _strats[i].strat;
+            // Get available assets (best-effort query)
+            (bool ok, bytes memory ret) = _strats[i].strat.staticcall(
+                abi.encodeWithSignature("totalAssets()")
+            );
+            avail[i] = (ok && ret.length >= 32) ? abi.decode(ret, (uint256)) : 0;
             unchecked { ++i; }
         }
 
         // Greedy sort: highest available first (simple insertion sort, N <= 10)
-        for (uint256 i = 1; i < enabledCount; i++) {
+        for (uint256 i = 1; i < stratsLen; i++) {
             uint256 key = avail[i];
             address keyAddr = addrs[i];
             uint256 j = i;
@@ -1210,7 +1224,7 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
         }
 
         // Greedy extraction: pull from most-liquid first
-        for (uint256 i = 0; i < enabledCount && remaining > 0;) {
+        for (uint256 i = 0; i < stratsLen && remaining > 0;) {
             uint256 toPull = remaining < avail[i] ? remaining : avail[i];
             if (toPull == 0) { unchecked { ++i; } continue; }
 
