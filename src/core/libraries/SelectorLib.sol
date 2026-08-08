@@ -24,7 +24,7 @@ library SelectorLib {
     // ═══════════════════════════════════════════════════════════════════════════════
     uint256 internal constant QUEUE_MODULE_SELECTORS = 6; // +1: compactQueue
     uint256 internal constant QUEUE_MODULE_VIEW_SELECTORS = 5; // +1: requiredHotForBatch, +1: settlePreview
-    uint256 internal constant ADMIN_MODULE_OWNER_SELECTORS = 34; // +4: V10 rebalance policy selectors
+    uint256 internal constant ADMIN_MODULE_OWNER_SELECTORS = 35; // +1: setRewardsTreasury
     uint256 internal constant ADMIN_MODULE_VIEW_SELECTORS = 15; // +1: getForceExitPenalty, +1: isPerfInitialized
     uint256 internal constant ERC4626_MODULE_SELECTORS = 11; // +1: forceWithdraw, +1: forceWithdrawAll
     uint256 internal constant LIQUIDITY_OPS_MODULE_SELECTORS = 7; // canDeploy, deployToStrategies, deployToStrategiesWithPlan, realizeForQueue, realizeForReserveAndOps, canRebalanceStrategies, rebalanceStrategies
@@ -99,11 +99,12 @@ library SelectorLib {
         // IncentivesEngine v2 + RewardsPayoutManager
         selectors[28] = AdminModule.setIncentivesEngine.selector;
         selectors[29] = AdminModule.setRewardsPayoutManager.selector;
+        selectors[30] = AdminModule.setRewardsTreasury.selector;
         // V10 Portfolio-Grade Allocation Engine
-        selectors[30] = AdminModule.setRebalancePolicy.selector;
-        selectors[31] = AdminModule.setRebalanceGuard.selector;
-        selectors[32] = AdminModule.setExecutionMemory.selector;
-        selectors[33] = AdminModule.setStrictExecutionMemory.selector;
+        selectors[31] = AdminModule.setRebalancePolicy.selector;
+        selectors[32] = AdminModule.setRebalanceGuard.selector;
+        selectors[33] = AdminModule.setExecutionMemory.selector;
+        selectors[34] = AdminModule.setStrictExecutionMemory.selector;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════

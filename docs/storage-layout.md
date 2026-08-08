@@ -234,8 +234,9 @@ Source: `src/core/storage/CoreStorage.sol:83-93`.
 | `rebalanceGuard` | `address` | Rebalance plan validator | V10 allocation engine |
 | `executionMemory` | `address` | Allocation cost tracking | V10 allocation engine |
 | `strictExecutionMemory` | `bool` | Enforce ExecutionMemory on every deploy | V10 allocation engine |
+| `rewardsTreasury` | `address` | Pre-funded share balance `payRewardShares()` transfers from | Post-initial deploy |
 
-Source: `src/core/storage/CoreStorage.sol:94-105`. These fields were appended to the Layout struct. Appending to EIP-7201 layout structs is safe — the namespace slot is a hash, and struct fields are allocated sequentially from that slot. No collision with earlier fields.
+Source: `src/core/storage/CoreStorage.sol:97-114`. These fields were appended to the Layout struct. Appending to EIP-7201 layout structs is safe — the namespace slot is a hash, and struct fields are allocated sequentially from that slot. No collision with earlier fields.
 
 ---
 
@@ -499,15 +500,16 @@ Fields MAY be appended to any `Layout` struct. They MUST NOT be inserted before 
 **Correct**: Append new field after all existing fields in the struct.
 **Incorrect**: Insert field between existing fields, change field type, change field order.
 
-Example of safe append (applied in v2 incentives + v10 allocation engine):
+Example of safe append (applied in v2 incentives + v10 allocation engine + rewards treasury):
 ```solidity
-// CoreStorage.sol:94-105 — appended fields
+// CoreStorage.sol:97-114 — appended fields
 IIncentivesEngine incentivesEngine;
 address rewardsPayoutManager;
 address rebalancePolicy;
 address rebalanceGuard;
 address executionMemory;
 bool    strictExecutionMemory;
+address rewardsTreasury;
 ```
 
 ### 9.2 Namespace Isolation

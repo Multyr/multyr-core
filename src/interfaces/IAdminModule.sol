@@ -74,6 +74,9 @@ interface IAdminModule {
     /// @notice Set incentives module
     function setIncentives(address newIncentives) external;
 
+    /// @notice Set the rewards treasury (pre-funded share balance payRewardShares() draws from)
+    function setRewardsTreasury(address newTreasury) external;
+
     /// @notice Set fee collector address
     function setFeeCollector(address newCollector) external;
 

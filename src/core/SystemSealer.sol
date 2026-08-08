@@ -111,6 +111,11 @@ contract SystemSealer {
         // RewardsPayoutManager (optional)
         address rewardsPayoutManager;
 
+        // RewardsTreasury: required (non-zero) if rewardsPayoutManager is deployed —
+        // payRewardShares() draws from it and setRewardsTreasury() is blocked post-seal,
+        // so an unset treasury here would be permanently unfixable.
+        address rewardsTreasury;
+
         // Deployer address to verify has no remaining roles
         address deployer;
     }
@@ -240,6 +245,17 @@ contract SystemSealer {
             }
         }
 
+        // INVARIANT 8d: RewardsTreasury must be funded before a live RewardsPayoutManager
+        // is sealed in — payRewardShares() reverts on treasury=0 and setRewardsTreasury()
+        // is blocked post-seal, so an unset treasury here would be permanently unfixable.
+        // Reads the vault's actual on-chain value rather than trusting config.rewardsTreasury
+        // (a caller-supplied field) — otherwise a proposer could pass a plausible non-zero
+        // address here while storage is still address(0), sealing in a permanently broken
+        // payout path.
+        if (config.rewardsPayoutManager != address(0) && vault.rewardsTreasury() == address(0)) {
+            revert InvariantViolation("RewardsTreasury not set but RewardsPayoutManager is deployed");
+        }
+
         // ─────────────────────────────────────────────────────────────────────────
         // INVARIANT 9: Strategy roles (if strategy is deployed)
         // ─────────────────────────────────────────────────────────────────────────
@@ -291,7 +307,8 @@ contract SystemSealer {
                 config.strategy,
                 config.incentives,
                 config.incentivesEngine,
-                config.rewardsPayoutManager
+                config.rewardsPayoutManager,
+                config.rewardsTreasury
             )
         );
 
@@ -426,6 +443,12 @@ contract SystemSealer {
             if (IRewardsPayoutManager(config.rewardsPayoutManager).governance() != config.rootTimelock) {
                 return (false, "RewardsPayoutManager.governance != ROOT_TIMELOCK");
             }
+        }
+
+        // RewardsTreasury must be funded before a live RewardsPayoutManager is sealed in.
+        // Reads the vault's actual on-chain value rather than trusting config.rewardsTreasury.
+        if (config.rewardsPayoutManager != address(0) && vault.rewardsTreasury() == address(0)) {
+            return (false, "RewardsTreasury not set but RewardsPayoutManager is deployed");
         }
 
         // Dead deposit (inflation attack hardening)

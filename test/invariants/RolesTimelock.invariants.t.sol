@@ -717,16 +717,17 @@ contract RolesTimelockInvariants is Test {
     // ═══════════════════════════════════════════════════════════════════════════════
 
     /// @notice Log all selectors and their roles for documentation.
-    /// @dev Array size must equal SelectorLib.ADMIN_MODULE_OWNER_SELECTORS (currently 34).
-    ///      Indices 0-26: original set; 27-33: added post-baseline (setInitialPerfParams via
-    ///      FIX-EIP7201-SLOTS-01; setIncentivesEngine + setRewardsPayoutManager via
-    ///      FIX-FEECOLLECTOR-AUTOHARVEST-01; setRebalancePolicy + setRebalanceGuard +
+    /// @dev Array size must equal SelectorLib.ADMIN_MODULE_OWNER_SELECTORS (currently 35).
+    ///      Indices 0-26: original set; 27-34: added post-baseline (setInitialPerfParams via
+    ///      FIX-EIP7201-SLOTS-01; setIncentivesEngine + setRewardsPayoutManager +
+    ///      setRewardsTreasury via FIX-FEECOLLECTOR-AUTOHARVEST-01 (setRewardsTreasury added for
+    ///      non-dilutive reward payouts); setRebalancePolicy + setRebalanceGuard +
     ///      setExecutionMemory + setStrictExecutionMemory via V10 portfolio-grade allocation engine).
     function test_logSelectorTable() public view {
         console.log("=== ADMINMODULE OWNER SELECTORS (ROLE_OWNER = 1) ===");
 
         bytes4[] memory ownerSels = SelectorLib.getAdminModuleOwnerSelectors();
-        string[34] memory ownerNames = [
+        string[35] memory ownerNames = [
             "submitFeeParams",
             "acceptFeeParams",
             "revokeFeeParams",
@@ -757,6 +758,7 @@ contract RolesTimelockInvariants is Test {
             "setInitialPerfParams",
             "setIncentivesEngine",
             "setRewardsPayoutManager",
+            "setRewardsTreasury",
             "setRebalancePolicy",
             "setRebalanceGuard",
             "setExecutionMemory",

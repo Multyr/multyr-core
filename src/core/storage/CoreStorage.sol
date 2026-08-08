@@ -106,6 +106,12 @@ library CoreStorage {
         address rebalanceGuard;
         address executionMemory;
         bool    strictExecutionMemory;
+
+        // Rewards Treasury (appended): pre-funded share balance that payRewardShares()
+        // transfers from. Reward payouts are non-dilutive by construction — no new
+        // shares are minted, so PPS is unaffected. Funding this address is a
+        // treasury-ops decision outside the vault's scope.
+        address rewardsTreasury;
     }
 
     function layout() internal pure returns (Layout storage l) {
