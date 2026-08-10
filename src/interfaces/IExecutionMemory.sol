@@ -5,7 +5,7 @@ pragma solidity ^0.8.28;
 /// @notice Bootstrap-safe cost model with observationCount thresholds and inactivity decay.
 interface IExecutionMemory {
     struct ExecutionRecord {
-        uint64 emaGasCost;
+        uint256 emaGasCost; // WAD-scaled USD; widened from uint64 to hold non-6dp-scale costs
         uint32 emaSlippageBps;
         uint32 failedCount;
         uint32 successCount;
@@ -37,7 +37,7 @@ interface IExecutionMemory {
 
     /// @notice Record lookup
     function records(address strategy) external view returns (
-        uint64 emaGasCost,
+        uint256 emaGasCost,
         uint32 emaSlippageBps,
         uint32 failedCount,
         uint32 successCount,

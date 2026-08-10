@@ -15,7 +15,7 @@ contract ExecutionMemory is IExecutionMemory {
     // ─────────────────────────────────────────────────────────────────────
 
     struct ExecRec {
-        uint64 emaGasCost;
+        uint256 emaGasCost; // WAD USD; widened from uint64 (that only fit 6dp-scale *1e6 values)
         uint32 emaSlippageBps;
         uint32 failedCount;
         uint32 successCount;
@@ -34,13 +34,14 @@ contract ExecutionMemory is IExecutionMemory {
     uint16 public minObservationsForLiveCost = 10;
     uint16 public minObservationsForPenalty = 20;
 
-    // Fallback values (Correction #3)
-    uint32 public fallbackGasCostUsd     = uint32(50 * 1e6);
+    // Fallback values (Correction #3). WAD USD; widened from uint32 (only fit 6dp-scale
+    // *1e6 values) to hold WAD-scale (*1e18) amounts.
+    uint256 public fallbackGasCostUsd     = 50 * 1e18;
     uint16 public fallbackSlippageBps    = 5;
     uint16 public fallbackPenaltyBps     = 50;
 
-    // Outlier filter (Correction #3)
-    uint32 public maxAcceptableGasCost      = uint32(500 * 1e6);
+    // Outlier filter (Correction #3). WAD USD; see fallbackGasCostUsd for the widening note.
+    uint256 public maxAcceptableGasCost     = 500 * 1e18;
     uint16 public maxAcceptableSlippageBps  = 1_000;
 
     // EMA smoothing
@@ -65,8 +66,8 @@ contract ExecutionMemory is IExecutionMemory {
     event KeeperSet(address indexed keeper);
     event OwnerTransferred(address indexed oldOwner, address indexed newOwner);
     event ThresholdsSet(uint16 minLive, uint16 minPenalty);
-    event FallbackCostSet(uint32 gasCostUsd, uint16 slippageBps, uint16 penaltyBps);
-    event OutlierFilterSet(uint32 maxGasCost, uint16 maxSlippageBps);
+    event FallbackCostSet(uint256 gasCostUsd, uint16 slippageBps, uint16 penaltyBps);
+    event OutlierFilterSet(uint256 maxGasCost, uint16 maxSlippageBps);
     event InactivityDecaySet(uint32 thresholdSeconds, uint16 betaBps);
     event EmaBetaSet(uint16 betaBps);
 
@@ -92,6 +93,12 @@ contract ExecutionMemory is IExecutionMemory {
     // recordExecution
     // ─────────────────────────────────────────────────────────────────────
 
+    /// @dev `gasUsed` is expected to already be a WAD-scaled USD cost estimate from the
+    ///      caller — this contract has no independent way to price gas. As of this change
+    ///      the caller (LiquidityOpsModule) still passes a hardcoded placeholder rather
+    ///      than a real gas-price-derived figure, so recorded/returned costs are only as
+    ///      meaningful as that input. Making it real requires a native-gas-token/USD
+    ///      oracle, which is out of scope here (see OracleValuationLib doc).
     /// @inheritdoc IExecutionMemory
     function recordExecution(
         address strategy,
@@ -110,14 +117,14 @@ contract ExecutionMemory is IExecutionMemory {
 
         if (r.lastUpdateTs == 0) {
             // First observation
-            r.emaGasCost = uint64(gasUsed > type(uint64).max ? type(uint64).max : gasUsed);
+            r.emaGasCost = gasUsed;
             r.emaSlippageBps = uint32(slippageBps);
             r.emaRealizedVsExpectedBps = _clampI32(realizedVsExpectedBps);
         } else {
             // EMA update
             uint256 newG = (uint256(emaBetaBps) * gasUsed
-                           + (BPS - uint256(emaBetaBps)) * uint256(r.emaGasCost)) / BPS;
-            r.emaGasCost = uint64(newG > type(uint64).max ? type(uint64).max : newG);
+                           + (BPS - uint256(emaBetaBps)) * r.emaGasCost) / BPS;
+            r.emaGasCost = newG;
 
             uint256 newS = (uint256(emaBetaBps) * uint256(slippageBps)
                            + (BPS - uint256(emaBetaBps)) * uint256(r.emaSlippageBps)) / BPS;
@@ -205,7 +212,7 @@ contract ExecutionMemory is IExecutionMemory {
 
     /// @inheritdoc IExecutionMemory
     function records(address strategy) external view override returns (
-        uint64 emaGasCost,
+        uint256 emaGasCost,
         uint32 emaSlippageBps,
         uint32 failedCount,
         uint32 successCount,
@@ -252,7 +259,7 @@ contract ExecutionMemory is IExecutionMemory {
     }
 
     function setFallbackCost(
-        uint32 gasCostUsd,
+        uint256 gasCostUsd,
         uint16 slippageBps,
         uint16 penaltyBps
     ) external onlyOwner {
@@ -262,7 +269,7 @@ contract ExecutionMemory is IExecutionMemory {
         emit FallbackCostSet(gasCostUsd, slippageBps, penaltyBps);
     }
 
-    function setOutlierFilter(uint32 maxGas, uint16 maxSlip) external onlyOwner {
+    function setOutlierFilter(uint256 maxGas, uint16 maxSlip) external onlyOwner {
         maxAcceptableGasCost = maxGas;
         maxAcceptableSlippageBps = maxSlip;
         emit OutlierFilterSet(maxGas, maxSlip);

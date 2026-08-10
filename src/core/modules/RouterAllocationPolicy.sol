@@ -129,6 +129,12 @@ contract RouterAllocationPolicy is IRouterAllocationPolicy {
             plan.strategyScores[i] = scores.length > i ? uint16(scores[i].score) : 0;
         }
 
+        // NOTE on the "Usd" suffix: these are raw asset-unit amounts, not oracle-converted
+        // USD. That's intentional, not a bug — every consumer (bucket constraints, drift,
+        // AllocationInvariantLib.computeNetBenefitBps's moveUsd/costUsd ratio) only ever
+        // compares them in same-unit ratios/bps against `tvl` (also raw asset units), which
+        // is unit-agnostic. Only RouterRebalanceGuard's *absolute* dollar floors
+        // (minMoveUsd, baseGasCostUsd) need real oracle conversion, which happens there.
         plan.totalMoveUsd = sumWithdraw;
         plan.estimatedWithdrawUsd = sumWithdraw;
         plan.estimatedDepositUsd = sumDeposit;
