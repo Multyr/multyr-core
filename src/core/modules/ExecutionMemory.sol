@@ -171,6 +171,13 @@ contract ExecutionMemory is IExecutionMemory {
 
     /// @inheritdoc IExecutionMemory
     function getPenalty(address strategy) external view override returns (uint16) {
+        return _getPenalty(strategy);
+    }
+
+    /// @dev Shared by getPenalty() and getAggregatePenalty() so the latter's loop calls
+    ///      this directly instead of `this.getPenalty(...)` — avoids N real external
+    ///      self-calls (getPenalty is external) for a pure storage-read + view computation.
+    function _getPenalty(address strategy) internal view returns (uint16) {
         ExecRec memory r = _records[strategy];
         if (r.observationCount < minObservationsForPenalty) {
             return fallbackPenaltyBps;
@@ -197,7 +204,7 @@ contract ExecutionMemory is IExecutionMemory {
         if (n == 0) return 0;
         uint256 sum = 0;
         for (uint256 i = 0; i < n; i++) {
-            sum += this.getPenalty(strategies[i]);
+            sum += _getPenalty(strategies[i]);
         }
         uint256 avg = sum / n;
         return avg > type(uint16).max ? type(uint16).max : uint16(avg);

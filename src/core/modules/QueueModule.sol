@@ -267,7 +267,8 @@ contract QueueModule {
 
     function queueLength() external view returns (uint256) {
         QueueStorage.Layout storage q = QueueStorage.layout();
-        return q.queue.length > q.head ? q.queue.length - q.head : 0;
+        uint256 len = q.queue.length; // cache: avoids a second SLOAD of the array length
+        return len > q.head ? len - q.head : 0;
     }
 
     function pendingShares() external view returns (uint256) {

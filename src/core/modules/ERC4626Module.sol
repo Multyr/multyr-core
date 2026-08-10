@@ -22,6 +22,11 @@ import {
 } from "../storage/FixedMaturityStorage.sol";
 import { FixedMaturityLogicLib } from "../libraries/FixedMaturityLogicLib.sol";
 
+/// @dev Minimal interface for the best-effort self-call in _triggerAutoClose().
+interface IFixedMaturityAutoClose {
+    function autoCloseFunding() external;
+}
+
 /// @title ERC4626Module v3 (ExitEngineLib Architecture)
 /// @notice Handles ERC4626 user-facing operations via delegatecall from CoreVault.
 /// @dev v9 changes (ExitEngineLib refactor):
@@ -582,8 +587,11 @@ contract ERC4626Module {
     /// @dev Trigger auto-close via FixedMaturityModule.autoCloseFunding() (best-effort).
     ///      autoCloseFunding() is a no-op if conditions are no longer valid (race-safe).
     function _triggerAutoClose() private {
-        // Call autoCloseFunding() via this vault's routing. Best-effort: ignore revert.
-        address(this).call(abi.encodeWithSignature("autoCloseFunding()"));
+        // Direct interface call via try/catch instead of a raw low-level call --
+        // same best-effort/ignore-failure semantics (catch swallows exactly like
+        // the old unchecked `.call()` did), but the compiler resolves the
+        // selector at compile time instead of hashing "autoCloseFunding()" at runtime.
+        try IFixedMaturityAutoClose(address(this)).autoCloseFunding() { } catch { }
     }
 
     /// @dev Mint exact shares. Gross-up: user pays grossAssets = ceil(netAssets * 10000 / (10000 - depBps)).
