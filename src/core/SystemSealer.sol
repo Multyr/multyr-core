@@ -111,9 +111,11 @@ contract SystemSealer {
         // RewardsPayoutManager (optional)
         address rewardsPayoutManager;
 
-        // RewardsTreasury: required (non-zero) if rewardsPayoutManager is deployed —
-        // payRewardShares() draws from it and setRewardsTreasury() is blocked post-seal,
-        // so an unset treasury here would be permanently unfixable.
+        // RewardsTreasury: NOT validated — recorded in configHash for audit purposes
+        // only. The actual invariant (non-zero if rewardsPayoutManager is deployed)
+        // is checked against vault.rewardsTreasury() (see INVARIANT 8d), never
+        // against this caller-supplied field, so a mismatched value here is silently
+        // ignored rather than rejected.
         address rewardsTreasury;
 
         // Deployer address to verify has no remaining roles
