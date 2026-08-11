@@ -149,7 +149,8 @@ contract IncentivesEngine is IIncentivesEngine {
             _createRewardVesting(user, uint128(totalPending));
             // Reset all accrual checkpoints
             DepositTranche[] storage tranches = _userTranches[user];
-            for (uint256 i = 0; i < tranches.length; i++) {
+            uint256 tranchesLen = tranches.length; // cache: avoids re-reading array length each iteration
+            for (uint256 i = 0; i < tranchesLen; i++) {
                 if (tranches[i].active) {
                     tranches[i].lastAccrualTs = uint64(block.timestamp);
                 }
@@ -249,7 +250,8 @@ contract IncentivesEngine is IIncentivesEngine {
             _createRewardVesting(user, uint128(totalPending));
             // Reset all accrual checkpoints
             DepositTranche[] storage tranches = _userTranches[user];
-            for (uint256 i = 0; i < tranches.length; i++) {
+            uint256 tranchesLen = tranches.length; // cache: avoids re-reading array length each iteration
+            for (uint256 i = 0; i < tranchesLen; i++) {
                 if (tranches[i].active) {
                     tranches[i].lastAccrualTs = uint64(block.timestamp);
                 }
@@ -310,7 +312,8 @@ contract IncentivesEngine is IIncentivesEngine {
 
         // Reset accrual checkpoints on all active tranches
         DepositTranche[] storage tranches = _userTranches[user];
-        for (uint256 i = 0; i < tranches.length; i++) {
+        uint256 tranchesLen = tranches.length; // cache: avoids re-reading array length each iteration
+        for (uint256 i = 0; i < tranchesLen; i++) {
             if (tranches[i].active) {
                 tranches[i].lastAccrualTs = uint64(block.timestamp);
             }
@@ -428,7 +431,8 @@ contract IncentivesEngine is IIncentivesEngine {
 
     function _totalPendingReward(address user) internal view returns (uint256 total) {
         DepositTranche[] storage tranches = _userTranches[user];
-        for (uint256 i = 0; i < tranches.length; i++) {
+        uint256 tranchesLen = tranches.length; // cache: avoids re-reading array length each iteration
+        for (uint256 i = 0; i < tranchesLen; i++) {
             if (!tranches[i].active) continue;
             total += _tranchePendingReward(tranches[i], user);
         }
@@ -493,8 +497,9 @@ contract IncentivesEngine is IIncentivesEngine {
     function _consumeFIFO(address user, uint256 assetsToConsume) internal {
         DepositTranche[] storage tranches = _userTranches[user];
         uint256 remaining = assetsToConsume;
+        uint256 tranchesLen = tranches.length; // cache: avoids re-reading array length each iteration
 
-        for (uint256 i = 0; i < tranches.length && remaining > 0; i++) {
+        for (uint256 i = 0; i < tranchesLen && remaining > 0; i++) {
             if (!tranches[i].active) continue;
 
             uint256 consume = tranches[i].principalWad;
@@ -571,7 +576,8 @@ contract IncentivesEngine is IIncentivesEngine {
 
     function _totalVestedAvailable(address user) internal view returns (uint256 total) {
         RewardVestingTranche[] storage vestings = _userVestings[user];
-        for (uint256 i = 0; i < vestings.length; i++) {
+        uint256 vestingsLen = vestings.length; // cache: avoids re-reading array length each iteration
+        for (uint256 i = 0; i < vestingsLen; i++) {
             total += _vestedAvailable(vestings[i]);
         }
     }
@@ -667,7 +673,8 @@ contract IncentivesEngine is IIncentivesEngine {
 
     function _totalUserPrincipal(address user) internal view returns (uint256 total) {
         DepositTranche[] storage tranches = _userTranches[user];
-        for (uint256 i = 0; i < tranches.length; i++) {
+        uint256 tranchesLen = tranches.length; // cache: avoids re-reading array length each iteration
+        for (uint256 i = 0; i < tranchesLen; i++) {
             if (tranches[i].active) total += tranches[i].principalWad;
         }
     }
