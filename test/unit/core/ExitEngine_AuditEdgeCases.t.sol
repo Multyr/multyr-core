@@ -15,13 +15,21 @@ import { FeeStorage } from "../../../src/core/storage/FeeStorage.sol";
 import { Percentage } from "../../../src/libs/Percentage.sol";
 
 interface IQueueModule {
-    function requestClaim(bool immediate, uint256 shares) external;
-    function cancelClaim(uint256 claimId) external;
-    function processQueuedRedemptions(uint256 maxClaims) external;
-    function settleFeesAndProcessQueue(uint256 maxClaims) external;
-    function nextClaimId() external view returns (uint256);
-    function queueLength() external view returns (uint256);
-    function pendingShares() external view returns (uint256);
+    function requestInstantWithdrawal(uint256 shares)
+        external
+        returns (bool settledImmediately, uint256 epochId, uint256 claimId);
+    function requestEpochWithdrawal(uint256 shares)
+        external
+        returns (uint256 epochId, uint256 claimId);
+    function cancelEpochWithdrawal(uint256 epochId, uint256 claimId) external;
+    function closeCurrentEpoch() external;
+    function fundEpoch(uint256 epochId) external;
+    function claimEpochAssets(uint256 epochId, uint256 claimId) external returns (uint256 assets);
+    function currentEpochId() external view returns (uint256);
+    function canCloseCurrentEpoch() external view returns (bool);
+    function currentEpochClaimCount() external view returns (uint256);
+    function outstandingClaimCount() external view returns (uint256);
+    function totalEscrowedShares() external view returns (uint256);
 }
 
 interface IForceWithdrawAll {
@@ -101,7 +109,7 @@ contract ExitEngine_AuditEdgeCases is Test {
 
         // Instant claim with stale NAV - should still work (W2)
         vm.prank(users[0]);
-        IQueueModule(address(vault)).requestClaim(true, shares);
+        IQueueModule(address(vault)).requestInstantWithdrawal(shares);
 
         uint256 usdcAfter = usdc.balanceOf(users[0]);
         uint256 sharesAfter = vault.balanceOf(users[0]);
@@ -121,16 +129,20 @@ contract ExitEngine_AuditEdgeCases is Test {
     function test_A1_navDrift_queueSettle() public {
         // Queue claim with fresh NAV
         vm.prank(users[0]);
-        IQueueModule(address(vault)).requestClaim(false, 1_000_000e6);
+        (uint256 epochId, uint256 claimId) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(1_000_000e6);
 
-        // Make NAV very stale before settlement
-        vm.warp(block.timestamp + 1 hours);
+        // Make NAV very stale, then close + fund past the min epoch duration
+        vm.warp(block.timestamp + 7 days + 1);
 
         uint256 usdcBefore = usdc.balanceOf(users[0]);
         uint256 supplyBefore = vault.totalSupply();
 
         // Settle with stale NAV - should work (W2)
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(10);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epochId);
+        vm.prank(users[0]);
+        IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
 
         uint256 usdcAfter = usdc.balanceOf(users[0]);
         uint256 supplyAfter = vault.totalSupply();
@@ -158,7 +170,7 @@ contract ExitEngine_AuditEdgeCases is Test {
 
         uint256 usdcBefore0 = usdc.balanceOf(users[0]);
         vm.prank(users[0]);
-        IQueueModule(address(vault)).requestClaim(true, shares);
+        IQueueModule(address(vault)).requestInstantWithdrawal(shares);
         uint256 received0 = usdc.balanceOf(users[0]) - usdcBefore0;
 
         // Stale NAV claim (same PPS - no actual drift, just staleness)
@@ -166,7 +178,7 @@ contract ExitEngine_AuditEdgeCases is Test {
 
         uint256 usdcBefore1 = usdc.balanceOf(users[1]);
         vm.prank(users[1]);
-        IQueueModule(address(vault)).requestClaim(true, shares);
+        IQueueModule(address(vault)).requestInstantWithdrawal(shares);
         uint256 received1 = usdc.balanceOf(users[1]) - usdcBefore1;
 
         // Both should receive similar amounts (PPS unchanged, only staleness differs)
@@ -185,37 +197,46 @@ contract ExitEngine_AuditEdgeCases is Test {
 
         // Queue a claim
         vm.prank(users[0]);
-        IQueueModule(address(vault)).requestClaim(false, 2_000_000e6);
-        uint256 claimId = IQueueModule(address(vault)).nextClaimId();
+        (uint256 epochId, uint256 claimId) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(2_000_000e6);
 
         uint256 sharesAfterQueue = vault.balanceOf(users[0]);
         assertEq(sharesBefore - sharesAfterQueue, 2_000_000e6, "A2: shares moved to escrow");
 
         // Cancel
         vm.prank(users[0]);
-        IQueueModule(address(vault)).cancelClaim(claimId);
+        IQueueModule(address(vault)).cancelEpochWithdrawal(epochId, claimId);
 
         uint256 sharesAfterCancel = vault.balanceOf(users[0]);
         assertEq(sharesAfterCancel, sharesBefore, "A2: shares returned on cancel");
-        assertEq(IQueueModule(address(vault)).pendingShares(), 0, "A2: pending cleared");
+        assertEq(IQueueModule(address(vault)).totalEscrowedShares(), 0, "A2: pending cleared");
     }
 
     function test_A2_multiUserQueueAndSettle_noZombie() public {
-        // 5 users queue claims
+        // 5 users queue claims into the same epoch
+        uint256[5] memory claimIds;
+        uint256 epochId;
         for (uint256 i = 0; i < 5; i++) {
             vm.prank(users[i]);
-            IQueueModule(address(vault)).requestClaim(false, 500_000e6);
+            (epochId, claimIds[i]) =
+                IQueueModule(address(vault)).requestEpochWithdrawal(500_000e6);
         }
 
-        assertEq(IQueueModule(address(vault)).queueLength(), 5, "A2: 5 claims queued");
-        assertEq(IQueueModule(address(vault)).pendingShares(), 2_500_000e6, "A2: 2.5M pending");
+        assertEq(IQueueModule(address(vault)).outstandingClaimCount(), 5, "A2: 5 claims queued");
+        assertEq(IQueueModule(address(vault)).totalEscrowedShares(), 2_500_000e6, "A2: 2.5M pending");
 
-        // Settle all
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(50);
+        // Settle all: close + fund the epoch, then each user self-claims
+        vm.warp(block.timestamp + 7 days + 1);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epochId);
+        for (uint256 i = 0; i < 5; i++) {
+            vm.prank(users[i]);
+            IQueueModule(address(vault)).claimEpochAssets(epochId, claimIds[i]);
+        }
 
         // Verify no zombies
-        uint256 remaining = IQueueModule(address(vault)).queueLength();
-        uint256 pending = IQueueModule(address(vault)).pendingShares();
+        uint256 remaining = IQueueModule(address(vault)).outstandingClaimCount();
+        uint256 pending = IQueueModule(address(vault)).totalEscrowedShares();
         console2.log("A2: remaining queue:", remaining, "pending:", pending);
 
         assertEq(pending, 0, "A2: no pending shares after full settle");
@@ -228,24 +249,32 @@ contract ExitEngine_AuditEdgeCases is Test {
     function test_A2_cancelMidQueue_noStarvation() public {
         // User0 queues, user1 queues, user0 cancels, user2 queues
         vm.prank(users[0]);
-        IQueueModule(address(vault)).requestClaim(false, 1_000_000e6);
-        uint256 claimId0 = IQueueModule(address(vault)).nextClaimId();
+        (uint256 epochId0, uint256 claimId0) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(1_000_000e6);
 
         vm.prank(users[1]);
-        IQueueModule(address(vault)).requestClaim(false, 1_000_000e6);
+        (uint256 epochId1, uint256 claimId1) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(1_000_000e6);
 
         // User0 cancels mid-queue
         vm.prank(users[0]);
-        IQueueModule(address(vault)).cancelClaim(claimId0);
+        IQueueModule(address(vault)).cancelEpochWithdrawal(epochId0, claimId0);
 
         vm.prank(users[2]);
-        IQueueModule(address(vault)).requestClaim(false, 1_000_000e6);
+        (uint256 epochId2, uint256 claimId2) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(1_000_000e6);
 
         // Settle — user1 and user2 should get settled, user0's cancel should not block
         uint256 user1Before = usdc.balanceOf(users[1]);
         uint256 user2Before = usdc.balanceOf(users[2]);
 
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(50);
+        vm.warp(block.timestamp + 7 days + 1);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epochId1);
+        vm.prank(users[1]);
+        IQueueModule(address(vault)).claimEpochAssets(epochId1, claimId1);
+        vm.prank(users[2]);
+        IQueueModule(address(vault)).claimEpochAssets(epochId2, claimId2);
 
         assertGt(usdc.balanceOf(users[1]), user1Before, "A2: user1 settled after cancel");
         assertGt(usdc.balanceOf(users[2]), user2Before, "A2: user2 settled after cancel");
@@ -258,17 +287,17 @@ contract ExitEngine_AuditEdgeCases is Test {
         // Queue and cancel 10 times
         for (uint256 i = 0; i < 10; i++) {
             vm.prank(users[0]);
-            IQueueModule(address(vault)).requestClaim(false, 100_000e6);
-            uint256 claimId = IQueueModule(address(vault)).nextClaimId();
+            (uint256 epochId, uint256 claimId) =
+                IQueueModule(address(vault)).requestEpochWithdrawal(100_000e6);
 
             vm.prank(users[0]);
-            IQueueModule(address(vault)).cancelClaim(claimId);
+            IQueueModule(address(vault)).cancelEpochWithdrawal(epochId, claimId);
         }
 
         // Shares should be exactly the same (no leak)
         assertEq(vault.balanceOf(users[0]), initialShares, "A2: no share leak on queue/cancel");
         assertEq(vault.totalSupply(), initialSupply, "A2: no supply leak");
-        assertEq(IQueueModule(address(vault)).pendingShares(), 0, "A2: no pending leak");
+        assertEq(IQueueModule(address(vault)).totalEscrowedShares(), 0, "A2: no pending leak");
     }
 
     // =====================================================================
@@ -285,7 +314,7 @@ contract ExitEngine_AuditEdgeCases is Test {
         vault.deposit(50_000_000e6, users[0]);
 
         uint256 usdcBefore = usdc.balanceOf(users[0]);
-        IQueueModule(address(vault)).requestClaim(true, 8_000_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(8_000_000e6);
         uint256 usdcAfter = usdc.balanceOf(users[0]);
         vm.stopPrank();
 
@@ -297,17 +326,17 @@ contract ExitEngine_AuditEdgeCases is Test {
         // TVL = 50M, cap = 5M
         // Claim 4M instant (leaves 1M cap)
         vm.prank(users[0]);
-        IQueueModule(address(vault)).requestClaim(true, 4_000_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(4_000_000e6);
 
         // TVL decreased (~46M), cap = 10% of 46M = ~4.6M
         // Already used 4M, remaining = ~0.6M
         // Try 2M instant — should queue (exceeds remaining)
-        uint256 pendingBefore = IQueueModule(address(vault)).pendingShares();
+        uint256 pendingBefore = IQueueModule(address(vault)).totalEscrowedShares();
 
         vm.prank(users[1]);
-        IQueueModule(address(vault)).requestClaim(true, 2_000_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(2_000_000e6);
 
-        uint256 pendingAfter = IQueueModule(address(vault)).pendingShares();
+        uint256 pendingAfter = IQueueModule(address(vault)).totalEscrowedShares();
 
         // The cap decreased because totalAssets decreased
         // This may or may not queue depending on exact math
@@ -333,7 +362,7 @@ contract ExitEngine_AuditEdgeCases is Test {
         // TVL = 250M, cap = 25M
         // Instant claim 20M
         uint256 usdcBefore = usdc.balanceOf(attacker);
-        IQueueModule(address(vault)).requestClaim(true, 20_000_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(20_000_000e6);
         uint256 received = usdc.balanceOf(attacker) - usdcBefore;
 
         // Verify: attacker lost shares (fee applied)
@@ -366,7 +395,7 @@ contract ExitEngine_AuditEdgeCases is Test {
         // Instant claim: fee = witBps(25) + immPenBps(50) = 75 bps
         uint256 usdcBefore0 = usdc.balanceOf(users[0]);
         vm.prank(users[0]);
-        IQueueModule(address(vault)).requestClaim(true, shares);
+        IQueueModule(address(vault)).requestInstantWithdrawal(shares);
         uint256 instantNet = usdc.balanceOf(users[0]) - usdcBefore0;
 
         // Force claim: fee = witBps(25) + forcePenBps(150) = 175 bps
@@ -390,13 +419,13 @@ contract ExitEngine_AuditEdgeCases is Test {
     function test_A4_forceDoesNotConsumeEpochCap() public {
         // Exhaust cap with instant claims
         vm.prank(users[0]);
-        IQueueModule(address(vault)).requestClaim(true, 4_000_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(4_000_000e6);
 
         // Next instant queues (cap ~exhausted)
-        uint256 pendingBefore = IQueueModule(address(vault)).pendingShares();
+        uint256 pendingBefore = IQueueModule(address(vault)).totalEscrowedShares();
         vm.prank(users[1]);
-        IQueueModule(address(vault)).requestClaim(true, 3_000_000e6);
-        uint256 pendingAfterInstant = IQueueModule(address(vault)).pendingShares();
+        IQueueModule(address(vault)).requestInstantWithdrawal(3_000_000e6);
+        uint256 pendingAfterInstant = IQueueModule(address(vault)).totalEscrowedShares();
 
         bool instantQueued = pendingAfterInstant > pendingBefore;
 
@@ -422,17 +451,22 @@ contract ExitEngine_AuditEdgeCases is Test {
 
         // Queue claim
         vm.prank(users[0]);
-        IQueueModule(address(vault)).requestClaim(false, shares);
+        (uint256 epochId, uint256 claimId) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(shares);
 
-        // Settle it
+        // Settle it: close + fund + self-claim
         uint256 usdcBefore0 = usdc.balanceOf(users[0]);
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(10);
+        vm.warp(block.timestamp + 7 days + 1);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epochId);
+        vm.prank(users[0]);
+        IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
         uint256 queuedNet = usdc.balanceOf(users[0]) - usdcBefore0;
 
         // Instant claim
         uint256 usdcBefore1 = usdc.balanceOf(users[1]);
         vm.prank(users[1]);
-        IQueueModule(address(vault)).requestClaim(true, shares);
+        IQueueModule(address(vault)).requestInstantWithdrawal(shares);
         uint256 instantNet = usdc.balanceOf(users[1]) - usdcBefore1;
 
         console2.log("A4: queued net:", queuedNet);
@@ -488,7 +522,7 @@ contract ExitEngine_AuditEdgeCases is Test {
         uint256 feeCollectorBefore = vault.balanceOf(feeCollector);
 
         vm.prank(users[0]);
-        IQueueModule(address(vault)).requestClaim(true, shares);
+        IQueueModule(address(vault)).requestInstantWithdrawal(shares);
 
         uint256 actualNet = usdc.balanceOf(users[0]) - usdcBefore;
         uint256 actualSharesConsumed = sharesBefore - vault.balanceOf(users[0]);
@@ -546,10 +580,15 @@ contract ExitEngine_AuditEdgeCases is Test {
         // INVARIANT 3: feeShares are exact (same formula used at queue and settle)
         // Verify by queueing and checking fee at settlement
         vm.prank(users[0]);
-        IQueueModule(address(vault)).requestClaim(false, shares);
+        (uint256 epochId, uint256 claimId) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(shares);
 
         uint256 feeCollectorBefore = vault.balanceOf(feeCollector);
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(10);
+        vm.warp(block.timestamp + 7 days + 1);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epochId);
+        vm.prank(users[0]);
+        IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
         uint256 actualFeeShares = vault.balanceOf(feeCollector) - feeCollectorBefore;
 
         // feeShares must match exactly (allow 1 unit rounding)

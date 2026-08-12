@@ -9,7 +9,7 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { ERC20Mock } from "../../src/mocks/ERC20Mock.sol";
 import { MockParamsProvider } from "../helpers/MockParamsProvider.sol";
-import { QueueModule } from "../../src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "../../src/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "../../src/core/modules/AdminModule.sol";
 import { IQueueModule } from "../../src/interfaces/IQueueModule.sol";
 
@@ -34,7 +34,7 @@ contract CoreVault_ClaimsQueue_Invariants is StdInvariant, Test {
     MockParamsProvider public params;
     ERC20Mock public usdc;
     ClaimQueueHandler public handler;
-    QueueModule public queueModule;
+    EpochedQueueModule public queueModule;
     AdminModule public adminModule;
 
     /* ========== ADDRESSES ========== */
@@ -64,7 +64,7 @@ contract CoreVault_ClaimsQueue_Invariants is StdInvariant, Test {
         );
 
         // Deploy modules
-        queueModule = new QueueModule();
+        queueModule = new EpochedQueueModule();
         adminModule = new AdminModule();
 
         // Deploy CoreVault with 6-param constructor
@@ -103,23 +103,28 @@ contract CoreVault_ClaimsQueue_Invariants is StdInvariant, Test {
     }
 
     function _wireModules() internal {
-        // QueueModule selectors (PUBLIC)
+        // EpochedQueueModule selectors (PUBLIC)
         vault.setModule(
-            QueueModule.requestClaim.selector, address(queueModule), vault.ROLE_PUBLIC()
+            EpochedQueueModule.requestEpochWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
-        vault.setModule(QueueModule.cancelClaim.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.cancelEpochWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.closeCurrentEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.fundEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.claimEpochAssets.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.batchClaimEpochAssets.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(
-            QueueModule.processQueuedRedemptions.selector, address(queueModule), vault.ROLE_PUBLIC()
+            EpochedQueueModule.requestInstantWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
         vault.setModule(
-            QueueModule.settleFeesAndProcessQueue.selector,
-            address(queueModule),
-            vault.ROLE_PUBLIC()
+            EpochedQueueModule.endEpochCrystallize.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
+        vault.setModule(EpochedQueueModule.currentEpochId.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(
-            QueueModule.pendingShares.selector, address(queueModule), vault.ROLE_PUBLIC()
+            EpochedQueueModule.totalEscrowedShares.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
-        vault.setModule(QueueModule.queueLength.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.outstandingClaimCount.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.canCloseCurrentEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.currentEpochClaimCount.selector, address(queueModule), vault.ROLE_PUBLIC());
 
         // AdminModule selectors (OWNER)
         vault.setModule(
@@ -139,7 +144,7 @@ contract CoreVault_ClaimsQueue_Invariants is StdInvariant, Test {
      * @notice Queue length should match handler's tracked open claims
      */
     function invariant_queueLength() public view {
-        uint256 vaultQueueLen = IQueueModule(address(vault)).queueLength();
+        uint256 vaultQueueLen = IQueueModule(address(vault)).outstandingClaimCount();
         uint256 handlerQueueLen = handler.ghost_openClaims();
 
         // Handler tracks claims it created that haven't been processed
@@ -278,10 +283,14 @@ contract ClaimQueueHandler is Test {
     uint256 public calls_processQueue;
     uint256 public calls_yield;
 
-    // Claim tracking
+    // Claim tracking -- handler-side sequential IDs (the epoch model's own
+    // claimId is only unique WITHIN an epoch, not globally, so the handler
+    // keeps its own flat ID space and maps it to the real (epochId, claimId)).
     mapping(uint256 => address) public claimOwners;
     mapping(uint256 => bool) public claimSettled;
     mapping(uint256 => bool) public claimCancelled;
+    mapping(uint256 => uint256) public claimVaultEpochId;
+    mapping(uint256 => uint256) public claimVaultClaimId;
     uint256 public nextClaimId;
 
     // Actor tracking
@@ -331,8 +340,12 @@ contract ClaimQueueHandler is Test {
         uint256 claimShares = (shares * sharePct) / 100;
         if (claimShares == 0) claimShares = 1;
 
-        try queueModule.requestClaim(false, claimShares) {
+        try queueModule.requestEpochWithdrawal(claimShares) returns (
+            uint256 epochId, uint256 vaultClaimId
+        ) {
             claimOwners[nextClaimId] = actor;
+            claimVaultEpochId[nextClaimId] = epochId;
+            claimVaultClaimId[nextClaimId] = vaultClaimId;
             actorClaims[actor].push(nextClaimId);
             ghost_totalClaimsCreated++;
             ghost_openClaims++;
@@ -352,10 +365,23 @@ contract ClaimQueueHandler is Test {
 
         uint256 balBefore = usdc.balanceOf(actor);
 
-        try queueModule.requestClaim(true, claimShares) {
-            // Immediate claims are processed inline
-            uint256 balAfter = usdc.balanceOf(actor);
-            ghost_totalWithdrawn += (balAfter - balBefore);
+        try queueModule.requestInstantWithdrawal(claimShares) returns (
+            bool settledImmediately, uint256 epochId, uint256 vaultClaimId
+        ) {
+            if (settledImmediately) {
+                // Immediate claims are processed inline
+                uint256 balAfter = usdc.balanceOf(actor);
+                ghost_totalWithdrawn += (balAfter - balBefore);
+            } else {
+                // Cap-exhausted fallback -- became a standard epoch claim
+                claimOwners[nextClaimId] = actor;
+                claimVaultEpochId[nextClaimId] = epochId;
+                claimVaultClaimId[nextClaimId] = vaultClaimId;
+                actorClaims[actor].push(nextClaimId);
+                ghost_totalClaimsCreated++;
+                ghost_openClaims++;
+                nextClaimId++;
+            }
             calls_immediateClaim++;
         } catch { }
     }
@@ -371,7 +397,7 @@ contract ClaimQueueHandler is Test {
 
         if (claimSettled[claimId] || claimCancelled[claimId]) return;
 
-        try queueModule.cancelClaim(claimId) {
+        try queueModule.cancelEpochWithdrawal(claimVaultEpochId[claimId], claimVaultClaimId[claimId]) {
             claimCancelled[claimId] = true;
             ghost_cancelledClaims++;
             if (ghost_openClaims > 0) ghost_openClaims--;
@@ -397,7 +423,7 @@ contract ClaimQueueHandler is Test {
 
         ghost_unauthorizedCancelAttempts++;
 
-        try queueModule.cancelClaim(claimId) {
+        try queueModule.cancelEpochWithdrawal(claimVaultEpochId[claimId], claimVaultClaimId[claimId]) {
         // Should not succeed - this would be a bug
         }
         catch {
@@ -411,17 +437,36 @@ contract ClaimQueueHandler is Test {
         // Warp to ensure claims can be settled
         vm.warp(block.timestamp + 7 days);
 
-        uint256 queueLenBefore = queueModule.queueLength();
+        if (!queueModule.canCloseCurrentEpoch() || queueModule.currentEpochClaimCount() == 0) {
+            return;
+        }
 
-        try queueModule.settleFeesAndProcessQueue(maxClaims) {
-            uint256 queueLenAfter = queueModule.queueLength();
-            uint256 processed = queueLenBefore - queueLenAfter;
+        uint256 epochId = queueModule.currentEpochId();
+        try queueModule.closeCurrentEpoch() {
+            uint256 processed = _fundAndSettleEpoch(epochId, maxClaims);
             ghost_processedClaims += processed;
-            if (ghost_openClaims >= processed) {
-                ghost_openClaims -= processed;
-            }
             calls_processQueue++;
         } catch { }
+    }
+
+    /// @dev Shared close-side helper: funds `epochId` and self-claims (pull-based)
+    ///      up to `maxClaims` of the tracked open claims that landed in it.
+    function _fundAndSettleEpoch(uint256 epochId, uint256 maxClaims) internal returns (uint256 processed) {
+        try queueModule.fundEpoch(epochId) { } catch { }
+
+        for (uint256 i = 0; i < nextClaimId && processed < maxClaims; i++) {
+            if (
+                claimVaultEpochId[i] == epochId && !claimSettled[i] && !claimCancelled[i]
+                    && claimOwners[i] != address(0)
+            ) {
+                vm.prank(claimOwners[i]);
+                try queueModule.claimEpochAssets(epochId, claimVaultClaimId[i]) {
+                    claimSettled[i] = true;
+                    processed++;
+                    if (ghost_openClaims > 0) ghost_openClaims--;
+                } catch { }
+            }
+        }
     }
 
     function simulateYield(uint256 yieldAmount) public {
@@ -451,24 +496,18 @@ contract ClaimQueueHandler is Test {
         usdc._mint(address(vault), yieldAmount);
         ghost_totalYield += yieldAmount;
 
-        // Crystallize to update share price
+        // Crystallize to update share price -- independent of queue settlement
+        // in the epoch model (see EpochedQueueModule.endEpochCrystallize).
         vm.warp(block.timestamp + 2 hours);
+        try queueModule.endEpochCrystallize() { } catch { }
 
-        // Track queue length before processing to update ghost_openClaims
-        uint256 queueLenBefore = queueModule.queueLength();
-
-        queueModule.settleFeesAndProcessQueue(1);
-
-        // Update ghost state if claims were processed
-        uint256 queueLenAfter = queueModule.queueLength();
-        uint256 processed = queueLenBefore - queueLenAfter;
-        if (processed > 0) {
-            ghost_processedClaims += processed;
-            if (ghost_openClaims >= processed) {
-                ghost_openClaims -= processed;
-            } else {
-                ghost_openClaims = 0;
-            }
+        // Close + fund + settle 1 claim from the current epoch, if eligible.
+        if (queueModule.canCloseCurrentEpoch() && queueModule.currentEpochClaimCount() > 0) {
+            uint256 epochId = queueModule.currentEpochId();
+            try queueModule.closeCurrentEpoch() {
+                uint256 processed = _fundAndSettleEpoch(epochId, 1);
+                ghost_processedClaims += processed;
+            } catch { }
         }
 
         calls_yield++;
