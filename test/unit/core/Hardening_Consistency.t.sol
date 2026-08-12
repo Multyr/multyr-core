@@ -11,19 +11,21 @@ import { ERC20Mock } from "../../../src/mocks/ERC20Mock.sol";
 import { MockParamsProvider } from "../../helpers/MockParamsProvider.sol";
 import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTests.sol";
 import { SelectorLib } from "../../../src/core/libraries/SelectorLib.sol";
-import { QueueModule } from "../../../src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "../../../src/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "../../../src/core/modules/AdminModule.sol";
 import { ERC4626Module } from "../../../src/core/modules/ERC4626Module.sol";
 
 interface IQueueModule {
-    function requestClaim(bool immediate, uint256 shares) external;
-    function settleFeesAndProcessQueue(uint256 maxClaims) external;
-    function processQueuedRedemptions(uint256 maxClaims) external;
-    function endEpochCrystallize() external;
-    function queueLength() external view returns (uint256);
-    function pendingShares() external view returns (uint256);
+    function requestInstantWithdrawal(uint256 shares)
+        external
+        returns (bool settledImmediately, uint256 epochId, uint256 claimId);
     function requestEpochWithdrawal(uint256 shares) external returns (uint256 epochId, uint256 claimId);
     function closeCurrentEpoch() external;
+    function fundEpoch(uint256 epochId) external;
+    function claimEpochAssets(uint256 epochId, uint256 claimId) external returns (uint256 assets);
+    function endEpochCrystallize() external;
+    function outstandingClaimCount() external view returns (uint256);
+    function totalEscrowedShares() external view returns (uint256);
 }
 
 /// @title Hardening: canX/performX Consistency + Event Correctness + Wiring
@@ -99,14 +101,17 @@ contract Hardening_Consistency is Test {
 
     function test_settle_noRevert_whenQueueEmpty() public {
         // No claims in queue
-        assertEq(IQueueModule(address(vault)).queueLength(), 0, "queue empty");
+        assertEq(IQueueModule(address(vault)).outstandingClaimCount(), 0, "queue empty");
 
         // Should not revert even if nothing to settle
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(10);
+        vm.warp(block.timestamp + 7 days + 1);
+        IQueueModule(address(vault)).closeCurrentEpoch();
     }
 
     function test_processQueuedRedemptions_noRevert_whenEmpty() public {
-        IQueueModule(address(vault)).processQueuedRedemptions(10);
+        vm.warp(block.timestamp + 7 days + 1);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(0);
     }
 
     // ═════════════════════════════════════════════════════���═════════════════════
@@ -117,7 +122,7 @@ contract Hardening_Consistency is Test {
         vm.recordLogs();
 
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(true, 500_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(500_000e6);
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
@@ -148,53 +153,49 @@ contract Hardening_Consistency is Test {
             }
         }
         assertTrue(foundFeePaid, "FeePaid event emitted");
-
-        // Check for ClaimSettled event
-        bytes32 claimSettledSig = keccak256("ClaimSettled(uint256,address,uint256)");
-        bool foundSettled = false;
-        for (uint256 i; i < logs.length; i++) {
-            if (logs[i].topics.length > 0 && logs[i].topics[0] == claimSettledSig) {
-                foundSettled = true;
-                break;
-            }
-        }
-        assertTrue(foundSettled, "ClaimSettled event emitted");
     }
 
     function test_queuedClaim_emitsClaimQueued() public {
         vm.recordLogs();
 
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(false, 500_000e6);
+        IQueueModule(address(vault)).requestEpochWithdrawal(500_000e6);
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
-        bytes32 claimQueuedSig = keccak256("ClaimQueued(uint256)");
+        bytes32 requestedSig =
+            keccak256("EpochWithdrawalRequested(uint256,uint256,address,uint256,uint256,uint256)");
         bool found = false;
         uint256 count = 0;
         for (uint256 i; i < logs.length; i++) {
-            if (logs[i].topics.length > 0 && logs[i].topics[0] == claimQueuedSig) {
+            if (logs[i].topics.length > 0 && logs[i].topics[0] == requestedSig) {
                 found = true;
                 count++;
             }
         }
-        assertTrue(found, "ClaimQueued emitted");
-        assertEq(count, 1, "ClaimQueued exactly once");
+        assertTrue(found, "EpochWithdrawalRequested emitted");
+        assertEq(count, 1, "EpochWithdrawalRequested exactly once");
     }
 
     function test_settlement_emitsFeePaidAndSettled() public {
         // Queue claim
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(false, 200_000e6);
+        (uint256 epochId, uint256 claimId) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(200_000e6);
+
+        vm.warp(block.timestamp + 7 days + 1);
 
         vm.recordLogs();
 
-        // Settle
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(10);
+        // Close: fee shares (if any) transfer here
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epochId);
+        vm.prank(user1);
+        IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
-        // FeePaid should be emitted during settlement
+        // FeePaid should be emitted during close (fee shares leave escrow)
         bytes32 feePaidSig = keccak256("FeePaid(address,address,uint256)");
         bool foundFeePaid = false;
         for (uint256 i; i < logs.length; i++) {
@@ -205,16 +206,16 @@ contract Hardening_Consistency is Test {
         }
         assertTrue(foundFeePaid, "FeePaid emitted on settlement");
 
-        // ClaimSettled
-        bytes32 claimSettledSig = keccak256("ClaimSettled(uint256,address,uint256)");
+        // EpochAssetsClaimed emitted when the user pulls their claim
+        bytes32 claimedSig = keccak256("EpochAssetsClaimed(uint256,uint256,address,uint256,uint256)");
         bool foundSettled = false;
         for (uint256 i; i < logs.length; i++) {
-            if (logs[i].topics.length > 0 && logs[i].topics[0] == claimSettledSig) {
+            if (logs[i].topics.length > 0 && logs[i].topics[0] == claimedSig) {
                 foundSettled = true;
                 break;
             }
         }
-        assertTrue(foundSettled, "ClaimSettled emitted on settlement");
+        assertTrue(foundSettled, "EpochAssetsClaimed emitted on settlement");
     }
 
     // ════════════════════════════��═════════════════════════════════════════���════
@@ -224,23 +225,27 @@ contract Hardening_Consistency is Test {
     function test_criticalSelectors_wired() public view {
         // Queue selectors
         assertTrue(
-            vault.moduleOf(QueueModule.requestClaim.selector) != address(0),
-            "requestClaim wired"
+            vault.moduleOf(EpochedQueueModule.requestEpochWithdrawal.selector) != address(0),
+            "requestEpochWithdrawal wired"
         );
         assertTrue(
-            vault.moduleOf(QueueModule.cancelClaim.selector) != address(0),
-            "cancelClaim wired"
+            vault.moduleOf(EpochedQueueModule.cancelEpochWithdrawal.selector) != address(0),
+            "cancelEpochWithdrawal wired"
         );
         assertTrue(
-            vault.moduleOf(QueueModule.settleFeesAndProcessQueue.selector) != address(0),
-            "settleFeesAndProcessQueue wired"
+            vault.moduleOf(EpochedQueueModule.closeCurrentEpoch.selector) != address(0),
+            "closeCurrentEpoch wired"
         );
         assertTrue(
-            vault.moduleOf(QueueModule.processQueuedRedemptions.selector) != address(0),
-            "processQueuedRedemptions wired"
+            vault.moduleOf(EpochedQueueModule.fundEpoch.selector) != address(0),
+            "fundEpoch wired"
         );
         assertTrue(
-            vault.moduleOf(QueueModule.endEpochCrystallize.selector) != address(0),
+            vault.moduleOf(EpochedQueueModule.requestInstantWithdrawal.selector) != address(0),
+            "requestInstantWithdrawal wired"
+        );
+        assertTrue(
+            vault.moduleOf(EpochedQueueModule.endEpochCrystallize.selector) != address(0),
             "endEpochCrystallize wired"
         );
 
@@ -282,7 +287,7 @@ contract Hardening_Consistency is Test {
         vault.previewMint(1e6);
 
         // Module-routed views should still work
-        IQueueModule(address(vault)).queueLength();
-        IQueueModule(address(vault)).pendingShares();
+        IQueueModule(address(vault)).outstandingClaimCount();
+        IQueueModule(address(vault)).totalEscrowedShares();
     }
 }

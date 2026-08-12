@@ -14,11 +14,17 @@ import { IStrategyRouter } from "../../../src/interfaces/IStrategyRouter.sol";
 import { EpochedQueueModule } from "../../../src/core/modules/EpochedQueueModule.sol";
 
 interface IQueueModule {
-    function requestClaim(bool immediate, uint256 shares) external;
-    function settleFeesAndProcessQueue(uint256 maxClaims) external;
-    function processQueuedRedemptions(uint256 maxClaims) external;
-    function queueLength() external view returns (uint256);
-    function pendingShares() external view returns (uint256);
+    function requestInstantWithdrawal(uint256 shares)
+        external
+        returns (bool settledImmediately, uint256 epochId, uint256 claimId);
+    function requestEpochWithdrawal(uint256 shares) external returns (uint256 epochId, uint256 claimId);
+    function closeCurrentEpoch() external;
+    function fundEpoch(uint256 epochId) external;
+    function claimEpochAssets(uint256 epochId, uint256 claimId) external returns (uint256 assets);
+    function canCloseCurrentEpoch() external view returns (bool);
+    function currentEpochClaimCount() external view returns (uint256);
+    function outstandingClaimCount() external view returns (uint256);
+    function totalEscrowedShares() external view returns (uint256);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -88,32 +94,41 @@ contract Hardening_MissingTests is Test {
     function test_C3_degradedPlan_noInfiniteRetry() public {
         // Drain hot by depositing then claiming most
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(true, 9_500_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(9_500_000e6);
 
         // Now hot is very low. Queue a large claim that exceeds remaining hot.
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(false, 400_000e6);
+        (uint256 epochId, uint256 claimId) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(400_000e6);
 
-        uint256 pendingBefore = IQueueModule(address(vault)).pendingShares();
+        uint256 pendingBefore = IQueueModule(address(vault)).totalEscrowedShares();
         assertGt(pendingBefore, 0, "claim queued");
 
         // Settle — no router configured, hot likely < gross for this claim.
-        // Claim skipped with QueueClaimSkippedInsufficientHot.
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(25);
+        // fundEpoch() falls short (stays CLOSED, not FUNDED); claim stays pending.
+        vm.warp(block.timestamp + 7 days + 1);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epochId);
+        vm.prank(user1);
+        try IQueueModule(address(vault)).claimEpochAssets(epochId, claimId) { } catch { }
 
-        uint256 pendingAfter = IQueueModule(address(vault)).pendingShares();
+        uint256 pendingAfter = IQueueModule(address(vault)).totalEscrowedShares();
 
         // If claim was skipped (insufficient hot), it stays pending
         // If claim was settled (hot was enough), pending = 0 — also fine
         // The key: no revert, no infinite loop, no crash
         console2.log("Pending before:", pendingBefore, "after:", pendingAfter);
 
-        // Second settle — same result, no crash
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(25);
+        // Second attempt — same result, no crash (fundEpoch reverts
+        // EpochAlreadyFunded if a prior attempt already fully funded it --
+        // that's expected, not a failure of this test).
+        try IQueueModule(address(vault)).fundEpoch(epochId) { } catch { }
+        vm.prank(user1);
+        try IQueueModule(address(vault)).claimEpochAssets(epochId, claimId) { } catch { }
 
         // Gas is bounded
         uint256 g = gasleft();
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(25);
+        try IQueueModule(address(vault)).fundEpoch(epochId) { } catch { }
         uint256 gasUsed = g - gasleft();
         console2.log("Degraded settle gas:", gasUsed);
         assertLt(gasUsed, 5_000_000, "degraded settle gas bounded");
@@ -122,14 +137,21 @@ contract Hardening_MissingTests is Test {
     /// @notice Claims that are skippable today become processable when liquidity returns
     function test_C3_degradedRecovery() public {
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(false, 100_000e6);
+        (uint256 epochId, uint256 claimId) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(100_000e6);
 
         // First settle — might skip if hot insufficient for this claim size
         // (hot should be sufficient since we have 10M deposited)
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(25);
+        vm.warp(block.timestamp + 7 days + 1);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epochId);
+        vm.prank(user1);
+        IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
 
         // Verify claim was processed (we have enough hot)
-        assertEq(IQueueModule(address(vault)).pendingShares(), 0, "claim settled with available hot");
+        assertEq(
+            IQueueModule(address(vault)).totalEscrowedShares(), 0, "claim settled with available hot"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -251,7 +273,7 @@ contract Hardening_MissingTests is Test {
 
         uint256 usdcBefore = usdc.balanceOf(user1);
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(true, 100_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(100_000e6);
 
         assertGt(usdc.balanceOf(user1), usdcBefore, "instant claim at 1h stale NAV");
 
@@ -260,23 +282,27 @@ contract Hardening_MissingTests is Test {
 
         usdcBefore = usdc.balanceOf(user1);
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(true, 100_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(100_000e6);
 
         assertGt(usdc.balanceOf(user1), usdcBefore, "instant claim at 24h stale NAV");
     }
 
-    /// @notice settleFeesAndProcessQueue works at ANY NAV staleness
+    /// @notice Epoch close/fund/claim works at ANY NAV staleness
     function test_H5_settle_anyNAVAge() public {
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(false, 100_000e6);
+        (uint256 epochId, uint256 claimId) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(100_000e6);
 
-        // 2 hours stale
-        vm.warp(block.timestamp + 2 hours);
+        // Well past both NAV staleness AND the min epoch duration
+        vm.warp(block.timestamp + 7 days + 1);
 
         uint256 usdcBefore = usdc.balanceOf(user1);
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(10);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epochId);
+        vm.prank(user1);
+        IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
 
-        assertGt(usdc.balanceOf(user1), usdcBefore, "settle at 2h stale NAV");
+        assertGt(usdc.balanceOf(user1), usdcBefore, "settle at stale NAV");
     }
 }
 

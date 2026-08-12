@@ -26,7 +26,7 @@ import { FixedMaturityLogicLib } from "../libraries/FixedMaturityLogicLib.sol";
 /// @notice Handles ERC4626 user-facing operations via delegatecall from CoreVault.
 /// @dev v9 changes (ExitEngineLib refactor):
 ///      - withdraw()/redeem() ALWAYS revert AsyncWithdrawalRequired
-///      - Users must use QueueModule.requestClaim() for all exits
+///      - Users must use EpochedQueueModule.requestInstantWithdrawal()/requestEpochWithdrawal() for all exits
 ///      - forceWithdraw/forceWithdrawAll remain instant (fee via ExitEngineLib)
 ///      - deposit/mint unchanged (O(1), no routing)
 ///
@@ -140,7 +140,7 @@ contract ERC4626Module {
     // WITHDRAWAL FUNCTIONS — ALWAYS REVERT (queued protocol)
     // ═══════════════════════════════════════════════════════════════════════════════
     // ERC4626 compliance: maxWithdraw/maxRedeem return 0, so these MUST revert.
-    // Users MUST use QueueModule.requestClaim() for all exits.
+    // Users MUST use EpochedQueueModule.requestInstantWithdrawal()/requestEpochWithdrawal() for all exits.
 
     /// @notice DISABLED — use requestClaim() instead
     function withdraw(uint256, address, address) external pure returns (uint256) {

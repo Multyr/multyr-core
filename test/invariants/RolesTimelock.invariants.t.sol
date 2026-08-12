@@ -5,7 +5,7 @@ import "forge-std/Test.sol";
 import { TimelockController } from "@openzeppelin/contracts/governance/TimelockController.sol";
 import { CoreVault } from "../../src/core/CoreVault.sol";
 import { AdminModule } from "../../src/core/modules/AdminModule.sol";
-import { QueueModule } from "../../src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "../../src/core/modules/EpochedQueueModule.sol";
 import { IAdminModule } from "../../src/interfaces/IAdminModule.sol";
 import { StrategyRouter } from "../../src/core/modules/StrategyRouter.sol";
 import { BufferManager } from "../../src/core/modules/BufferManager.sol";
@@ -55,7 +55,7 @@ contract RolesTimelockInvariants is Test {
     // ═══════════════════════════════════════════════════════════════════════════════
     CoreVault vault;
     AdminModule adminModule;
-    QueueModule queueModule;
+    EpochedQueueModule queueModule;
     StrategyRouter router;
     BufferManager buffer;
     StrategyHealthRegistry healthReg;
@@ -119,7 +119,7 @@ contract RolesTimelockInvariants is Test {
 
         // Deploy modules
         adminModule = new AdminModule();
-        queueModule = new QueueModule();
+        queueModule = new EpochedQueueModule();
 
         // Deploy components
         IBufferManager.BufferConfig memory bufferConfig = IBufferManager.BufferConfig({
@@ -180,7 +180,7 @@ contract RolesTimelockInvariants is Test {
         bytes4[] memory adminOwnerSels = SelectorLib.getAdminModuleOwnerSelectors();
         bytes4[] memory adminViewSels = SelectorLib.getAdminModuleViewSelectors();
 
-        // Wire QueueModule (PUBLIC)
+        // Wire EpochedQueueModule (PUBLIC)
         address[] memory queueModules = new address[](queueSels.length);
         uint8[] memory queueRoles = new uint8[](queueSels.length);
         for (uint256 i = 0; i < queueSels.length; i++) {
@@ -189,7 +189,7 @@ contract RolesTimelockInvariants is Test {
         }
         vault.setModulesBatch(queueSels, queueModules, queueRoles);
 
-        // Wire QueueModule views (PUBLIC)
+        // Wire EpochedQueueModule views (PUBLIC)
         address[] memory queueViewModules = new address[](queueViewSels.length);
         uint8[] memory queueViewRoles = new uint8[](queueViewSels.length);
         for (uint256 i = 0; i < queueViewSels.length; i++) {
@@ -276,12 +276,12 @@ contract RolesTimelockInvariants is Test {
         }
     }
 
-    /// @notice QueueModule selectors must be PUBLIC
+    /// @notice EpochedQueueModule selectors must be PUBLIC
     function test_queueSelectorsArePublic() public view {
         bytes4[] memory selectors = SelectorLib.getQueueModuleSelectors();
 
         for (uint256 i = 0; i < selectors.length; i++) {
-            assertEq(vault.roleOf(selectors[i]), ROLE_PUBLIC, "QueueModule selector must be PUBLIC");
+            assertEq(vault.roleOf(selectors[i]), ROLE_PUBLIC, "EpochedQueueModule selector must be PUBLIC");
         }
     }
 

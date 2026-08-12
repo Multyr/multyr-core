@@ -355,7 +355,7 @@ contract FixedMaturityModule {
     /// @dev Apply final performance fee using the immutable snapshot in finalPerformanceFeeBaseAssets.
     ///      CEI pattern: set applied=true BEFORE any external calls.
     ///
-    ///      This mints fee shares the same way QueueModule._crystallize() does (preview
+    ///      This mints fee shares the same way EpochedQueueModule._crystallize() does (preview
     ///      deposit, mint to feeCollector), but it is NOT a duplicate of that function and
     ///      does not need its HWM-monotonicity or min-crystallize-interval fixes:
     ///      - No persistent high-water mark: profit is `finalPerformanceFeeBaseAssets -
@@ -382,7 +382,7 @@ contract FixedMaturityModule {
         uint256 feeAssets = FixedPoint.mulWadDown(profit, f.perfRateX);
         if (feeAssets == 0) return;
 
-        // Mint fee shares to feeCollector — same pattern as _crystallize() in QueueModule.
+        // Mint fee shares to feeCollector — same pattern as _crystallize() in EpochedQueueModule.
         uint256 feeShares = _previewDeposit(feeAssets);
         if (feeShares == 0) return;
 
