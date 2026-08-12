@@ -6,7 +6,7 @@ import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/I
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { CoreVault } from "src/core/CoreVault.sol";
 import { SelectorLib } from "src/core/libraries/SelectorLib.sol";
-import { QueueModule } from "src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "src/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "src/core/modules/AdminModule.sol";
 import { MockParamsProvider } from "test/helpers/MockParamsProvider.sol";
 import { ModuleSetter } from "test/helpers/ModuleSetter.sol";
@@ -128,7 +128,7 @@ contract CoreVault_Reentrancy_Test is Test {
     CoreVault public router;
     MaliciousToken public malToken;
     MockParamsProvider public params;
-    QueueModule public queueModule;
+    EpochedQueueModule public queueModule;
     AdminModule public adminModule;
 
     address public owner = address(this);
@@ -154,7 +154,7 @@ contract CoreVault_Reentrancy_Test is Test {
         router = _harness;
 
         // Deploy and configure modules
-        queueModule = new QueueModule();
+        queueModule = new EpochedQueueModule();
         adminModule = new AdminModule();
 
         bytes4[] memory queueSels = SelectorLib.getQueueModuleSelectors();

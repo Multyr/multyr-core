@@ -8,20 +8,22 @@ import { CoreHarness } from "../../helpers/CoreHarness.sol";
 import { ERC20Mock } from "../../../src/mocks/ERC20Mock.sol";
 import { MockParamsProvider } from "../../helpers/MockParamsProvider.sol";
 import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTests.sol";
-import { QueueModule } from "../../../src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "../../../src/core/modules/EpochedQueueModule.sol";
 import { SelectorLib } from "../../../src/core/libraries/SelectorLib.sol";
 import { ModuleSetter } from "../../helpers/ModuleSetter.sol";
 import { ExitEngineLib } from "../../../src/core/libraries/ExitEngineLib.sol";
 
 interface IQueueModule {
-    function requestClaim(bool immediate, uint256 shares) external;
+    function requestInstantWithdrawal(uint256 shares)
+        external
+        returns (bool settledImmediately, uint256 epochId, uint256 claimId);
 }
 
 /**
  * @title FuzzWithdraw_NetExact
- * @notice Audit-grade fuzz: requestClaim(true) transfers correct USDC to user
+ * @notice Audit-grade fuzz: requestInstantWithdrawal() transfers correct USDC to user
  * @dev withdraw() always reverts AsyncWithdrawalRequired in queued protocol.
- *      This test validates instant claim via requestClaim(true).
+ *      This test validates instant claim via requestInstantWithdrawal().
  *
  * Invariants:
  * 1. shares consumed == requested shares
@@ -32,7 +34,7 @@ interface IQueueModule {
 contract FuzzWithdraw_NetExact is Test {
     CoreHarness internal vault;
     ERC20Mock internal usdc;
-    QueueModule internal queueModule;
+    EpochedQueueModule internal queueModule;
 
     address internal user = address(0xBEEF);
     address internal treasury = address(0xFEE);
@@ -52,8 +54,8 @@ contract FuzzWithdraw_NetExact is Test {
         MockBufferManagerForTests mockBM = new MockBufferManagerForTests(address(vault));
         vault.setBufferManagerUnsafe(address(mockBM));
 
-        // Wire QueueModule
-        queueModule = new QueueModule();
+        // Wire EpochedQueueModule
+        queueModule = new EpochedQueueModule();
         bytes4[] memory queueSels = SelectorLib.getQueueModuleSelectors();
         ModuleSetter.setModulesSame(
             address(vault), queueSels, address(queueModule), SelectorLib.ROLE_PUBLIC
@@ -80,7 +82,7 @@ contract FuzzWithdraw_NetExact is Test {
         vm.stopPrank();
     }
 
-    /// @notice requestClaim(true) instant claim invariants
+    /// @notice requestInstantWithdrawal() instant claim invariants
     function testFuzz_requestClaimInstant_invariants(uint256 shares, uint16 witBps) public {
         witBps = uint16(bound(uint256(witBps), 0, 500)); // 0-5%
         shares = bound(shares, 1e6, 1_000_000e6); // 1 .. 1M shares
@@ -101,7 +103,7 @@ contract FuzzWithdraw_NetExact is Test {
         uint256 usdcBefore = usdc.balanceOf(user);
 
         // Instant claim
-        IQueueModule(address(vault)).requestClaim(true, shares);
+        IQueueModule(address(vault)).requestInstantWithdrawal(shares);
 
         uint256 sharesAfter = vault.balanceOf(user);
         uint256 supplyAfter = vault.totalSupply();

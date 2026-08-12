@@ -14,10 +14,17 @@ import { MockReferralBinding } from "../../mocks/MockReferralBinding.sol";
 import { ExitEngineLib } from "../../../src/core/libraries/ExitEngineLib.sol";
 
 interface IQueueModule {
-    function requestClaim(bool immediate, uint256 shares) external;
-    function settleFeesAndProcessQueue(uint256 maxClaims) external;
-    function pendingShares() external view returns (uint256);
-    function queueLength() external view returns (uint256);
+    function requestInstantWithdrawal(uint256 shares)
+        external
+        returns (bool settledImmediately, uint256 epochId, uint256 claimId);
+    function requestEpochWithdrawal(uint256 shares)
+        external
+        returns (uint256 epochId, uint256 claimId);
+    function closeCurrentEpoch() external;
+    function fundEpoch(uint256 epochId) external;
+    function claimEpochAssets(uint256 epochId, uint256 claimId) external returns (uint256 assets);
+    function totalEscrowedShares() external view returns (uint256);
+    function outstandingClaimCount() external view returns (uint256);
 }
 
 interface IForceWithdrawAll {
@@ -181,19 +188,24 @@ contract ExitEngine_DepositRouter is Test {
         // INSTANT claim — user0
         uint256 user0UsdcBefore = usdc.balanceOf(users[0]);
         vm.prank(users[0]);
-        IQueueModule(address(vault)).requestClaim(true, 5_000_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(5_000_000e6);
         uint256 user0Received = usdc.balanceOf(users[0]) - user0UsdcBefore;
         assertGt(user0Received, 0, "instant claim: user0 received USDC");
         console2.log("Instant claim net:", user0Received / 1e6, "USDC");
 
         // QUEUED claim — user1
         vm.prank(users[1]);
-        IQueueModule(address(vault)).requestClaim(false, 5_000_000e6);
-        assertEq(IQueueModule(address(vault)).queueLength(), 1, "1 queued claim");
+        (uint256 epochId1, uint256 claimId1) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(5_000_000e6);
+        assertEq(IQueueModule(address(vault)).outstandingClaimCount(), 1, "1 queued claim");
 
-        // Keeper settle
+        // Keeper settle: close + fund the epoch, then user1 self-claims
         uint256 user1UsdcBefore = usdc.balanceOf(users[1]);
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(10);
+        vm.warp(block.timestamp + 7 days + 1);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epochId1);
+        vm.prank(users[1]);
+        IQueueModule(address(vault)).claimEpochAssets(epochId1, claimId1);
         uint256 user1Received = usdc.balanceOf(users[1]) - user1UsdcBefore;
         assertGt(user1Received, 0, "queued settle: user1 received USDC");
         console2.log("Queued settle net:", user1Received / 1e6, "USDC");
@@ -239,19 +251,19 @@ contract ExitEngine_DepositRouter is Test {
 
         // Phase 2: Exhaust cap (10% of 100M = 10M)
         vm.prank(users[0]);
-        IQueueModule(address(vault)).requestClaim(true, 9_000_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(9_000_000e6);
 
-        // Next instant should queue
-        uint256 pendingBefore = IQueueModule(address(vault)).pendingShares();
+        // Next instant should queue (cap exhausted -> falls back to the epoch queue)
         vm.prank(users[1]);
-        IQueueModule(address(vault)).requestClaim(true, 5_000_000e6);
-        uint256 pendingAfter = IQueueModule(address(vault)).pendingShares();
+        (bool settledImmediately, uint256 epochId1, uint256 claimId1) =
+            IQueueModule(address(vault)).requestInstantWithdrawal(5_000_000e6);
 
-        if (pendingAfter > pendingBefore) {
+        if (!settledImmediately) {
             console2.log("Cap exhausted - claim queued");
         }
 
-        // Phase 3: Epoch rollover
+        // Phase 3: Epoch rollover (both the cap epoch and the settlement queue
+        // epoch default to a 7-day duration)
         vm.warp(block.timestamp + 7 days + 1);
 
         // New deposit via router after epoch
@@ -264,14 +276,20 @@ contract ExitEngine_DepositRouter is Test {
         // Fresh cap — instant claim works
         uint256 usdcBefore = usdc.balanceOf(users[3]);
         vm.prank(users[3]);
-        IQueueModule(address(vault)).requestClaim(true, 3_000_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(3_000_000e6);
         assertGt(usdc.balanceOf(users[3]), usdcBefore, "instant claim after epoch + router deposit");
 
-        // Phase 4: Settle any remaining queue
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(50);
+        // Phase 4: Settle any remaining queue -- close + fund the epoch the
+        // fallback claim (if any) landed in, then the user self-claims.
+        if (!settledImmediately) {
+            IQueueModule(address(vault)).closeCurrentEpoch();
+            IQueueModule(address(vault)).fundEpoch(epochId1);
+            vm.prank(users[1]);
+            IQueueModule(address(vault)).claimEpochAssets(epochId1, claimId1);
+        }
 
         console2.log("Final TVL:", vault.totalAssets() / 1e6);
-        console2.log("Final queue:", IQueueModule(address(vault)).queueLength());
+        console2.log("Outstanding claims:", IQueueModule(address(vault)).outstandingClaimCount());
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

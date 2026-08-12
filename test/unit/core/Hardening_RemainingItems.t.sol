@@ -11,11 +11,17 @@ import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTes
 import { VaultUpkeep } from "../../../src/automation/VaultUpkeep.sol";
 
 interface IQueueModule {
-    function requestClaim(bool immediate, uint256 shares) external;
-    function settleFeesAndProcessQueue(uint256 maxClaims) external;
-    function pendingShares() external view returns (uint256);
-    function queueLength() external view returns (uint256);
-    function compactQueue() external;
+    function requestInstantWithdrawal(uint256 shares)
+        external
+        returns (bool settledImmediately, uint256 epochId, uint256 claimId);
+    function requestEpochWithdrawal(uint256 shares)
+        external
+        returns (uint256 epochId, uint256 claimId);
+    function closeCurrentEpoch() external;
+    function fundEpoch(uint256 epochId) external;
+    function claimEpochAssets(uint256 epochId, uint256 claimId) external returns (uint256 assets);
+    function totalEscrowedShares() external view returns (uint256);
+    function outstandingClaimCount() external view returns (uint256);
 }
 
 /// @title Hardening: C1 no-arbitrage invariant, M3 failure counter reset, queue compaction
@@ -108,44 +114,55 @@ contract Hardening_RemainingItems is Test {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // QUEUE: compaction off-path, FIFO preserved, no zombie
+    // QUEUE: epoch close/fund/claim cycle preserves invariants
+    // (No compaction in the epoch model -- epochs are immutable once closed,
+    // there is no live FIFO array to compact.)
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// @notice Queue settle + compaction cycle preserves invariants
+    /// @notice Queue close + fund + claim cycle preserves invariants
     function test_queue_settleAndCompact() public {
-        // 10 users queue claims
+        // 10 users queue claims into the same open epoch
+        address[10] memory claimants;
+        uint256[10] memory claimIds;
+        uint256 epochId;
         for (uint256 i = 0; i < 10; i++) {
             address u = address(uint160(0xB000 + i));
+            claimants[i] = u;
             usdc._mint(u, 1_000_000e6);
             vm.startPrank(u);
             usdc.approve(address(vault), type(uint256).max);
             vault.deposit(1_000_000e6, u);
-            IQueueModule(address(vault)).requestClaim(false, 500_000e6);
+            (epochId, claimIds[i]) = IQueueModule(address(vault)).requestEpochWithdrawal(500_000e6);
             vm.stopPrank();
         }
 
-        assertEq(IQueueModule(address(vault)).queueLength(), 10, "10 claims queued");
+        assertEq(IQueueModule(address(vault)).outstandingClaimCount(), 10, "10 claims queued");
 
-        // Settle 5
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(5);
+        // Close + fund the epoch (single liquidity pull covers all 10 claims)
+        vm.warp(block.timestamp + 7 days + 1);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epochId);
 
-        // Queue length should reflect settled claims removed from active count
-        uint256 ql = IQueueModule(address(vault)).queueLength();
-        console2.log("Queue after settle 5:", ql);
+        // Settle 5 (each user pulls their own claim -- pull-based, not keeper-push)
+        for (uint256 i = 0; i < 5; i++) {
+            vm.prank(claimants[i]);
+            IQueueModule(address(vault)).claimEpochAssets(epochId, claimIds[i]);
+        }
 
-        // Compact (off-path, separate call)
-        IQueueModule(address(vault)).compactQueue();
-
-        uint256 qlAfterCompact = IQueueModule(address(vault)).queueLength();
-        console2.log("Queue after compact:", qlAfterCompact);
+        uint256 ql = IQueueModule(address(vault)).outstandingClaimCount();
+        console2.log("Outstanding claims after settling 5:", ql);
+        assertEq(ql, 5, "5 claims remain outstanding");
 
         // Settle remaining
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(10);
+        for (uint256 i = 5; i < 10; i++) {
+            vm.prank(claimants[i]);
+            IQueueModule(address(vault)).claimEpochAssets(epochId, claimIds[i]);
+        }
 
-        assertEq(IQueueModule(address(vault)).pendingShares(), 0, "all claims settled");
+        assertEq(IQueueModule(address(vault)).totalEscrowedShares(), 0, "all claims settled");
     }
 
-    /// @notice Skipped claims are retried in next scan (not permanently lost)
+    /// @notice Fallback-to-queue claims are retrievable once the epoch is funded
     function test_queue_instantFallbackBecomesStandard() public {
         // User deposits and queues immediate claim that exceeds cap
         vm.prank(user1);
@@ -153,22 +170,28 @@ contract Hardening_RemainingItems is Test {
 
         // Exhaust cap with first instant claim
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(true, 4_000_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(4_000_000e6);
 
-        // Second instant claim falls back to queue — becomes STANDARD (immediate=false)
+        // Second instant claim falls back to queue — becomes a standard epoch claim
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(true, 3_000_000e6);
+        (bool settledImmediately, uint256 epochId, uint256 claimId) =
+            IQueueModule(address(vault)).requestInstantWithdrawal(3_000_000e6);
 
-        uint256 pending = IQueueModule(address(vault)).pendingShares();
+        assertFalse(settledImmediately, "claim queued due to cap");
+        uint256 pending = IQueueModule(address(vault)).totalEscrowedShares();
         assertGt(pending, 0, "claim queued due to cap");
 
-        // Settle: since claim is now STANDARD (no cap check), it settles immediately
-        // (if hot liquidity is sufficient)
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(10);
-        uint256 pendingAfter = IQueueModule(address(vault)).pendingShares();
+        // Settle: close + fund the epoch, then user1 self-claims (standard claims
+        // have no cap check, only the epoch's liquidity/maturity gates)
+        vm.warp(block.timestamp + 7 days + 1);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epochId);
+        vm.prank(user1);
+        IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
+        uint256 pendingAfter = IQueueModule(address(vault)).totalEscrowedShares();
 
         // Claim should be settled (standard claims have no cap, only lock period)
-        assertEq(pendingAfter, 0, "standard claim settled immediately (no cap)");
+        assertEq(pendingAfter, 0, "standard claim settled after epoch funded");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

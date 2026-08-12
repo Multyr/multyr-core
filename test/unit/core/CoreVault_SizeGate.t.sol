@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import { Test } from "forge-std/Test.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { CoreVault } from "src/core/CoreVault.sol";
-import { QueueModule } from "src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "src/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "src/core/modules/AdminModule.sol";
 import { ERC4626Module } from "src/core/modules/ERC4626Module.sol";
 import { BufferManager } from "src/core/modules/BufferManager.sol";
@@ -81,11 +81,11 @@ contract CoreVault_SizeGate_Test is Test {
     // ═══════════════════════════════════════════════════════════════════════════════
 
     function test_sizeGate_queueModule_extcodesize_under_16KB() public {
-        QueueModule module = new QueueModule();
+        EpochedQueueModule module = new EpochedQueueModule();
         uint256 runtimeSize = _getExtcodesize(address(module));
 
-        emit log_named_uint("QueueModule runtime bytecode", runtimeSize);
-        assertLt(runtimeSize, MODULE_TARGET_SIZE, "QueueModule exceeds 16KB target");
+        emit log_named_uint("EpochedQueueModule runtime bytecode", runtimeSize);
+        assertLt(runtimeSize, MODULE_TARGET_SIZE, "EpochedQueueModule exceeds 16KB target");
     }
 
     function test_sizeGate_adminModule_extcodesize_under_16KB() public {
@@ -135,7 +135,7 @@ contract CoreVault_SizeGate_Test is Test {
             feeCollector,
             address(0x999)
         );
-        QueueModule queueModule = new QueueModule();
+        EpochedQueueModule queueModule = new EpochedQueueModule();
         AdminModule adminModule = new AdminModule();
         ERC4626Module erc4626Module = new ERC4626Module();
         StrategyRouter router = new StrategyRouter(owner, address(0x100), address(0x200));
@@ -152,7 +152,7 @@ contract CoreVault_SizeGate_Test is Test {
         uint256 routerSize = _getExtcodesize(address(router));
 
         emit log_named_uint("CoreVault      ", coreVaultSize);
-        emit log_named_uint("QueueModule    ", queueSize);
+        emit log_named_uint("EpochedQueueModule", queueSize);
         emit log_named_uint("AdminModule    ", adminSize);
         emit log_named_uint("ERC4626Module  ", erc4626Size);
         emit log_named_uint("StrategyRouter ", routerSize);
@@ -166,7 +166,7 @@ contract CoreVault_SizeGate_Test is Test {
 
         // Assertions
         assertLt(coreVaultSize, EIP170_LIMIT, "CoreVault EXCEEDS EIP-170");
-        assertLt(queueSize, MODULE_TARGET_SIZE, "QueueModule over 16KB");
+        assertLt(queueSize, MODULE_TARGET_SIZE, "EpochedQueueModule over 16KB");
         assertLt(adminSize, MODULE_TARGET_SIZE, "AdminModule over 16KB");
         assertLt(erc4626Size, MODULE_TARGET_SIZE, "ERC4626Module over 16KB");
         assertLt(routerSize, EIP170_LIMIT, "StrategyRouter EXCEEDS EIP-170");

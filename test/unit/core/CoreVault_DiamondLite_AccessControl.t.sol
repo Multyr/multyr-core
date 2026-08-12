@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import { Test } from "forge-std/Test.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { CoreVault } from "src/core/CoreVault.sol";
-import { QueueModule } from "src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "src/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "src/core/modules/AdminModule.sol";
 import { SelectorLib } from "src/core/libraries/SelectorLib.sol";
 import { Events } from "src/core/libraries/Events.sol";
@@ -16,14 +16,16 @@ import { MockBufferManagerForTests } from "test/helpers/MockBufferManagerForTest
 import { ExitEngineLib } from "src/core/libraries/ExitEngineLib.sol";
 
 interface IQueueModule_AC {
-    function requestClaim(bool immediate, uint256 shares) external;
+    function requestInstantWithdrawal(uint256 shares)
+        external
+        returns (bool settledImmediately, uint256 epochId, uint256 claimId);
 }
 
 /// @title CoreVault Access Control Tests
 /// @notice Tests for timelock ownership, guardian restrictions, and role enforcement
 contract CoreVault_AccessControl_Test is Test {
     CoreVault public router;
-    QueueModule public queueModule;
+    EpochedQueueModule public queueModule;
     AdminModule public adminModule;
     ERC20Mock public usdc;
     MockParamsProvider public params;
@@ -58,7 +60,7 @@ contract CoreVault_AccessControl_Test is Test {
         router = _harness;
 
         // Deploy modules
-        queueModule = new QueueModule();
+        queueModule = new EpochedQueueModule();
         adminModule = new AdminModule();
 
         // Configure routing from timelock
@@ -389,9 +391,9 @@ contract CoreVault_AccessControl_Test is Test {
         usdc.approve(address(router), 1000e6);
         router.deposit(1000e6, user);
 
-        // redeem() always reverts now; verify requestClaim works for any user
+        // redeem() always reverts now; verify requestInstantWithdrawal works for any user
         uint256 shares = router.balanceOf(user);
-        IQueueModule_AC(address(router)).requestClaim(true, shares);
+        IQueueModule_AC(address(router)).requestInstantWithdrawal(shares);
         // Just verify it doesn't revert (role check passes)
         vm.stopPrank();
     }

@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import { Test } from "forge-std/Test.sol";
 import { CoreVault } from "../../../src/core/CoreVault.sol";
 import { AdminModule } from "../../../src/core/modules/AdminModule.sol";
-import { QueueModule } from "../../../src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "../../../src/core/modules/EpochedQueueModule.sol";
 import { IAdminModule } from "../../../src/interfaces/IAdminModule.sol";
 import { IQueueModule } from "../../../src/interfaces/IQueueModule.sol";
 import { SelectorLib } from "../../../src/core/libraries/SelectorLib.sol";
@@ -24,7 +24,7 @@ import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTes
 contract CoreVaultFeeMixinTest is Test {
     CoreVault public vault;
     AdminModule public adminModule;
-    QueueModule public queueModule;
+    EpochedQueueModule public queueModule;
     MockUSDC public usdc;
     address public vaultAddr;
 
@@ -59,9 +59,9 @@ contract CoreVaultFeeMixinTest is Test {
         vault = _harness;
         vaultAddr = address(vault);
 
-        // Deploy AdminModule and QueueModule
+        // Deploy AdminModule and EpochedQueueModule
         adminModule = new AdminModule();
-        queueModule = new QueueModule();
+        queueModule = new EpochedQueueModule();
 
         // Wire AdminModule owner selectors
         bytes4[] memory adminOwnerSelectors = SelectorLib.getAdminModuleOwnerSelectors();
@@ -76,7 +76,7 @@ contract CoreVaultFeeMixinTest is Test {
             address(vault), adminViewSelectors, address(adminModule), ROLE_PUBLIC
         );
 
-        // Wire QueueModule selectors (PUBLIC)
+        // Wire EpochedQueueModule selectors (PUBLIC)
         bytes4[] memory queueSels = SelectorLib.getQueueModuleSelectors();
         ModuleSetter.setModulesSame(
             vaultAddr, queueSels, address(queueModule), ROLE_PUBLIC
@@ -173,8 +173,8 @@ contract CoreVaultFeeMixinTest is Test {
         vm.stopPrank();
     }
 
-    /// @notice Test 5: Verify fee rounding on tiny amounts (withdraw via requestClaim)
-    /// @dev withdraw() always reverts with AsyncWithdrawalRequired, so we use requestClaim.
+    /// @notice Test 5: Verify fee rounding on tiny amounts (withdraw via requestInstantWithdrawal)
+    /// @dev withdraw() always reverts with AsyncWithdrawalRequired, so we use requestInstantWithdrawal.
     ///      Fee is observable via share transfer to feeCollector.
     function test_fee_rounding_edge_cases_tiny_withdraw_amounts() public {
         // Deposit first
@@ -182,12 +182,12 @@ contract CoreVaultFeeMixinTest is Test {
         usdc.approve(address(vault), 1_000e6);
         vault.deposit(1000e6, user);
 
-        // Withdraw ~1 USDC worth of shares with 0.5% fee via requestClaim
+        // Withdraw ~1 USDC worth of shares with 0.5% fee via requestInstantWithdrawal
         uint256 shares = vault.previewWithdraw(1e6);
         uint256 assetsBefore = usdc.balanceOf(user);
         uint256 feeSharesBefore = vault.balanceOf(treasury);
 
-        IQueueModule(vaultAddr).requestClaim(true, shares);
+        IQueueModule(vaultAddr).requestInstantWithdrawal(shares);
         uint256 assetsReceived = usdc.balanceOf(user) - assetsBefore;
         uint256 feeSharesAfter = vault.balanceOf(treasury);
 
@@ -245,11 +245,11 @@ contract CoreVaultFeeMixinTest is Test {
         assertEq(shares, 10_000e6, "No deposit fee");
         assertEq(vault.balanceOf(treasury), treasurySharesBefore, "Treasury unchanged");
 
-        // Withdraw with zero fee via requestClaim
+        // Withdraw with zero fee via requestInstantWithdrawal
         uint256 sharesToClaim = vault.previewWithdraw(1_000e6);
         uint256 assetsBefore = usdc.balanceOf(user);
         uint256 treasurySharesMid = vault.balanceOf(treasury);
-        IQueueModule(vaultAddr).requestClaim(true, sharesToClaim);
+        IQueueModule(vaultAddr).requestInstantWithdrawal(sharesToClaim);
         uint256 assetsReceived = usdc.balanceOf(user) - assetsBefore;
 
         assertEq(assetsReceived, 1_000e6, "No withdraw fee");

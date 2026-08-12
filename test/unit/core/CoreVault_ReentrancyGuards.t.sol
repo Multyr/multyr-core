@@ -6,7 +6,7 @@ import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/I
 import { CoreVault } from "../../../src/core/CoreVault.sol";
 import { ERC20Mock } from "../../../src/mocks/ERC20Mock.sol";
 import { MockParamsProvider } from "../../helpers/MockParamsProvider.sol";
-import { QueueModule } from "src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "src/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "src/core/modules/AdminModule.sol";
 import { IQueueModule } from "src/interfaces/IQueueModule.sol";
 import { IAdminModule } from "src/interfaces/IAdminModule.sol";
@@ -44,7 +44,7 @@ import { MockBufferManagerForTests } from "test/helpers/MockBufferManagerForTest
 contract CoreVault_ReentrancyGuards is Test {
     CoreVault internal vault;
     ERC20Mock internal usdc;
-    QueueModule internal queueModule;
+    EpochedQueueModule internal queueModule;
     AdminModule internal adminModule;
 
     address internal owner = address(0xA11CE);
@@ -74,7 +74,7 @@ contract CoreVault_ReentrancyGuards is Test {
         vault = _harness;
 
         // Deploy and configure modules
-        queueModule = new QueueModule();
+        queueModule = new EpochedQueueModule();
         adminModule = new AdminModule();
 
         vm.startPrank(owner);
@@ -121,14 +121,14 @@ contract CoreVault_ReentrancyGuards is Test {
         vm.prank(user1);
         vault.deposit(100_000e6, user1);
 
-        // Multiple requestClaim(true) should work (withdraw/redeem always revert AsyncWithdrawalRequired)
+        // Multiple requestInstantWithdrawal() should work (withdraw/redeem always revert AsyncWithdrawalRequired)
         vm.startPrank(user1);
-        IQueueModule(address(vault)).requestClaim(true, vault.previewWithdraw(10_000e6));
-        IQueueModule(address(vault)).requestClaim(true, vault.previewWithdraw(20_000e6));
-        IQueueModule(address(vault)).requestClaim(true, vault.previewWithdraw(30_000e6));
+        IQueueModule(address(vault)).requestInstantWithdrawal(vault.previewWithdraw(10_000e6));
+        IQueueModule(address(vault)).requestInstantWithdrawal(vault.previewWithdraw(20_000e6));
+        IQueueModule(address(vault)).requestInstantWithdrawal(vault.previewWithdraw(30_000e6));
         vm.stopPrank();
 
-        assertTrue(true, "all requestClaims succeeded");
+        assertTrue(true, "all requestInstantWithdrawals succeeded");
     }
 
     function test_sequential_mints_work() public {
@@ -151,23 +151,23 @@ contract CoreVault_ReentrancyGuards is Test {
         vm.prank(user1);
         vault.deposit(100_000e6, user1);
 
-        // Multiple requestClaim(true) should work (redeem always reverts AsyncWithdrawalRequired)
+        // Multiple requestInstantWithdrawal() should work (redeem always reverts AsyncWithdrawalRequired)
         vm.startPrank(user1);
-        IQueueModule(address(vault)).requestClaim(true, 10_000e6);
-        IQueueModule(address(vault)).requestClaim(true, 20_000e6);
-        IQueueModule(address(vault)).requestClaim(true, 30_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(10_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(20_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(30_000e6);
         vm.stopPrank();
 
-        assertTrue(true, "all requestClaims succeeded");
+        assertTrue(true, "all requestInstantWithdrawals succeeded");
     }
 
     function test_mixed_operations_sequential() public {
         vm.startPrank(user1);
 
         vault.deposit(50_000e6, user1);
-        IQueueModule(address(vault)).requestClaim(true, vault.previewWithdraw(10_000e6));
+        IQueueModule(address(vault)).requestInstantWithdrawal(vault.previewWithdraw(10_000e6));
         vault.mint(5_000e6, user1);
-        IQueueModule(address(vault)).requestClaim(true, 3_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(3_000e6);
         vault.deposit(20_000e6, user1);
 
         vm.stopPrank();
@@ -203,7 +203,7 @@ contract CoreVault_ReentrancyGuards is Test {
 
         uint256 claimShares = vault.previewWithdraw(10_000e6);
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(true, claimShares);
+        IQueueModule(address(vault)).requestInstantWithdrawal(claimShares);
 
         uint256 shares1After = vault.balanceOf(user1);
 
@@ -265,11 +265,11 @@ contract CoreVault_ReentrancyGuards is Test {
 
         uint256 claimShares = vault.previewWithdraw(20_000e6);
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(true, claimShares);
+        IQueueModule(address(vault)).requestInstantWithdrawal(claimShares);
 
         uint256 assetsAfterClaim = vault.totalAssets();
         // Assets decrease by approximately the claimed amount (exact depends on fee)
-        assertLt(assetsAfterClaim, assetsAfterDeposit, "assets decreased by requestClaim");
+        assertLt(assetsAfterClaim, assetsAfterDeposit, "assets decreased by requestInstantWithdrawal");
     }
 
     function test_no_phantom_shares_created() public {
@@ -284,7 +284,7 @@ contract CoreVault_ReentrancyGuards is Test {
 
         uint256 claimShares = vault.previewWithdraw(5_000e6);
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(true, claimShares);
+        IQueueModule(address(vault)).requestInstantWithdrawal(claimShares);
 
         // Total supply should have increased from deposits and decreased from claim
         uint256 totalSupplyAfter = vault.totalSupply();
@@ -298,11 +298,11 @@ contract CoreVault_ReentrancyGuards is Test {
     function test_many_sequential_operations_no_corruption() public {
         vm.startPrank(user1);
 
-        // 20 operations: deposit + requestClaim(true)
+        // 20 operations: deposit + requestInstantWithdrawal()
         for (uint256 i = 0; i < 10; i++) {
             vault.deposit(1000e6, user1);
             uint256 claimShares = vault.previewWithdraw(500e6);
-            IQueueModule(address(vault)).requestClaim(true, claimShares);
+            IQueueModule(address(vault)).requestInstantWithdrawal(claimShares);
         }
 
         vm.stopPrank();

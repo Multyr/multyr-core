@@ -30,7 +30,7 @@ contract CoreVault_ERC4626 is BaseVaultTest {
         uint256 assets = amt / 2;
         uint256 expectedShares = vault.previewWithdraw(assets);
         assertGt(expectedShares, 0, "previewWithdraw should return non-zero shares");
-        // withdraw() now always reverts — users must use requestClaim(true)
+        // withdraw() now always reverts — users must use requestInstantWithdrawal()
         vm.expectRevert(ExitEngineLib.AsyncWithdrawalRequired.selector);
         CoreAggregatorVaultLike(address(vaultAddr)).withdraw(assets, user, user);
         vm.stopPrank();

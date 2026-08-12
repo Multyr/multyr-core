@@ -5,7 +5,7 @@ import { Test } from "forge-std/Test.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { CoreVault } from "src/core/CoreVault.sol";
-import { QueueModule } from "src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "src/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "src/core/modules/AdminModule.sol";
 import { ERC4626Module } from "src/core/modules/ERC4626Module.sol";
 import { SelectorLib } from "src/core/libraries/SelectorLib.sol";
@@ -17,7 +17,9 @@ import { CoreHarness } from "test/helpers/CoreHarness.sol";
 import { MockBufferManagerForTests } from "test/helpers/MockBufferManagerForTests.sol";
 
 interface IQueueModule {
-    function requestClaim(bool immediate, uint256 shares) external;
+    function requestInstantWithdrawal(uint256 shares)
+        external
+        returns (bool settledImmediately, uint256 epochId, uint256 claimId);
 }
 
 /// @title CoreVault ERC4626 Golden Tests
@@ -27,7 +29,7 @@ contract CoreVault_ERC4626_Test is Test {
     CoreVault public vault;
     ERC20Mock public usdc;
     MockParamsProvider public params;
-    QueueModule public queueModule;
+    EpochedQueueModule public queueModule;
     AdminModule public adminModule;
 
     address public owner = address(this);
@@ -62,7 +64,7 @@ contract CoreVault_ERC4626_Test is Test {
         vault = _harness;
 
         // Deploy and configure modules
-        queueModule = new QueueModule();
+        queueModule = new EpochedQueueModule();
         adminModule = new AdminModule();
 
         bytes4[] memory queueSels = SelectorLib.getQueueModuleSelectors();
@@ -170,7 +172,7 @@ contract CoreVault_ERC4626_Test is Test {
     // ═══════════════════════════════════════════════════════════════════════════════
     // WITHDRAWALS — QUEUED PROTOCOL (ExitEngineLib Architecture)
     // withdraw()/redeem() ALWAYS revert AsyncWithdrawalRequired.
-    // Users must use requestClaim(true) for instant or requestClaim(false) for queued.
+    // Users must use requestInstantWithdrawal() for instant or requestEpochWithdrawal() for queued.
     // ═══════════════════════════════════════════════════════════════════════════════
 
     /// @notice withdraw() always reverts with AsyncWithdrawalRequired
@@ -195,7 +197,7 @@ contract CoreVault_ERC4626_Test is Test {
         vm.stopPrank();
     }
 
-    /// @notice requestClaim(true) settles instantly when cap + liquidity OK
+    /// @notice requestInstantWithdrawal() settles instantly when cap + liquidity OK
     function test_golden_requestClaimInstant_settles() public {
         vm.startPrank(user1);
         usdc.approve(address(vault), 1000e6);
@@ -205,7 +207,7 @@ contract CoreVault_ERC4626_Test is Test {
         uint256 sharesBefore = vault.balanceOf(user1);
 
         // Instant claim for 400 shares
-        IQueueModule(address(vault)).requestClaim(true, 400e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(400e6);
         vm.stopPrank();
 
         uint256 sharesAfter = vault.balanceOf(user1);
@@ -373,13 +375,13 @@ contract CoreVault_ERC4626_Test is Test {
 
         // Full instant claim
         uint256 shares = vault.balanceOf(user1);
-        IQueueModule(address(vault)).requestClaim(true, shares);
+        IQueueModule(address(vault)).requestInstantWithdrawal(shares);
         vm.stopPrank();
 
         assertEq(vault.balanceOf(user1), 0, "Golden: no dust shares");
     }
 
-    /// @notice Full instant claim via requestClaim
+    /// @notice Full instant claim via requestInstantWithdrawal
     function test_golden_fullWithdraw_noDust() public {
         vm.startPrank(user1);
         usdc.approve(address(vault), 1000e6);
@@ -387,7 +389,7 @@ contract CoreVault_ERC4626_Test is Test {
 
         // Full instant claim
         uint256 shares = vault.balanceOf(user1);
-        IQueueModule(address(vault)).requestClaim(true, shares);
+        IQueueModule(address(vault)).requestInstantWithdrawal(shares);
         vm.stopPrank();
 
         assertEq(vault.balanceOf(user1), 0, "Golden: no dust after full claim");
