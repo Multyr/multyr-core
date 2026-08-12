@@ -12,7 +12,6 @@ import { MockBufferManagerForTests } from "../helpers/MockBufferManagerForTests.
 import { StrategyMock } from "../helpers/StrategyMock.sol";
 import { RevertingStrategyMock } from "../helpers/RevertingStrategyMock.sol";
 import { StrategyRouter } from "../../src/core/modules/StrategyRouter.sol";
-import { QueueStorage } from "../../src/core/storage/QueueStorage.sol";
 
 interface IQueueVault {
     function requestInstantWithdrawal(uint256 shares)

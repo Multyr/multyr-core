@@ -46,7 +46,7 @@ graph TD
 |--------|------|------|
 | `CoreVault` | `src/core/CoreVault.sol:36` | Diamond-lite proxy; delegatecalls to modules |
 | `ERC4626Module` | `src/core/modules/ERC4626Module.sol:166` | Deposit/mint/withdraw/redeem; ERC-4626 compliance |
-| `QueueModule` | `src/core/modules/QueueModule.sol:207` | Async withdrawal queue; settlement; anti-spam |
+| `EpochedQueueModule` | `src/core/modules/EpochedQueueModule.sol` | Async withdrawal queue; epoch batching; settlement |
 | `AdminModule` | `src/core/modules/AdminModule.sol:73` | Governance, timelocks, pause, ecosystem wiring |
 | `LiquidityOpsModule` | `src/core/modules/LiquidityOpsModule.sol:32` | Deploy/rebalance/realize liquidity to/from strategies |
 | `FeeCollector` | `src/core/modules/FeeCollector.sol:17` | Fee distribution to treasury/ops/safety reserve |
@@ -60,7 +60,7 @@ graph TD
 | `ExitFeeLib` | `src/core/libraries/ExitFeeLib.sol:29` | Fee computation for all 3 exit modes |
 | `CoreStorage` | `src/core/storage/CoreStorage.sol:38` | EIP-7201 namespaced core storage |
 | `FeeStorage` | `src/core/storage/FeeStorage.sol:55` | Fee params + perf fee storage |
-| `QueueStorage` | `src/core/storage/QueueStorage.sol:24` | Queue head/claims/pendingShares |
+| `EpochQueueStorage` | `src/core/modules/EpochedQueueModule.sol:29` | Epoch/claim state, escrowedShares, outstandingClaimCount (retired `QueueStorage.sol` kept only as a reserved EIP-7201 slot, no longer in scope for live logic) |
 | `BatchGuardrails` | `src/core/modules/BatchGuardrails.sol:20` | Batch call validation (peripheral) |
 
 ### 2.2 Core Protocol — FixedMaturity Extension
@@ -78,7 +78,7 @@ The FM extension adds state machine governance on top of OpenEnded CoreVault. Th
 
 **Minimal guards in existing modules** (not new logic — just early-return gates):
 - `ERC4626Module.sol` (3 gating calls)
-- `QueueModule.sol` (2 gating calls)
+- `EpochedQueueModule.sol` (2 gating calls)
 - `LiquidityOpsModule.sol` (2 gating calls)
 
 **Architectural constraint**: FM extension must not modify any OpenEnded execution path. All FM logic is isolated in FM files.
@@ -146,7 +146,7 @@ src/core/
 │   ├── FeeCollector.sol
 │   ├── FixedMaturityModule.sol
 │   ├── LiquidityOpsModule.sol
-│   ├── QueueModule.sol
+│   ├── EpochedQueueModule.sol
 │   ├── StrategyHealthRegistry.sol
 │   ├── StrategyRouter.sol
 │   └── VaultUpkeep.sol         # Keeper (out of scope)
@@ -154,7 +154,7 @@ src/core/
     ├── CoreStorage.sol          # EIP-7201 main
     ├── FeeStorage.sol           # EIP-7201 fee
     ├── FixedMaturityStorage.sol # EIP-7201 FM
-    └── QueueStorage.sol         # EIP-7201 queue
+    └── QueueStorage.sol         # EIP-7201 -- retired/reserved slot only, EpochQueueStorage lives inside EpochedQueueModule.sol
 ```
 
 Total: 51 `.sol` files in `src/core/`.
@@ -172,8 +172,8 @@ Total: 51 `.sol` files in `src/core/`.
 | L1 | **Owner key is single point of control** | Design choice | No on-chain DAO. Mitigated by vetoer + timelock. Deployment to multi-sig (Safe) is recommended. |
 | L2 | **`FLAG_SYSTEM_SEALED` does not freeze `roleOf[selector]`** | Known gap (AC8) | Owner can change per-function roles post-seal. Timelock provides recourse window. |
 | L3 | **`forceWithdrawAll` is best-effort (F-03: resolved)** | Design choice, mitigated | Delivers `min(hot, targetAssets)` — still no guarantee of full liquidity. Previously this could silently deliver an arbitrarily small fill (up to ~90%+ of value if strategies were frozen/illiquid); now a mandatory `minAssetsOut` parameter reverts the whole call (`SlippageExceeded`, no state change) if the fill falls short. See `test/sprint-test/ForceWithdrawAll_SlippagePOC.t.sol`. |
-| L4 | **Settlement loop is partial** | Design choice | Gas safety exit at `gasleft() > 150_000`. Queue resumes in next call. Settlement is not atomic for large queues. |
-| L5 | **INSTANT fallback stores `immediate=false`** | Design choice | INSTANT requests that fall back to queue are re-classified as standard queue entries (no epoch cap). Fixed in shadow report (BUG 6). |
+| L4 | **Settlement is epoch-wide, pull-based** | Design choice (superseded L4) | `EpochedQueueModule` replaced the retired per-claim FIFO settle loop (gas-bounded `_settleLoop`) with `closeCurrentEpoch()`/`fundEpoch()` (epoch-wide, O(1) in claim count) and `claimEpochAssets()` (pull-based, per user). No gas-safety partial-exit is needed since no single call iterates over claims. |
+| L5 | **INSTANT fallback always becomes a standard epoch claim** | Design choice | `requestInstantWithdrawal` requests that fail `_canInstant()` fall back to the exact same code path as `requestEpochWithdrawal` — there is no `immediate` flag on `EpochClaim` to mis-set (the BUG 6 class in the retired `QueueModule` is eliminated by construction, not by a fix). |
 | L6 | **`preMaturityForceExitPenaltyBps` max 50%** | Design constraint | Hard cap at 5000 bps validated in `configureFixedMaturity`. |
 | L7 | **`BatchGuardrails.sol` is peripheral** | Design choice | Not part of CoreVault module dispatch. Separate validation layer, not enforced at core level. |
 | L8 | **`Roles.sol` and `Ownable2StepMixin.sol` are legacy** | Legacy artifact | pragma 0.8.24, NOT imported by active modules. Present in codebase but not deployed. |
@@ -183,6 +183,11 @@ Total: 51 `.sol` files in `src/core/`.
 ### 5.1 Shadow Report Bugs — All Fixed
 
 The Final Shadow Readiness Report (2026-04-10) found 7 bugs during a 1950-test, 10K-operation fork replay. All 7 were fixed before the first audit. Regression tests for each are in `test/unit/core/AuditFix_Regression.t.sol`.
+
+> **Note**: BUG 4, 6, and 7 below refer to `QueueModule.sol`, which has since been deleted and
+> replaced by `EpochedQueueModule.sol` (epoch-batched settlement) — see §9 for why the new
+> module's settlement path should be treated as fresh audit surface rather than a pure
+> regression check against these historical findings.
 
 | Bug | Severity | File fixed | What was wrong |
 |-----|---------|------------|---------------|
@@ -213,7 +218,7 @@ These are known and accepted before the first audit:
 | Component | Unit | Invariant | Fuzz | Fork | Halmos | Echidna |
 |-----------|------|-----------|------|------|--------|---------|
 | CoreVault deposit/withdraw | ✅ | ✅ SI-1..6 | ✅ | ✅ | — | ✅ |
-| QueueModule settlement | ✅ | ✅ QI-1..6 | ✅ | ✅ | — | — |
+| EpochedQueueModule settlement | ✅ | ✅ QI-1..6 | ✅ | ✅ | — | — |
 | AdminModule governance | ✅ | ✅ GI-1..7 | — | — | — | — |
 | Fee computation | ✅ | ✅ SI-4 | ✅ | ✅ | — | ✅ |
 | FixedMaturity lifecycle | ✅ | ✅ FM-inv | — | — | — | — |
@@ -238,7 +243,7 @@ Cross-referenced to test files for auditor traceability:
 | SI-2 | `totalSupply * sharePrice ≈ totalAssets` | `test/invariants/CoreVault_System_Invariants.t.sol` |
 | SI-3 | No user can withdraw more than deposited (minus fees) | `test/invariants/CoreVault_System_Invariants.t.sol` |
 | SI-4 | Fees never exceed configured maximums | `test/invariants/CoreVault_System_Invariants.t.sol` |
-| SI-5 | `queueLength() == number of open claims` | `test/invariants/CoreVault_ClaimsQueue_Invariants.t.sol` |
+| SI-5 | `outstandingClaimCount() == number of unclaimed claims across all epochs` | `test/invariants/CoreVault_ClaimsQueue_Invariants.t.sol` |
 | SI-6 | NAV is consistent with underlying balances | `test/invariants/CoreVault_System_Invariants.t.sol` |
 | QI-1 | No claim in queue has `grossAssets < minClaimAmount` | `test/invariants/CoreVault_ClaimsQueue_Invariants.t.sol` |
 | QI-4 | A claim cannot be settled twice | `test/invariants/CoreVault_ClaimsQueue_Invariants.t.sol` |
@@ -262,10 +267,10 @@ Cross-referenced to test files for auditor traceability:
 |---|---------------|------|-----------|---------------|
 | T1 | **Owner key compromise** | HIGH | Timelock delay + vetoer revoke window. `freezeParams` makes fees immutable post-hardening. | GI-3,4; governance unit tests |
 | T2 | **Share price manipulation via donation** | HIGH | Fixed in shadow report (BUG 3: non-dilutive fee transfer). Dead deposit seeds baseline. | SI-2; `AuditFix_Regression`; `SharePriceCollapse_Security.t.sol` |
-| T3 | **Queue exhaustion / gas DoS** | MEDIUM | Gas safety exit at 150K remaining. Partial settlement resumes in next call. `compactQueue` callable by anyone. | SI-5; `ExitEngine_StressTest`; e2e |
+| T3 | **Queue exhaustion / gas DoS** | MEDIUM | `fundEpoch()` liquidity pull is O(1) regardless of claim count (single call per epoch, not a per-claim scan). Settlement is pull-based (`claimEpochAssets`) so an individual user's claim cost never depends on other users' claims. | SI-5; `ExitEngine_StressTest`; `Hardening_GasAndChaos` gas characterization |
 | T4 | **Reentrancy via strategy callback** | MEDIUM | `FLAG_REENTRANCY_LOCKED` guards `deployToStrategies`, `rebalanceStrategies`. W2 rule: external calls are try/catch. | `CoreVault_DiamondLite_Reentrancy`; `ForceWithdraw_Reentrancy` |
 | T5 | **EIP-7201 storage slot collision** | HIGH (mitigated) | 4 namespaces verified via `EIP7201Compliance.t.sol` (5 tests). Fixed post-FINDING-OOS-03. | `test/security/EIP7201Compliance.t.sol` |
-| T6 | **Unauthorized processorMint/Burn** | CRITICAL | `isAuthorizedModule[addr]` gate — only QueueModule and FixedMaturityModule authorized at deploy. | `CoreVault_DiamondLite_AccessControl` |
+| T6 | **Unauthorized processorMint/Burn** | CRITICAL | `isAuthorizedModule[addr]` gate — only EpochedQueueModule and FixedMaturityModule authorized at deploy. | `CoreVault_DiamondLite_AccessControl` |
 | T7 | **FixedMaturity capital lock** | MEDIUM | `markMatured()` is permissionless; `preMaturityForceExitPenaltyBps ≤ 50%` hard cap. `forceWithdrawAll` available, now with a `minAssetsOut` floor (F-03). | FM invariant tests; `ForceWithdraw_*` |
 | T8 | **Fee parameter ratchet via short timelock** | MEDIUM | H3: post-seal min delay floor 1 day. Guardian can pause while vetoer revokes. | `CoreVault_ParamTimelock`; `Governance_Seal_Invariants` |
 
@@ -275,7 +280,7 @@ Cross-referenced to test files for auditor traceability:
 
 Priority ranking based on value at risk and complexity:
 
-1. **Settlement loop and share accounting** (CRITICAL): `QueueModule._settleLoop`, `_convertToAssetsCached`, `_crystallize`. Four shadow-report HIGH bugs were found here. The PPS must remain exact across all settlement sequences.
+1. **Settlement and share accounting** (CRITICAL): `EpochedQueueModule.closeCurrentEpoch`, `fundEpoch`, `claimEpochAssets`, `_crystallize`. This is a substantially rewritten implementation (epoch-batched, not per-claim FIFO) that replaced the retired `QueueModule` post-first-audit — it has NOT yet been through the same shadow-report fork-replay process that found the four HIGH bugs listed in §5.1 for the old module. `_crystallize` was ported verbatim and inherits BUG-4-equivalent regression coverage; the epoch close/fund/claim path is new and should be treated as fresh audit surface, not a regression check. PPS must remain exact — locked once at `closeCurrentEpoch()`, applied identically to every claim in that epoch.
 
 2. **ERC-4626 compliance at boundaries** (HIGH): `previewDeposit`, `previewWithdraw`, `mint` fee symmetry with `deposit`. Boundary conditions (totalAssets=0, totalSupply=0) and mint/deposit equivalence.
 
@@ -293,13 +298,15 @@ Priority ranking based on value at risk and complexity:
 
 The following specific checks are recommended based on the internal shadow report and architecture review:
 
-**Settlement loop** (`src/core/modules/QueueModule.sol:407`):
-- [ ] Verify `_convertToAssetsCached` uses snapshot BEFORE `_burn` (BUG 4 regression)
-- [ ] Verify `immediate=false` for all queued claims (BUG 6 regression)
+**Settlement: close / fund / claim** (`src/core/modules/EpochedQueueModule.sol:327-513`):
+- [ ] Verify `ppsAtClose` is computed BEFORE any shares are burned, and never recomputed after (BUG 4-equivalent regression, new code path)
+- [ ] Verify every `EpochClaim` is treated identically regardless of how it was created (`requestEpochWithdrawal` vs. `requestInstantWithdrawal` fallback) — there is no `immediate` flag to mis-set (BUG 6 class eliminated by construction, verify no reintroduction)
 - [ ] Verify `feeShares` rounded UP (rounding in favour of protocol)
-- [ ] Verify `cachedTA / cachedTS` snapshot is set once per batch (deterministic PPS)
-- [ ] Verify `gasleft() > 150_000` guard prevents out-of-gas in settle loop
-- [ ] Verify INSTANT cap consumption: only for INSTANT-mode, never STANDARD/FORCE
+- [ ] Verify `ppsAtClose` is locked once per epoch at `closeCurrentEpoch()` and used identically by every claim in that epoch regardless of claim order (deterministic PPS)
+- [ ] Verify `fundEpoch()` only transitions to `Funded` when `hot >= totalNetAssets` — no partial-funding state can be marked `Funded`
+- [ ] Verify `outstandingClaimCount` persists across `closeCurrentEpoch()` (does not reset like per-epoch `claimCount`) — dynamic-cap bypass class, already fixed pre-cutover, verify no regression
+- [ ] Verify INSTANT cap consumption: only for the settled-immediately path in `requestInstantWithdrawal`, never for STANDARD claims at any point in their lifecycle
+- [ ] Verify `_notifyIncentivesExit` gas cost per claim stays well under keeper gas limits (BUG 7 was a QueueModule/IncentivesEngine issue — confirm the same call pattern in `EpochedQueueModule` doesn't reintroduce it)
 
 **Deposit and mint** (`src/core/modules/ERC4626Module.sol:166`):
 - [ ] Verify `previewDeposit(X) == deposit(X).shares` (ERC-4626 compliance, BUG 1 regression)
@@ -352,7 +359,7 @@ The following specific checks are recommended based on the internal shadow repor
 |--------|------|-------|
 | `CoreVault` | `src/core/CoreVault.sol:36` | Diamond-lite proxy; delegatecall dispatch |
 | `ERC4626Module` | `src/core/modules/ERC4626Module.sol:166` | Deposit/withdraw; BUG 2+3 fixed here |
-| `QueueModule._settleLoop` | `src/core/modules/QueueModule.sol:407` | Settlement; BUG 4+6 fixed here |
+| `EpochedQueueModule` close/fund/claim | `src/core/modules/EpochedQueueModule.sol:327-513` | Settlement; supersedes retired `QueueModule._settleLoop` where BUG 4+6 were fixed |
 | `AdminModule` | `src/core/modules/AdminModule.sol:73` | Governance; all timelocks |
 | `FeeCollector` | `src/core/modules/FeeCollector.sol:17` | Immutable governor; GI-2 |
 | `FixedMaturityModule` | `src/core/modules/FixedMaturityModule.sol:52` | FM state machine; FM audit scope |

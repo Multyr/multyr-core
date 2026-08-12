@@ -36,7 +36,7 @@ The core protocol is designed with three guiding principles:
 
 **Non-custodial**: At no point does the protocol hold user funds outside of the vault smart contracts. All assets flow between the vault's hot buffer, warm adapters, and strategy adapters under deterministic, publicly-verifiable rules.
 
-**Queued exits**: Standard withdrawals and redemptions are non-atomic. `withdraw()` and `redeem()` always revert. Users submit exit requests via `requestClaim()`, which either settles instantly (if epoch cap allows) or enters a FIFO queue settled by keepers. This design eliminates the synchronous MEV attack surface present in standard ERC-4626 vaults.
+**Queued exits**: Standard withdrawals and redemptions are non-atomic. `withdraw()` and `redeem()` always revert. Users submit exit requests via `requestInstantWithdrawal()` (cap-eligible fast path) or `requestEpochWithdrawal()`, which enters an epoch-bucketed queue settled via close → fund → pull-claim (see §6.4). This design eliminates the synchronous MEV attack surface present in standard ERC-4626 vaults.
 
 **Modular logic (Diamond-lite)**: All economic logic — deposits, exits, fee crystallization, admin governance — is implemented in separate module contracts. `CoreVault` delegates every call to the appropriate module via `delegatecall`. This permits module-level upgrades (with timelock) without redeploying the vault.
 
@@ -54,7 +54,7 @@ graph TD
     CV["CoreVault (ERC4626 entry)"]
     SR["SelectorRegistry\n(immutable, no storage)"]
     EM["ERC4626Module\n(deposit/mint/forceWithdraw)"]
-    QM["QueueModule\n(requestClaim/settle/crystallize)"]
+    QM["EpochedQueueModule\n(requestEpochWithdrawal/close/fund/claim/crystallize)"]
     AM["AdminModule\n(timelock governance)"]
     LOM["LiquidityOpsModule\n(deploy/realize/rebalance)"]
     FM["FixedMaturityModule\n(FM lifecycle)"]
@@ -185,7 +185,7 @@ The routing table is populated during deployment by `setModulesBatch()`. Typical
 | Selector Group | Module | Role |
 |---|---|---|
 | `deposit`, `mint`, `redeem`, `withdraw`, `forceWithdraw` | ERC4626Module | ROLE_PUBLIC |
-| `requestClaim`, `cancelClaim`, `settleFeesAndProcessQueue`, `compactQueue` | QueueModule | ROLE_PUBLIC |
+| `requestEpochWithdrawal`, `cancelEpochWithdrawal`, `closeCurrentEpoch`, `fundEpoch`, `claimEpochAssets`, `requestInstantWithdrawal` | EpochedQueueModule | ROLE_PUBLIC |
 | `submitFeeParams`, `acceptFeeParams`, `setParams`, `setRouter`, ... | AdminModule | ROLE_OWNER |
 | `setVaultModeFixedMaturity`, `configureFixedMaturity`, `startFixedMaturityCycle` | FixedMaturityModule | ROLE_OWNER |
 | `markMatured`, `refundClaim`, `autoCloseFunding` | FixedMaturityModule | ROLE_PUBLIC |
@@ -204,7 +204,7 @@ function processorSpendAllowance(address owner_, address spender, uint256 amount
 ```
 
 `_requireModuleAccess()` (`src/core/CoreVault.sol:673-679`) authorizes two patterns:
-1. **Delegatecall context**: `msg.sender == address(this)` — QueueModule, AdminModule, LiquidityOpsModule call these from within delegatecall, so `msg.sender` is the vault itself.
+1. **Delegatecall context**: `msg.sender == address(this)` — EpochedQueueModule, AdminModule, LiquidityOpsModule call these from within delegatecall, so `msg.sender` is the vault itself.
 2. **Authorized external module**: `isAuthorizedModule[msg.sender]` — ERC4626Module executes as an external call (not delegatecall), so it must be registered via `authorizeModule()`.
 
 ---
@@ -321,48 +321,62 @@ The protocol defines three exit modes (`src/core/libraries/ExitEngineLib.sol:28-
 
 ```solidity
 enum ExitMode {
-    STANDARD, // requestClaim(false) — witBps only
-    INSTANT,  // requestClaim(true)  — witBps + immediateExitPenaltyBps
+    STANDARD, // requestEpochWithdrawal() — witBps only
+    INSTANT,  // requestInstantWithdrawal() — witBps + immediateExitPenaltyBps
     FORCE     // forceWithdraw()     — witBps + forceExitPenaltyBps
 }
 ```
 
 | Mode | Path | Epoch Cap | Lock Period | Fee |
 |---|---|---|---|---|
-| STANDARD | `requestClaim(false)` | Not consumed | Enforced | `witBps` |
-| INSTANT | `requestClaim(true)` | Consumed | Enforced | `witBps + immediateExitPenaltyBps` |
+| STANDARD | `requestEpochWithdrawal()` | Not consumed | Enforced | `witBps` |
+| INSTANT | `requestInstantWithdrawal()` | Consumed | Enforced | `witBps + immediateExitPenaltyBps` |
 | FORCE | `forceWithdraw()` | Not consumed | Bypassed | `witBps + forceExitPenaltyBps` |
 
-### 6.3 requestClaim() — INSTANT vs QUEUED
+### 6.3 requestInstantWithdrawal() / requestEpochWithdrawal() — INSTANT vs QUEUED
 
-`requestClaim(bool immediate, uint256 shares)` (`src/core/modules/QueueModule.sol:81-169`) is the primary exit function. Its behavior depends on the `immediate` parameter and three conditions:
+`requestInstantWithdrawal(uint256 shares)` (`src/core/modules/EpochedQueueModule.sol:698-749`) is the fast-path exit function; `requestEpochWithdrawal(uint256 shares)` (`:212-289`) is the explicit queued path. Instant settlement depends on three conditions checked by `_canInstant()`:
 
-**INSTANT settlement conditions** (`src/core/modules/QueueModule.sol:529-553`):
+**INSTANT settlement conditions** (`src/core/modules/EpochedQueueModule.sol:917-945`):
 1. Lock period has passed: `block.timestamp >= lastDepositTs[user] + lockPeriod`
-2. Epoch cap not exhausted: `grossAssets <= calculateCapRemaining()`
+2. Epoch cap not exhausted: `grossAssets <= _epochCapRemaining()`
 3. Sufficient hot liquidity: `hot >= grossAssets`
 
-If all three conditions are met and `immediate == true`, settlement is atomic in the same transaction:
+If all three conditions are met, `requestInstantWithdrawal` settles atomically in the same transaction:
 1. Fee shares transferred to `feeCollector` (TRANSFER, not mint — no dilution).
-2. User shares burned via `processorBurn`.
+2. User shares burned.
 3. Net assets transferred to user.
 4. Epoch cap consumed via `ExitEngineLib.consumeEpochCap()`.
+5. Returns `(settledImmediately=true, epochId=0, claimId=0)`.
 
-If any condition fails (or `immediate == false`), the claim is queued:
-1. Shares transferred to vault as escrow.
-2. `QueueStorage.Claim` created with `immediate = false` regardless of the caller's preference (fallback INSTANT→QUEUED drops the epoch cap flag).
-3. Claim ID assigned and pushed to `queue[]`.
+If any condition fails, `requestInstantWithdrawal` falls back to the exact same path as
+`requestEpochWithdrawal` — the claim is queued into the current open epoch:
+1. ALL gross shares transferred to the vault as escrow (not just the net portion).
+2. An `EpochClaim` is recorded under `(currentEpochId, claimId)`, `claimed = false`.
+3. Returns `(settledImmediately=false, epochId, claimId)` — the caller needs this pair to
+   later cancel (`cancelEpochWithdrawal`) or claim (`claimEpochAssets`) it.
 
-### 6.4 Queue Processing
+### 6.4 Queue Processing — Epoch Close, Fund, Claim
 
-The queue is a FIFO array of claim IDs (`QueueStorage.Layout.queue`). Settlement is triggered by `settleFeesAndProcessQueue(maxClaims)` (keeper) or `processQueuedRedemptions(maxClaims)` (public).
+The queue is epoch-bucketed, not a flat FIFO array: claims submitted while an epoch is open
+share one locked price and one liquidity pull. Settlement is a three-step, epoch-wide process
+(`src/core/modules/EpochedQueueModule.sol:327-513`) — see `docs/queue-mechanics.md` for the
+full state machine:
 
-Settlement algorithm (`src/core/modules/QueueModule.sol:358-521`):
-1. **Bounded pre-scan**: scan up to `maxClaims * 2` entries, stop after 32 consecutive ineligible claims.
-2. **Warm refill**: attempt `BufferManager.refill()` if hot < required.
-3. **Settle loop**: iterate `[head, scanWindowEnd)`, settle eligible claims at cached PPS snapshot.
+1. **`closeCurrentEpoch()`** (permissionless, gated on a minimum epoch duration): locks
+   `ppsAtClose = totalAssets/totalSupply` for every claim in the epoch, batch-transfers
+   accumulated fee shares to `feeCollector`, and opens the next epoch immediately.
+2. **`fundEpoch(epochId)`** (permissionless, repeatable): pulls liquidity for the epoch's
+   *entire* net liability in one call — warm refill first, then strategy redeem for any
+   remaining gap. Transitions to `Funded` only once `hot >= totalNetAssets`.
+3. **`claimEpochAssets(epochId, claimId)`** (pull-based, per claimant): once `Funded`, each
+   user calls in to receive their `netShares * ppsAtClose` — no keeper required.
 
-Deterministic pricing: `cachedTA` and `cachedTS` (totalAssets, totalSupply) are snapshotted once per `settleFeesAndProcessQueue` call. All claims in the batch use the same PPS, preventing intra-batch arbitrage.
+Deterministic pricing: `ppsAtClose` is snapshotted once per epoch at `closeCurrentEpoch()` —
+every claim in that epoch, whenever it's actually claimed, uses that same price. This removes
+the live-PPS MEV window that existed in the old per-batch-snapshot design (a batch's price
+could still be influenced by transactions between batches; an epoch's price is fixed the
+moment it closes and never revisited).
 
 ### 6.5 forceWithdraw — Guaranteed Exit
 
@@ -388,7 +402,7 @@ Four fee parameters are stored in `FeeStorage.InternalFeeParams` (`src/core/stor
 |---|---|---|
 | `depBps` | uint16 | Deposit — deducted from deposited assets |
 | `witBps` | uint16 | All exits — base withdrawal fee |
-| `immediateExitPenaltyBps` | uint16 | Instant exits (`requestClaim(true)`) — additive |
+| `immediateExitPenaltyBps` | uint16 | Instant exits (`requestInstantWithdrawal()`) — additive |
 | `forceExitPenaltyBps` | uint16 | Force exits (`forceWithdraw`) — additive |
 
 All values are in basis points (1 bp = 0.01%). Maximum values are capped by `GlobalConfig` via `IParamsProvider` (governance-configurable, not hardcoded).
@@ -429,7 +443,7 @@ feeAssets = profit * perfRateX
 feeShares = convertToShares(feeAssets)
 ```
 
-Source: `src/core/modules/QueueModule.sol:763-803`. Parameters:
+Source: `src/core/modules/EpochedQueueModule.sol:576-653`. Parameters:
 - `perfRateX`: scaled performance fee rate (`FeeStorage.Layout.perfRateX`).
 - `highWaterMark`: PPS at last crystallization (`FeeStorage.Layout.highWaterMark`).
 - `minCrystallizeInterval`: minimum time between crystallizations.
@@ -546,8 +560,8 @@ Operations are gated by the current state via free functions in `src/core/storag
 | Operation | Allowed in states |
 |---|---|
 | `deposit()` | `Funding` (OpenEnded: always) |
-| `requestClaim()` | `Matured` (OpenEnded: always) |
-| `settleFeesAndProcessQueue()` | `Matured` (OpenEnded: always) |
+| `requestEpochWithdrawal()` / `requestInstantWithdrawal()` | `Matured` (OpenEnded: always) |
+| `closeCurrentEpoch()` | `Matured` (OpenEnded: always) |
 | `forceWithdraw()` | `Active` (OpenEnded: always) |
 | `deployToStrategies()` | OpenEnded only |
 
@@ -677,10 +691,13 @@ This table covers the 30 most important functions. For the complete selector reg
 | `redeem(...)` | ERC4626Module | PUBLIC | — | `AsyncWithdrawalRequired` (always) |
 | `forceWithdraw(...)` | ERC4626Module | PUBLIC | `ForceWithdrawExecuted`, `ForceExit` | `Paused`, `ZeroAmount`, `EmptyPlan`, `InsufficientLiquidity` |
 | `forceWithdrawAll(address,uint256)` | ERC4626Module | PUBLIC | `ForceWithdrawAllExecuted`, `ForceExit` | `Paused`, `ZeroAmount`, `SlippageExceeded` (F-03) |
-| `requestClaim(bool,uint256)` | QueueModule | PUBLIC | `ClaimRequested`, `InstantExit` or `ClaimQueued` | `ZeroAmount`, `ClaimTooSmall`, `ClaimCooldownActive` |
-| `cancelClaim(uint256)` | QueueModule | PUBLIC | `ClaimCancelled`, `SharesUnfrozen` | `NotClaimOwner`, `AlreadySettled` |
-| `settleFeesAndProcessQueue(uint256)` | QueueModule | PUBLIC | `ClaimSettled`, `EpochRolled`, `VaultPpsSnapshot` | `ZeroAmount` |
-| `endEpochCrystallize()` | QueueModule | PUBLIC | `Crystallized`, `PerfFeeMinted`, `NavSmoothUpdated` | — |
+| `requestInstantWithdrawal(uint256)` | EpochedQueueModule | PUBLIC | `InstantExit` or `EpochWithdrawalRequested` | `ZeroAmount` |
+| `requestEpochWithdrawal(uint256)` | EpochedQueueModule | PUBLIC | `EpochWithdrawalRequested` | `ZeroAmount`, `EpochNotOpen` |
+| `cancelEpochWithdrawal(uint256,uint256)` | EpochedQueueModule | PUBLIC | `EpochWithdrawalCancelled` | `NotClaimOwner`, `ClaimAlreadySettled` |
+| `closeCurrentEpoch()` | EpochedQueueModule | PUBLIC | `EpochClosed`, `EpochOpened`, `FeePaid` | `EpochNotOpen`, `EpochTooYoung` |
+| `fundEpoch(uint256)` | EpochedQueueModule | PUBLIC | `EpochFundAttempt`, `EpochFunded` | `EpochNotClosed`, `EpochAlreadyFunded` |
+| `claimEpochAssets(uint256,uint256)` | EpochedQueueModule | PUBLIC | `EpochAssetsClaimed` | `EpochNotFunded`, `NotClaimOwner`, `ClaimAlreadySettled` |
+| `endEpochCrystallize()` | EpochedQueueModule | PUBLIC | `Crystallized`, `PerfFeeMinted`, `NavSmoothUpdated` | — |
 | `deployToStrategies(...)` | LiquidityOpsModule | PUBLIC | `DeployedToStrategies` | `ReentrancyGuardLocked` |
 | `realizeForQueue(uint256)` | LiquidityOpsModule | PUBLIC | — | — |
 | `submitFeeParams(...)` | AdminModule | OWNER | `FeeParamsSubmitted` | `FeeTooHigh`, `PendingParamsNotResolved` |
@@ -714,7 +731,7 @@ Invariants enforced by the protocol. For formal verification results see `docs/i
 | I3 | `epochWithdrawn <= cap` (INSTANT only) | `ExitEngineLib.consumeEpochCap()`, cap check before settle | `test/unit/ExitEngine*.t.sol` |
 | I4 | `simulateExit == runtime execution` | `ExitEngineLib.simulateExit()` mirrors production formulas | `test/unit/ExitEngine*.t.sol` (parity assertions) |
 | I5 | `forceWithdraw` does NOT consume epoch cap | `src/core/modules/ERC4626Module.sol:325` (no cap consumption) | `test/unit/ERC4626Module.t.sol` |
-| I6 | Fee shares always from owner/escrow via TRANSFER (not mint) | `processorTransfer` in all exit paths | `test/unit/ERC4626Module.t.sol` + `QueueModule.t.sol` |
+| I6 | Fee shares always from owner/escrow via TRANSFER (not mint) | `processorTransfer` in all exit paths | `test/unit/ERC4626Module.t.sol` + `test/unit/core/EpochedQueueModule.t.sol` |
 | I7 | `maxWithdraw(address) == 0` always | `src/core/CoreVault.sol:544-547` (pure) | `test/unit/CoreVault*.t.sol` |
 | I8 | `maxRedeem(address) == 0` always | `src/core/CoreVault.sol:549-553` (pure) | `test/unit/CoreVault*.t.sol` |
 | I9 | Deposits blocked when warmNavValid=false | `_depositsAreCurrentlyAllowed()` checks `warmNavState()` | `test/unit/ERC4626Module.t.sol` (warmNav gate) |
@@ -733,10 +750,10 @@ All external calls made by the vault system and their safety properties:
 | `warmNavState()` | `CoreVault._depositsAreCurrentlyAllowed()` | `BufferManager` | ~3K | View-only; no trust needed |
 | `refreshWarmNav()` | `ERC4626Module._ensureFreshWarmNav()` | `BufferManager` | ~200K | try/catch; non-blocking |
 | `totalStrategyAssetsSafe()` | `CoreVault._totalAssetsBreakdown()` | `StrategyRouter` | ~50K | Safe view; returns 0 on error |
-| `getDepositLimits()`, `getWithdrawalParams()` | `ERC4626Module`, `QueueModule` | `IParamsProvider` | ~5K | View; trust required (admin-set) |
+| `getDepositLimits()`, `getWithdrawalParams()` | `ERC4626Module`, `EpochedQueueModule` | `IParamsProvider` | ~5K | View; trust required (admin-set) |
 | `forceRedeemForWithdraw()` | `ERC4626Module._forcePullAllLiquidity()` | `StrategyRouter` | ~300K | Best-effort; called last |
 | `executeDepositBatch()` | `LiquidityOpsModule` | `StrategyRouter` | ~500K | Bounded by plan |
-| `bm.refill()` | `QueueModule._settleScan()` | `BufferManager` | ~200K best case; up to ~200K × 8 × adapter count worst case[^gas1] | try/catch; non-blocking |
+| `bm.refill()` | `EpochedQueueModule.fundEpoch()` | `BufferManager` | ~200K best case; up to ~200K × 8 × adapter count worst case[^gas1] | try/catch; non-blocking |
 | `bm.forceRefill()` | `ERC4626Module._forcePullAllLiquidity()` | `BufferManager` | ~200K best case; up to ~200K × 8 × adapter count worst case[^gas1] | Best-effort |
 | `inc.onDeposit()` | `ERC4626Module._notifyIncentivesDeposit()` | `IIncentives` | ~50K | try/catch; non-blocking |
 | `eng.onDeposit/onExit()` | `ERC4626Module` | `IIncentivesEngine` | ~50K | try/catch; non-blocking |
@@ -755,9 +772,9 @@ Before `seedDeadDeposit()` is called, `totalSupply == 0`. In this state `convert
 
 If all warm adapters report 0 NAV (freshly deployed or empty), `warmNavState()` returns `(0, ts, true)`. The warm component of totalAssets is 0. Deposits are still admitted if `valid=true` and within TTL.
 
-### 16.3 requestClaim INSTANT fallback to queue
+### 16.3 requestInstantWithdrawal fallback to the epoch queue
 
-If an instant claim fails the cap or lock period check, it is queued with `immediate = false` — the epoch cap is NOT pre-consumed. This means the queued claim will be settled as STANDARD (no cap consumption at settlement). This design avoids the scenario where a user reserves cap space by queuing an instant claim.
+If an instant withdrawal fails the cap or lock period check, `requestInstantWithdrawal` internally calls the same path as `requestEpochWithdrawal` — the epoch cap is NOT pre-consumed, and the claim settles as STANDARD (no cap consumption) once its epoch is closed and funded. This design avoids the scenario where a user reserves cap space merely by attempting an instant exit.
 
 ### 16.4 Oracle staleness (FixedMaturity)
 
@@ -765,7 +782,7 @@ In `FixedMaturity/Active` state, `markMatured()` is callable by anyone once `blo
 
 ### 16.5 Max uint values and dust
 
-- Epoch cap: if `capPerEpochBps == 0`, `calculateCapRemaining()` returns `type(uint256).max` (uncapped). Source: `src/core/libraries/ExitEngineLib.sol:129`.
+- Epoch cap: if `capPerEpochBps == 0`, `_epochCapRemaining()` returns `type(uint256).max` (uncapped). Source: `src/core/modules/EpochedQueueModule.sol:946-969`.
 - `maxDeposit(receiver)`: if both vault and user caps are 0, returns `type(uint256).max`. Source: `src/core/CoreVault.sol:555-583`.
 - Dust: minimum deposit enforced by `DepositBelowMinimum` if `minDepositAmount > 0`.
 
@@ -802,15 +819,15 @@ In `FixedMaturity/Active` state, `markMatured()` is callable by anyone once `blo
 9. `safeTransferFrom(caller, address(this), assets)` — USDC pulled
 10. Update `lastDepositTs[receiver]` and `_opsNavCache`
 
-**Canonical exit flow** (INSTANT path):
-1. User calls `requestClaim(immediate=true, shares)` → QueueModule
+**Canonical exit flow** (INSTANT path, cap-eligible):
+1. User calls `requestInstantWithdrawal(shares)` → EpochedQueueModule
 2. Lock period check: `block.timestamp >= lastDepositTs[user] + lockPeriod`
-3. Epoch rollover: `ExitEngineLib.rollEpochIfNeeded()` if `block.timestamp >= epochStart + epochDuration`
-4. Cap check: `ExitEngineLib.calculateCapRemaining()` — epoch cap still available
+3. Cap-epoch rollover: `ExitEngineLib.rollEpochIfNeeded()` if `block.timestamp >= epochStart + epochDuration` (the CAP epoch — distinct from the settlement epoch, see `docs/queue-mechanics.md` §6)
+4. Cap check: `_epochCapRemaining()` — cap-epoch cap still available
 5. Fee shares computed: `ExitEngineLib.computeFeeShares(INSTANT, ...)` — rounded UP
-6. Fee shares transferred to feeCollector, remaining shares escrowed (transferred to `address(this)`)
-7. Claim stored in QueueStorage with `immediate=true`
-8. At settlement: assets calculated from escrowed shares, USDC transferred to user
+6. Fee shares transferred to feeCollector (not escrowed — paid immediately), user shares burned
+7. USDC transferred to user in the same transaction; `consumeEpochCap()` updates the cap epoch
+8. If any of steps 2-4 fail instead: ALL gross shares are escrowed and a standard `EpochClaim` is recorded — settled later via `closeCurrentEpoch()` → `fundEpoch()` → `claimEpochAssets()` (pull, by the user)
 
 ### Cross-Links
 
@@ -836,5 +853,5 @@ In `FixedMaturity/Active` state, `markMatured()` is callable by anyone once `blo
 - `docs/09-audit/architecture.md` — auditor expectation coverage
 
 **Discrepancies found** (code vs. old source .md):
-- [^1]: Some source .md files (pre-dating v9 refactor) describe `redeem()` / `withdraw()` as synchronous exit paths. Code confirms these always revert `AsyncWithdrawalRequired` (ERC4626Module.sol:140-157). Users must use `requestClaim()`.
+- [^1]: Some source .md files (pre-dating v9 refactor) describe `redeem()` / `withdraw()` as synchronous exit paths. Code confirms these always revert `AsyncWithdrawalRequired` (ERC4626Module.sol:140-157). Users must use `requestInstantWithdrawal()` / `requestEpochWithdrawal()`.
 - [^2]: `V10_ENGINE_REPORT.md` treats "V10 Portfolio-Grade Allocation Engine" as a future proposal. The code shows `rebalancePolicy`, `rebalanceGuard`, `executionMemory` fields already present in `CoreStorage.Layout:100-105`, with wiring modules `RouterAllocationPolicy.sol`, `RouterRebalanceGuard.sol`, `src/core/modules/ExecutionMemory.sol` existing in `src/core/modules/`. The feature is partially implemented but optional (strict mode toggleable via `strictExecutionMemory`).

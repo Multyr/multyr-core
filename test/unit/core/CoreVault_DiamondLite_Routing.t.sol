@@ -17,7 +17,9 @@ import { MockBufferManagerForTests } from "test/helpers/MockBufferManagerForTest
 import { ExitEngineLib } from "src/core/libraries/ExitEngineLib.sol";
 
 interface IQueueModule_Routing {
-    function requestClaim(bool immediate, uint256 shares) external;
+    function requestInstantWithdrawal(uint256 shares)
+        external
+        returns (bool settledImmediately, uint256 epochId, uint256 claimId);
 }
 
 /// @title CoreVault Routing Tests
@@ -235,9 +237,9 @@ contract CoreVault_Routing_Test is Test {
         assertTrue(router.pausedDeposits());
         assertFalse(router.pausedWithdrawals());
 
-        // withdraw() always reverts now; verify requestClaim works when deposits paused
+        // withdraw() always reverts now; verify requestInstantWithdrawal works when deposits paused
         uint256 shares = router.balanceOf(address(this));
-        IQueueModule_Routing(address(router)).requestClaim(true, shares / 2);
+        IQueueModule_Routing(address(router)).requestInstantWithdrawal(shares / 2);
     }
 
     function test_pauseWithdrawals_allowsDeposits() public {
