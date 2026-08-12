@@ -9,30 +9,29 @@ import { IFixedMaturityModule } from "../interfaces/IFixedMaturityModule.sol";
 import { VaultMode, VaultState } from "../core/storage/FixedMaturityStorage.sol";
 import { FixedMaturityAutomationDisabledForMode } from "../core/libraries/Errors.sol";
 
-/// @notice Minimal interface for CoreVault v8
+/// @notice Minimal interface for CoreVault + EpochedQueueModule (epoch-model queue)
 interface ICoreVault {
     function canSettle() external view returns (bool);
     function canCrystallize() external view returns (bool);
     function canRealizeWithGap() external view returns (bool canR, uint256 gap);
     function canDeploy() external view returns (bool);
 
-    function settleFeesAndProcessQueue(uint256 maxClaims) external;
     function endEpochCrystallize() external;
     function realizeForReserveAndOps(uint256 maxAmount) external;
-    function realizeForQueue(uint256 target) external;
-    function deficitForQueue(uint256 maxClaims) external view returns (uint256);
-    function settlePreview(uint256 maxClaims) external view returns (
-        uint256 eligibleCount, uint256 requiredHot, uint256 inspectedCount, bool hitEarlyExit
-    );
-    function deployToStrategies(uint256 maxAmount) external;
-    function compactQueue() external;
-    function queueLength() external view returns (uint256);
-    function pendingShares() external view returns (uint256);
     function totalAssets() external view returns (uint256);
+    function deployToStrategies(uint256 maxAmount) external;
     function reconcilePendingExits(uint256 maxUsers) external returns (uint256);
     function pendingExitCount() external view returns (uint256);
     function canRebalanceStrategies() external view returns (bool);
     function rebalanceStrategies() external;
+
+    // Epoch-model queue (EpochedQueueModule, delegatecall-dispatched)
+    function canCloseCurrentEpoch() external view returns (bool);
+    function currentEpochClaimCount() external view returns (uint256);
+    function currentEpochId() external view returns (uint256);
+    function oldestUnfundedEpochId() external view returns (uint256);
+    function closeCurrentEpoch() external;
+    function fundEpoch(uint256 epochId) external;
 }
 
 /// @notice Minimal interface for StrategyRouter cooldown state
@@ -52,33 +51,35 @@ interface IGlobalConfigReader {
 
 enum Op {
     NONE,
-    SETTLE,
+    EPOCH_CLOSE,        // closeCurrentEpoch(): lock PPS, batch-transfer fees, open next epoch
+    EPOCH_FUND,         // fundEpoch(oldestUnfundedEpochId): pull liquidity, mark FUNDED
     CRYSTALLIZE,
     REBALANCE,
     DEPLOY,
     REALIZE,
-    REALIZE_FOR_QUEUE,
-    COMPACT,
     RECONCILE,
     STRATEGY_REBALANCE  // Inter-strategy allocation rebalance (distinct from buffer REBALANCE)
 }
 
 error UnknownOp();
 
-/// @title VaultUpkeep v4 — Gas-optimized Chainlink Automation orchestrator
-/// @notice v8 changes:
-///   - SETTLE path: only settleFeesAndProcessQueue (no pre-settle rebalance/realize)
+/// @title VaultUpkeep v5 — Gas-optimized Chainlink Automation orchestrator
+/// @notice v5 changes (epoch-model queue cutover):
+///   - EPOCH_CLOSE/EPOCH_FUND replace SETTLE: closeCurrentEpoch()/fundEpoch() are
+///     O(1) per epoch regardless of claim count, so there's no maxClaims batch
+///     size to configure anymore (DEFAULT_MAX_CLAIMS/HARD_MAX_CLAIMS removed).
+///   - COMPACT removed: no flat array to compact in the epoch model.
+///   - REALIZE_FOR_QUEUE removed: fundEpoch() already runs the warm-refill →
+///     strategy-redeem liquidity waterfall internally, so a separate
+///     keeper-triggered pre-settle realize step is redundant.
 ///   - REALIZE: uses canRealizeWithGap() (single call, no redundant totalAssets)
 ///   - Failure backoff with configurable threshold
-///   - Target gas: checkUpkeep < 15k (no work), SETTLE from hot < 300k, SETTLE+redeem < 1.2M
 contract VaultUpkeep is AutomationCompatibleInterface, Ownable {
     ICoreVault public immutable core;
     IBufferManager public immutable bufferManager;
     IStrategyRouterReader public immutable router;
     IGlobalConfigReader public immutable globalConfig;
 
-    uint256 public immutable DEFAULT_MAX_CLAIMS;
-    uint256 public immutable HARD_MAX_CLAIMS;
     uint256 public immutable DEFAULT_MAX_REALIZE;
     uint256 public immutable DEFAULT_MAX_DEPLOY;
     uint16 public immutable minRealizeGapBps;
@@ -88,7 +89,6 @@ contract VaultUpkeep is AutomationCompatibleInterface, Ownable {
     event UpkeepBackoffEntered(uint8 failures);
     event UpkeepBackoffExited();
     event FailureBackoffConfigured(uint8 threshold, uint32 backoffSeconds);
-    event RealizeForQueueFailed(uint256 target, bytes reason);
     event StrategyRebalanceCooldownSet(uint64 cooldown);
 
     // Failure backoff state
@@ -127,8 +127,6 @@ contract VaultUpkeep is AutomationCompatibleInterface, Ownable {
         address bufferManager_,
         address router_,
         address globalConfig_,
-        uint256 defaultMaxClaims,
-        uint256 hardMaxClaims,
         uint256 defaultMaxRealize,
         uint256 defaultMaxDeploy,
         uint16 minRealizeGapBps_,
@@ -141,17 +139,14 @@ contract VaultUpkeep is AutomationCompatibleInterface, Ownable {
         bufferManager = IBufferManager(bufferManager_);
         router = IStrategyRouterReader(router_);
         globalConfig = IGlobalConfigReader(globalConfig_);
-        DEFAULT_MAX_CLAIMS = (defaultMaxClaims == 0) ? 15 : defaultMaxClaims; // max 15 — settle uses cached valuation, safe under Chainlink 5M
-        HARD_MAX_CLAIMS = (hardMaxClaims == 0) ? 100 : hardMaxClaims;
         DEFAULT_MAX_REALIZE = (defaultMaxRealize == 0) ? type(uint256).max : defaultMaxRealize;
         DEFAULT_MAX_DEPLOY = (defaultMaxDeploy == 0) ? type(uint256).max : defaultMaxDeploy;
         minRealizeGapBps = minRealizeGapBps_;
         minRealizeFloor = minRealizeFloor_;
-        require(DEFAULT_MAX_CLAIMS <= HARD_MAX_CLAIMS, "bad-claims-bounds");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
-    // checkUpkeep — deterministic priority: SETTLE > CRYSTALLIZE > REBALANCE > DEPLOY > REALIZE
+    // checkUpkeep — deterministic priority: EPOCH_FUND > EPOCH_CLOSE > CRYSTALLIZE > REBALANCE > DEPLOY > REALIZE
     // ═══════════════════════════════════════════════════════════════════════════════
 
     function checkUpkeep(bytes calldata)
@@ -181,53 +176,33 @@ contract VaultUpkeep is AutomationCompatibleInterface, Ownable {
             }
         }
 
-        // Priority 1: SETTLE or REALIZE_FOR_QUEUE (queue-driven, anti-churn)
+        // Priority 1: EPOCH_FUND — unlock a backlogged closed-but-unfunded epoch
+        // before opening/closing new ones. fundEpoch() runs the full warm-refill
+        // → strategy-redeem liquidity waterfall internally, so no separate
+        // deficit/realize probe is needed here (unlike the old SETTLE path).
         {
-            bool canSettle;
-            try core.canSettle() returns (bool ok) { canSettle = ok; } catch {}
-            if (canSettle) {
-                // Anti-churn: check if settle would actually process anything
-                uint256 eligibleCount;
-                try core.settlePreview(DEFAULT_MAX_CLAIMS) returns (
-                    uint256 ec, uint256, uint256, bool
-                ) {
-                    eligibleCount = ec;
-                } catch {}
-
-                if (eligibleCount == 0) {
-                    // No eligible claims (all in lockPeriod or empty).
-                    // Do NOT settle — avoid LINK burn on no-op.
-                    // Claims will mature naturally; retry at next cycle.
-                    // Fall through to CRYSTALLIZE/REBALANCE/DEPLOY/REALIZE.
-                } else {
-                    // Eligible claims exist — check liquidity
-                    uint256 deficit;
-                    try core.deficitForQueue(DEFAULT_MAX_CLAIMS) returns (uint256 d) {
-                        deficit = d;
-                    } catch {}
-
-                    if (deficit == 0) {
-                        return (true, abi.encode(Op.SETTLE, DEFAULT_MAX_CLAIMS));
-                    } else {
-                        return (true, abi.encode(Op.REALIZE_FOR_QUEUE, deficit));
-                    }
-                }
+            uint256 oldestUnfunded;
+            uint256 curEpoch;
+            try core.oldestUnfundedEpochId() returns (uint256 id) { oldestUnfunded = id; } catch {}
+            try core.currentEpochId() returns (uint256 id) { curEpoch = id; } catch {}
+            if (oldestUnfunded < curEpoch) {
+                return (true, abi.encode(Op.EPOCH_FUND, oldestUnfunded));
             }
         }
 
-        // Priority 1b: COMPACT (threshold-based — if queue dirty ratio > 30%)
+        // Priority 1b: EPOCH_CLOSE — close the current epoch once its minimum
+        // duration has elapsed, but only if it actually has claims in it
+        // (anti-churn: don't burn LINK closing an empty epoch).
         {
-            uint256 qLen;
-            uint256 pendingS;
-            try core.queueLength() returns (uint256 l) { qLen = l; } catch {}
-            try core.pendingShares() returns (uint256 p) { pendingS = p; } catch {}
-            // queueLength = entries from head to end (includes settled in middle)
-            // If queueLength is much larger than expected from pendingShares,
-            // the queue has many settled entries that waste gas on iteration.
-            // Heuristic: if queueLength > 2 * batch size AND pendingShares < queueLength * 50%
-            if (qLen > DEFAULT_MAX_CLAIMS * 2) {
-                // Dirty queue — compact needed
-                return (true, abi.encode(Op.COMPACT, uint256(0)));
+            bool canClose;
+            try core.canCloseCurrentEpoch() returns (bool ok) { canClose = ok; } catch {}
+            if (canClose) {
+                uint256 claimCount;
+                try core.currentEpochClaimCount() returns (uint256 c) { claimCount = c; } catch {}
+                if (claimCount > 0) {
+                    return (true, abi.encode(Op.EPOCH_CLOSE, uint256(0)));
+                }
+                // Empty epoch — nothing to close for. Fall through.
             }
         }
 
@@ -330,20 +305,29 @@ contract VaultUpkeep is AutomationCompatibleInterface, Ownable {
 
         (Op op, uint256 arg) = _decode(performData);
 
-        if (op == Op.SETTLE) {
-            // v8: ONLY settleFeesAndProcessQueue — no pre-settle rebalance/realize
-            // The settle path has full waterfall: hot → warm refill → strategy redeem
-            uint256 maxClaims = arg;
-            if (maxClaims == 0 || maxClaims > HARD_MAX_CLAIMS) {
-                maxClaims = DEFAULT_MAX_CLAIMS;
-            }
+        if (op == Op.EPOCH_CLOSE) {
             bool success;
-            try core.settleFeesAndProcessQueue(maxClaims) {
+            try core.closeCurrentEpoch() {
                 success = true;
             } catch {}
-            emit UpkeepPerformed(Op.SETTLE, maxClaims, success);
-            if (success) { failureCountByOp[Op.SETTLE] = 0; _recordSuccess(); }
-            else { failureCountByOp[Op.SETTLE]++; _recordRealFailure(); }
+            emit UpkeepPerformed(Op.EPOCH_CLOSE, 0, success);
+            if (success) { failureCountByOp[Op.EPOCH_CLOSE] = 0; _recordSuccess(); }
+            else { failureCountByOp[Op.EPOCH_CLOSE]++; _recordRealFailure(); }
+            return;
+        }
+
+        if (op == Op.EPOCH_FUND) {
+            // fundEpoch() runs its own warm-refill -> strategy-redeem waterfall
+            // internally; a partial fund (deficit remains) is not a failure —
+            // it's retried next cycle via oldestUnfundedEpochId(), which won't
+            // have advanced past this epoch yet.
+            bool success;
+            try core.fundEpoch(arg) {
+                success = true;
+            } catch {}
+            emit UpkeepPerformed(Op.EPOCH_FUND, arg, success);
+            if (success) { failureCountByOp[Op.EPOCH_FUND] = 0; _recordSuccess(); }
+            else { failureCountByOp[Op.EPOCH_FUND]++; _recordRealFailure(); }
             return;
         }
 
@@ -409,38 +393,6 @@ contract VaultUpkeep is AutomationCompatibleInterface, Ownable {
             return;
         }
 
-        if (op == Op.COMPACT) {
-            bool success;
-            try core.compactQueue() {
-                success = true;
-            } catch {}
-            emit UpkeepPerformed(Op.COMPACT, 0, success);
-            if (success) {
-                _recordSuccess();
-            } else {
-                _recordRealFailure();
-            }
-            return;
-        }
-
-        if (op == Op.REALIZE_FOR_QUEUE) {
-            bool success;
-            try core.realizeForQueue(arg) {
-                success = true;
-            } catch (bytes memory reason) {
-                emit RealizeForQueueFailed(arg, reason);
-            }
-            emit UpkeepPerformed(Op.REALIZE_FOR_QUEUE, arg, success);
-            if (success) {
-                lastRealizeTs = uint64(block.timestamp);
-                failureCountByOp[Op.REALIZE_FOR_QUEUE] = 0;
-                _recordSuccess();
-            } else {
-                failureCountByOp[Op.REALIZE_FOR_QUEUE]++;
-                _recordRealFailure();
-            }
-            return;
-        }
 
         if (op == Op.RECONCILE) {
             bool success;

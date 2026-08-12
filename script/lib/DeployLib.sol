@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import { DeployTypes } from "@multyr-core/libs/DeployTypes.sol";
 import { CoreVault } from "@multyr-core/core/CoreVault.sol";
-import { QueueModule } from "@multyr-core/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "@multyr-core/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "@multyr-core/core/modules/AdminModule.sol";
 import { ERC4626Module } from "@multyr-core/core/modules/ERC4626Module.sol";
 import { LiquidityOpsModule } from "@multyr-core/core/modules/LiquidityOpsModule.sol";
@@ -25,7 +25,7 @@ library DeployLib {
 
     function deploy(
         DeployTypes.DeployConfig memory config,
-        QueueModule queueModule,
+        EpochedQueueModule queueModule,
         AdminModule adminModule,
         ERC4626Module erc4626Module,
         LiquidityOpsModule liquidityOpsModule
@@ -37,7 +37,7 @@ library DeployLib {
 
     function deployDeterministic(
         DeployTypes.DeployConfig memory config,
-        QueueModule queueModule,
+        EpochedQueueModule queueModule,
         AdminModule adminModule,
         ERC4626Module erc4626Module,
         LiquidityOpsModule liquidityOpsModule,
@@ -50,7 +50,7 @@ library DeployLib {
 
     function _deploy(
         DeployTypes.DeployConfig memory config,
-        QueueModule queueModule,
+        EpochedQueueModule queueModule,
         AdminModule adminModule,
         ERC4626Module erc4626Module,
         LiquidityOpsModule liquidityOpsModule,
@@ -132,7 +132,7 @@ library DeployLib {
 
     function _configureRouting(
         CoreVault vault,
-        QueueModule queueModule,
+        EpochedQueueModule queueModule,
         AdminModule adminModule,
         ERC4626Module erc4626Module,
         LiquidityOpsModule liquidityOpsModule

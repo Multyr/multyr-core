@@ -22,6 +22,8 @@ interface IQueueModule {
     function endEpochCrystallize() external;
     function queueLength() external view returns (uint256);
     function pendingShares() external view returns (uint256);
+    function requestEpochWithdrawal(uint256 shares) external returns (uint256 epochId, uint256 claimId);
+    function closeCurrentEpoch() external;
 }
 
 /// @title Hardening: canX/performX Consistency + Event Correctness + Wiring
@@ -66,13 +68,18 @@ contract Hardening_Consistency is Test {
     function test_canSettle_vs_settle() public {
         // Create a claim to make canSettle true
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(false, 100_000e6);
+        IQueueModule(address(vault)).requestEpochWithdrawal(100_000e6);
+
+        // canSettle() reflects the epoch queue: an epoch is only settle-ready
+        // once it has run for at least the minimum epoch duration
+        // (MockParamsProvider.getQueueParams sets epochDuration = 7 days).
+        vm.warp(block.timestamp + 7 days + 1);
 
         bool canSettle = vault.canSettle();
         assertTrue(canSettle, "canSettle should be true with pending claims");
 
         // performX should succeed
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(10);
+        IQueueModule(address(vault)).closeCurrentEpoch();
         // No revert = success
     }
 

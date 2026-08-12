@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import { DeployTypes } from "../../src/libs/DeployTypes.sol";
 import { CoreVault } from "../../src/core/CoreVault.sol";
-import { QueueModule } from "../../src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "../../src/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "../../src/core/modules/AdminModule.sol";
 import { ERC4626Module } from "../../src/core/modules/ERC4626Module.sol";
 import { LiquidityOpsModule } from "../../src/core/modules/LiquidityOpsModule.sol";
@@ -18,7 +18,7 @@ library CoreDeployHelper {
 
     function deploy(
         DeployTypes.DeployConfig memory config,
-        QueueModule queueModule,
+        EpochedQueueModule queueModule,
         AdminModule adminModule,
         ERC4626Module erc4626Module,
         LiquidityOpsModule liquidityOpsModule
@@ -66,7 +66,7 @@ library CoreDeployHelper {
 
     function _configureRouting(
         CoreVault vault,
-        QueueModule queueModule,
+        EpochedQueueModule queueModule,
         AdminModule adminModule,
         ERC4626Module erc4626Module,
         LiquidityOpsModule liquidityOpsModule

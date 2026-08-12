@@ -150,14 +150,16 @@ contract FixedMaturityModule {
         emit Events.FixedMaturityCycleActivated(fm.startTs, fm.maturityTs, amount);
     }
 
-    /// @notice Matured → Closed (requires pendingShares == 0, dust assets allowed).
+    /// @notice Matured → Closed (requires outstandingClaimCount == 0, dust assets allowed).
     function closeFixedMaturityCycle() external {
         FixedMaturityStorage.Layout storage fm = FixedMaturityStorage.layout();
         if (fm.vaultState != VaultState.Matured) revert InvalidVaultState();
 
-        // pendingShares == 0 is the only hard requirement. Dust assets are allowed.
+        // outstandingClaimCount == 0 is the only hard requirement (no claim left
+        // unclaimed across any epoch — open, closed-unfunded, or funded-unclaimed).
+        // Dust assets are allowed.
         (bool ok, bytes memory data) = address(this).staticcall(
-            abi.encodeWithSignature("pendingShares()")
+            abi.encodeWithSignature("outstandingClaimCount()")
         );
         if (!ok || abi.decode(data, (uint256)) != 0) revert CloseNotAllowedWithPendingShares();
 

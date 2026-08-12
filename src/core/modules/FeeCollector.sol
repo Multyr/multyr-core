@@ -53,9 +53,12 @@ contract FeeCollector is ReentrancyGuard, Pausable {
     bool public allowlistEnabled;
 
     /// @notice Tracks shares queued during AUTO_HARVEST fallback (epoch cap exhausted)
-    /// @dev When requestClaim(true) falls back to queue, shares leave FeeCollector balance
-    ///      but underlying is not yet delivered. Call harvestQueued() after settlement.
+    /// @dev When requestInstantWithdrawal falls back to the epoch queue, shares leave
+    ///      FeeCollector balance but underlying is not yet delivered. Call harvestQueued()
+    ///      after settlement.
     mapping(address => uint256) public pendingHarvestShares; // shareToken => shares queued
+    mapping(address => uint256) public pendingHarvestEpochId; // shareToken => epoch the claim was submitted to
+    mapping(address => uint256) public pendingHarvestClaimId; // shareToken => claim ID within that epoch
 
     // Events
     event Distributed(
@@ -206,24 +209,31 @@ contract FeeCollector is ReentrancyGuard, Pausable {
             }
             if (sc.mode == ShareMode.AUTO_HARVEST) {
                 require(sc.underlying != address(0), "FeeCollector: no underlying");
+                // Only one outstanding epoch claim per token can be tracked at a time
+                // (single-slot bookkeeping below) -- must be claimed via harvestQueued()
+                // before another fallback can be queued.
+                require(pendingHarvestShares[token] == 0, "FeeCollector: harvest already queued");
 
                 // Snapshot underlying balance before the call
                 uint256 underBefore = IERC20(sc.underlying).balanceOf(address(this));
 
-                // requestClaim(true) settles inline if cap+liquidity OK;
-                // falls back to queue (no revert) when epoch cap is exhausted.
-                IQueueModule(token).requestClaim(true, bal);
+                // requestInstantWithdrawal settles inline if cap+liquidity OK;
+                // falls back to the epoch queue (no revert) when the cap is exhausted.
+                (bool settledImmediately, uint256 epochId, uint256 claimId) =
+                    IQueueModule(token).requestInstantWithdrawal(bal);
 
                 uint256 out = IERC20(sc.underlying).balanceOf(address(this)) - underBefore;
 
-                if (out > 0) {
+                if (settledImmediately && out > 0) {
                     // HAPPY PATH: instant settlement delivered underlying in this tx
                     emit Harvested(token, sc.underlying, bal, out);
                     _distributeUnderlying(sc.underlying, out);
                 } else {
-                    // FALLBACK: shares moved to vault queue escrow; underlying not yet delivered.
-                    // Call harvestQueued(token) after vault processes the queue.
+                    // FALLBACK: shares moved to vault epoch escrow; underlying not yet delivered.
+                    // Call harvestQueued(token) once the epoch is FUNDED to pull the claim.
                     pendingHarvestShares[token] += bal;
+                    pendingHarvestEpochId[token] = epochId;
+                    pendingHarvestClaimId[token] = claimId;
                     emit HarvestQueued(token, bal);
                 }
                 return;
@@ -251,9 +261,10 @@ contract FeeCollector is ReentrancyGuard, Pausable {
         emit Distributed(token, bal, toTreasury, toOps, toSafetyReserve);
     }
 
-    /// @notice Process underlying delivered by a previously-queued AUTO_HARVEST fallback claim.
-    /// @dev Call after someone has settled the pending queue entry via processQueuedRedemptions().
-    ///      Anyone can call — idempotent if underlying balance is 0.
+    /// @notice Pull underlying for a previously-queued AUTO_HARVEST fallback claim.
+    /// @dev Call once the epoch the claim was submitted to has been funded
+    ///      (EpochedQueueModule.fundEpoch()). Reverts EpochNotFunded via the vault
+    ///      if called too early -- anyone can call, idempotent via pendingHarvestShares.
     function harvestQueued(address token) external nonReentrant whenNotPaused {
         ShareConfig memory sc = shareConfigs[token];
         require(sc.isSet && sc.mode == ShareMode.AUTO_HARVEST, "FeeCollector: not AUTO_HARVEST");
@@ -262,13 +273,17 @@ contract FeeCollector is ReentrancyGuard, Pausable {
         uint256 pending = pendingHarvestShares[token];
         require(pending > 0, "FeeCollector: no pending harvest");
 
-        // Shares should be 0 (settled by vault — escrowed shares are gone)
-        require(IERC20(token).balanceOf(address(this)) == 0, "FeeCollector: shares still escrowed");
+        uint256 epochId = pendingHarvestEpochId[token];
+        uint256 claimId = pendingHarvestClaimId[token];
 
-        uint256 underBal = IERC20(sc.underlying).balanceOf(address(this));
+        uint256 underBefore = IERC20(sc.underlying).balanceOf(address(this));
+        IQueueModule(token).claimEpochAssets(epochId, claimId);
+        uint256 underBal = IERC20(sc.underlying).balanceOf(address(this)) - underBefore;
         require(underBal > 0, "FeeCollector: no underlying received");
 
         pendingHarvestShares[token] = 0;
+        pendingHarvestEpochId[token] = 0;
+        pendingHarvestClaimId[token] = 0;
 
         emit HarvestSettled(token, sc.underlying, pending, underBal);
         _distributeUnderlying(sc.underlying, underBal);

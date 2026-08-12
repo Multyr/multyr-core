@@ -6,7 +6,7 @@ import { Vm } from "forge-std/Vm.sol";
 import { console } from "forge-std/console.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { CoreVault } from "src/core/CoreVault.sol";
-import { QueueModule } from "src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "src/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "src/core/modules/AdminModule.sol";
 import { SelectorLib } from "src/core/libraries/SelectorLib.sol";
 import { ERC20Mock } from "src/mocks/ERC20Mock.sol";
@@ -24,7 +24,7 @@ interface IQueueModule_Routing {
 /// @notice Tests for the Diamond-lite routing mechanism
 contract CoreVault_Routing_Test is Test {
     CoreVault public router;
-    QueueModule public queueModule;
+    EpochedQueueModule public queueModule;
     AdminModule public adminModule;
     ERC20Mock public usdc;
     MockParamsProvider public params;
@@ -64,7 +64,7 @@ contract CoreVault_Routing_Test is Test {
         router = _harness;
 
         // Deploy modules
-        queueModule = new QueueModule();
+        queueModule = new EpochedQueueModule();
         adminModule = new AdminModule();
 
         // Configure routing using SelectorLib (source of truth)
@@ -103,12 +103,12 @@ contract CoreVault_Routing_Test is Test {
     // ═══════════════════════════════════════════════════════════════════════════════
 
     function test_moduleOf_returnsCorrectModule() public view {
-        assertEq(router.moduleOf(QueueModule.requestClaim.selector), address(queueModule));
+        assertEq(router.moduleOf(EpochedQueueModule.requestEpochWithdrawal.selector), address(queueModule));
         assertEq(router.moduleOf(AdminModule.submitFeeParams.selector), address(adminModule));
     }
 
     function test_roleOf_returnsCorrectRole() public view {
-        assertEq(router.roleOf(QueueModule.requestClaim.selector), ROLE_PUBLIC);
+        assertEq(router.roleOf(EpochedQueueModule.requestEpochWithdrawal.selector), ROLE_PUBLIC);
         assertEq(router.roleOf(AdminModule.submitFeeParams.selector), ROLE_OWNER);
     }
 
@@ -424,7 +424,7 @@ contract CoreVault_Routing_Test is Test {
 
     function test_getExpectedRole_returnsCorrect() public pure {
         // Queue module functions should be PUBLIC
-        (uint8 role, bool found) = SelectorLib.getExpectedRole(QueueModule.requestClaim.selector);
+        (uint8 role, bool found) = SelectorLib.getExpectedRole(EpochedQueueModule.requestEpochWithdrawal.selector);
         assertTrue(found);
         assertEq(role, SelectorLib.ROLE_PUBLIC);
 

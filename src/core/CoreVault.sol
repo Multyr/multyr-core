@@ -701,9 +701,31 @@ contract CoreVault is ERC4626, ICoreVault {
     // ICoreVault VIEW INTERFACE
     // ═══════════════════════════════════════════════════════════════════════════════
 
+    /// @notice True if there is epoch-queue work a keeper should perform:
+    ///         either the open epoch is closeable and non-empty, or a prior
+    ///         epoch closed but hasn't been funded yet.
+    /// @dev Reads EpochedQueueModule's delegatecall-dispatched views via
+    ///      staticcall-to-self (this function lives in CoreVault's own
+    ///      bytecode, not the module, so it cannot call them directly).
     function canSettle() external view returns (bool) {
-        QueueStorage.Layout storage q = QueueStorage.layout();
-        return q.queue.length > q.head;
+        (bool okClose, bytes memory dataClose) =
+            address(this).staticcall(abi.encodeWithSignature("canCloseCurrentEpoch()"));
+        if (okClose && dataClose.length == 32 && abi.decode(dataClose, (bool))) {
+            (bool okCnt, bytes memory dataCnt) =
+                address(this).staticcall(abi.encodeWithSignature("currentEpochClaimCount()"));
+            if (okCnt && dataCnt.length == 32 && abi.decode(dataCnt, (uint256)) > 0) {
+                return true;
+            }
+        }
+
+        (bool okOldest, bytes memory dataOldest) =
+            address(this).staticcall(abi.encodeWithSignature("oldestUnfundedEpochId()"));
+        (bool okCur, bytes memory dataCur) =
+            address(this).staticcall(abi.encodeWithSignature("currentEpochId()"));
+        if (okOldest && okCur && dataOldest.length == 32 && dataCur.length == 32) {
+            return abi.decode(dataOldest, (uint256)) < abi.decode(dataCur, (uint256));
+        }
+        return false;
     }
 
     function canCrystallize() external view returns (bool) {
@@ -760,37 +782,6 @@ contract CoreVault is ERC4626, ICoreVault {
         uint256 target = Percentage.mulBpsDown(tvl, targetBps);
         if (currentCash >= target) return (false, 0);
         return (true, target - currentCash);
-    }
-
-    /// @notice Returns strategy redeem deficit for pending queue claims.
-    /// @dev Single source of truth for VaultUpkeep scheduler.
-    ///      Returns 0 if hot + warm (discounted by slippage) cover the batch.
-    ///      Returns the USDC shortfall that must come from strategy redeem.
-    function deficitForQueue(uint256 maxClaims) external view returns (uint256 deficit) {
-        (bool ok, bytes memory data) = address(this).staticcall(
-            abi.encodeWithSignature("requiredHotForBatch(uint256)", maxClaims)
-        );
-        if (!ok) return 0;
-        uint256 required = abi.decode(data, (uint256));
-        if (required == 0) return 0;
-
-        uint256 hot = IERC20(asset()).balanceOf(address(this));
-        if (hot >= required) return 0;
-
-        // Discount warm by slippage (conservative estimate)
-        CoreStorage.Layout storage core = CoreStorage.layout();
-        IBufferManager bm = core.bufferManager;
-        if (address(bm) != address(0)) {
-            (uint256 warmNav,, bool valid) = bm.warmNavState();
-            if (valid && warmNav > 0) {
-                uint16 slipBps = bm.getConfig().maxWarmSlippageBps;
-                uint256 usableWarm = warmNav * (10000 - uint256(slipBps)) / 10000;
-                uint256 available = hot + usableWarm;
-                if (available >= required) return 0;
-                return required - available;
-            }
-        }
-        return required - hot;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════

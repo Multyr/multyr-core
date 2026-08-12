@@ -8,7 +8,7 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import { VaultFactory } from "../../src/factory/VaultFactory.sol";
 import { CoreVault } from "../../src/core/CoreVault.sol";
-import { QueueModule } from "../../src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "../../src/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "../../src/core/modules/AdminModule.sol";
 import { ERC4626Module } from "../../src/core/modules/ERC4626Module.sol";
 import { LiquidityOpsModule } from "../../src/core/modules/LiquidityOpsModule.sol";
@@ -106,7 +106,7 @@ contract MockStrategyRouter {
 /// @notice Integration tests for VaultFactory deployment flow (off-chain deploy, on-chain register)
 contract VaultFactory_Integration is Test {
     VaultFactory public factory;
-    QueueModule public sharedQueue;
+    EpochedQueueModule public sharedQueue;
     AdminModule public sharedAdmin;
     ERC4626Module public sharedERC4626;
     LiquidityOpsModule public sharedLiquidityOps;
@@ -120,7 +120,7 @@ contract VaultFactory_Integration is Test {
 
     function setUp() public {
         factory = new VaultFactory();
-        sharedQueue = new QueueModule();
+        sharedQueue = new EpochedQueueModule();
         sharedAdmin = new AdminModule();
         sharedERC4626 = new ERC4626Module();
         sharedLiquidityOps = new LiquidityOpsModule();
@@ -247,7 +247,7 @@ contract VaultFactory_Integration is Test {
         );
 
         vm.prank(alice);
-        IQueueModule(address(vault)).requestClaim(true, depositAmount);
+        IQueueModule(address(vault)).requestInstantWithdrawal(depositAmount);
         assertEq(usdc.balanceOf(alice), 1_000_000e6, "Alice should get assets back");
     }
 
@@ -445,7 +445,7 @@ contract VaultFactory_Integration is Test {
         assertEq(
             address(result1.queueModule),
             address(result2.queueModule),
-            "QueueModule should be shared"
+            "EpochedQueueModule should be shared"
         );
         assertEq(
             address(result1.adminModule),

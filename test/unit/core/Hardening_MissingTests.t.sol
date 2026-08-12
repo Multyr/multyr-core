@@ -11,6 +11,7 @@ import { MockParamsProvider } from "../../helpers/MockParamsProvider.sol";
 import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTests.sol";
 import { VaultUpkeep, Op } from "../../../src/automation/VaultUpkeep.sol";
 import { IStrategyRouter } from "../../../src/interfaces/IStrategyRouter.sol";
+import { EpochedQueueModule } from "../../../src/core/modules/EpochedQueueModule.sol";
 
 interface IQueueModule {
     function requestClaim(bool immediate, uint256 shares) external;
@@ -151,8 +152,6 @@ contract Hardening_MissingTests is Test {
             address(0), // no buffer manager
             address(stubRouter),
             address(stubConfig),
-            25, // maxClaims
-            100, // hardMaxClaims
             type(uint256).max, // maxRealize
             type(uint256).max, // maxDeploy
             10, // minRealizeGapBps
@@ -160,7 +159,7 @@ contract Hardening_MissingTests is Test {
         );
 
         // Verify initial state
-        assertEq(upkeep.failureCountByOp(Op.SETTLE), 0, "initial failure count = 0");
+        assertEq(upkeep.failureCountByOp(Op.EPOCH_CLOSE), 0, "initial failure count = 0");
         assertEq(upkeep.failureCountByOp(Op.DEPLOY), 0, "initial deploy count = 0");
         assertEq(upkeep.failureCountByOp(Op.REALIZE), 0, "initial realize count = 0");
 
@@ -170,11 +169,12 @@ contract Hardening_MissingTests is Test {
         assertEq(upkeep.lastAction(), 0, "initial lastAction = 0");
     }
 
-    /// @notice VaultUpkeep settleFeesAndProcessQueue succeeds via performUpkeep
+    /// @notice VaultUpkeep closeCurrentEpoch succeeds via performUpkeep
     function test_M3_upkeepSettleSucceeds() public {
-        // Queue a claim so canSettle returns true
+        // Queue a claim, then wait out the epoch duration so canCloseCurrentEpoch() is true.
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(false, 100_000e6);
+        EpochedQueueModule(address(vault)).requestEpochWithdrawal(100_000e6);
+        vm.warp(block.timestamp + 7 days + 1);
 
         StubRouterReader stubRouter = new StubRouterReader();
         StubGlobalConfigReader stubConfig = new StubGlobalConfigReader();
@@ -184,7 +184,6 @@ contract Hardening_MissingTests is Test {
             address(0),
             address(stubRouter),
             address(stubConfig),
-            25, 100,
             type(uint256).max, type(uint256).max,
             10, 10000
         );
@@ -196,8 +195,8 @@ contract Hardening_MissingTests is Test {
             // Perform
             upkeep.performUpkeep(data);
 
-            // After successful settle, failure count should be 0
-            assertEq(upkeep.failureCountByOp(Op.SETTLE), 0, "reset after success");
+            // After successful epoch close, failure count should be 0
+            assertEq(upkeep.failureCountByOp(Op.EPOCH_CLOSE), 0, "reset after success");
         }
     }
 

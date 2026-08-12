@@ -776,14 +776,16 @@ contract RolesTimelockInvariants is Test {
         console.log("\n=== QUEUEMODULE SELECTORS (ROLE_PUBLIC = 0) ===");
 
         bytes4[] memory queueSels = SelectorLib.getQueueModuleSelectors();
-        // string[6]: index 5 = "compactQueue" added when QUEUE_MODULE_SELECTORS grew from 5 to 6.
-        string[6] memory queueNames = [
-            "requestClaim",
-            "cancelClaim",
-            "processQueuedRedemptions",
-            "settleFeesAndProcessQueue",
-            "endEpochCrystallize",
-            "compactQueue"
+        // "Queue module" = EpochedQueueModule (the sole queue-settlement mechanism).
+        string[8] memory queueNames = [
+            "requestEpochWithdrawal",
+            "cancelEpochWithdrawal",
+            "closeCurrentEpoch",
+            "fundEpoch",
+            "claimEpochAssets",
+            "batchClaimEpochAssets",
+            "requestInstantWithdrawal",
+            "endEpochCrystallize"
         ];
 
         for (uint256 i = 0; i < queueSels.length; i++) {
