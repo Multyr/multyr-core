@@ -22,6 +22,11 @@ import {
 } from "../storage/FixedMaturityStorage.sol";
 import { FixedMaturityLogicLib } from "../libraries/FixedMaturityLogicLib.sol";
 
+/// @dev Minimal interface for the best-effort self-call in _triggerAutoClose().
+interface IFixedMaturityAutoClose {
+    function autoCloseFunding() external;
+}
+
 /// @title ERC4626Module v3 (ExitEngineLib Architecture)
 /// @notice Handles ERC4626 user-facing operations via delegatecall from CoreVault.
 /// @dev v9 changes (ExitEngineLib refactor):
@@ -193,6 +198,11 @@ contract ERC4626Module {
         // NAV freshness before convertToAssets (W2: never block)
         _trySoftRefreshWarmNav();
 
+        // Cached once: liquidity sourcing always runs unconditionally below, so
+        // there's no lazy-evaluation benefit to deferring this fetch -- reused
+        // by _sourceLiquidityForForceWithdraw and the final transfer.
+        address assetAddr = _asset();
+
         // Calculate base shares
         uint256 baseShares = _previewWithdraw(assets);
 
@@ -219,7 +229,7 @@ contract ERC4626Module {
         _checkWithdrawalLimitsForForce(owner_, gross, core);
 
         // Source liquidity with user plan
-        _sourceLiquidityForForceWithdraw(assets, plan, core);
+        _sourceLiquidityForForceWithdraw(assetAddr, assets, plan, core);
 
         // Transfer fee shares to feeCollector (NO mint — anti-dilution)
         if (totalFeeShares > 0) {
@@ -247,7 +257,7 @@ contract ERC4626Module {
         _processorBurn(owner_, baseShares);
 
         // Transfer exact assets to receiver
-        IERC20(_asset()).safeTransfer(receiver, assets);
+        IERC20(assetAddr).safeTransfer(receiver, assets);
 
         emit Events.ForceWithdrawExecuted(msg.sender, owner_, receiver, assets, sharesSpent);
         emit Events.ForceExit(owner_, sharesSpent, assets, totalFeeShares);
@@ -308,12 +318,16 @@ contract ERC4626Module {
         // same as forceWithdraw().
         _checkWithdrawalLimitsForForce(msg.sender, targetAssets, core);
 
+        // Cached once: the pull always runs unconditionally below, so there's
+        // no lazy-evaluation benefit to deferring this fetch -- reused by
+        // _forcePullAllLiquidity, the post-pull balance check, and the payout.
+        address assetAddr = _asset();
+
         // Pull liquidity BEFORE sizing the burn/fee — deterministic, no plan, no
         // LossCap. This is a best-effort pull; the fill ratio computed below
         // determines how much of the caller's shares are actually consumed.
-        _forcePullAllLiquidity(targetAssets, core);
+        _forcePullAllLiquidity(assetAddr, targetAssets, core);
 
-        address assetAddr = _asset();
         uint256 hot = IERC20(assetAddr).balanceOf(address(this));
         assetsReceived = hot >= targetAssets ? targetAssets : hot;
 
@@ -393,10 +407,10 @@ contract ERC4626Module {
 
     /// @dev Deterministic liquidity pull: hot → warm → strategy
     function _forcePullAllLiquidity(
+        address assetAddr,
         uint256 target,
         CoreStorage.Layout storage core
     ) internal {
-        address assetAddr = _asset();
         uint256 hot = IERC20(assetAddr).balanceOf(address(this));
         if (hot >= target) return;
 
@@ -446,11 +460,11 @@ contract ERC4626Module {
 
     /// @dev Source liquidity with user plan for force withdraw
     function _sourceLiquidityForForceWithdraw(
+        address assetAddr,
         uint256 assets,
         IStrategyRouter.Pull[] calldata plan,
         CoreStorage.Layout storage core
     ) internal {
-        address assetAddr = _asset();
         uint256 hot = IERC20(assetAddr).balanceOf(address(this));
 
         if (hot >= assets) return;
@@ -573,8 +587,11 @@ contract ERC4626Module {
     /// @dev Trigger auto-close via FixedMaturityModule.autoCloseFunding() (best-effort).
     ///      autoCloseFunding() is a no-op if conditions are no longer valid (race-safe).
     function _triggerAutoClose() private {
-        // Call autoCloseFunding() via this vault's routing. Best-effort: ignore revert.
-        address(this).call(abi.encodeWithSignature("autoCloseFunding()"));
+        // Direct interface call via try/catch instead of a raw low-level call --
+        // same best-effort/ignore-failure semantics (catch swallows exactly like
+        // the old unchecked `.call()` did), but the compiler resolves the
+        // selector at compile time instead of hashing "autoCloseFunding()" at runtime.
+        try IFixedMaturityAutoClose(address(this)).autoCloseFunding() { } catch { }
     }
 
     /// @dev Mint exact shares. Gross-up: user pays grossAssets = ceil(netAssets * 10000 / (10000 - depBps)).

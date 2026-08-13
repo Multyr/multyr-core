@@ -13,6 +13,7 @@ import { IRouterAllocationPolicy } from "../../interfaces/IRouterAllocationPolic
 import { IRouterRebalanceGuard } from "../../interfaces/IRouterRebalanceGuard.sol";
 import { IExecutionMemory } from "../../interfaces/IExecutionMemory.sol";
 import { AllocationTypes } from "../../interfaces/IAllocationTypes.sol";
+import { ICoreVault } from "../../interfaces/ICoreVault.sol";
 import { AllocationInvariantLib } from "../libraries/AllocationInvariantLib.sol";
 import {
     FixedMaturityStorage,
@@ -164,15 +165,9 @@ contract LiquidityOpsModule {
         if (remainingCap > 0) {
             uint16 targetBps = bm.getConfig().opsReserveTargetBps;
             if (targetBps > 0) {
-                (bool assetOk, bytes memory assetData) =
-                    address(this).staticcall(abi.encodeWithSignature("asset()"));
-                if (!assetOk || assetData.length < 32) revert AssetQueryFailed();
-                address assetAddr = abi.decode(assetData, (address));
+                address assetAddr = ICoreVault(address(this)).asset();
                 uint256 currentCash = IERC20(assetAddr).balanceOf(address(this));
-                (bool ok, bytes memory data) =
-                    address(this).staticcall(abi.encodeWithSignature("totalAssets()"));
-                if (!ok || data.length < 32) revert AssetQueryFailed();
-                uint256 tvl = abi.decode(data, (uint256));
+                uint256 tvl = ICoreVault(address(this)).totalAssets();
                 uint256 target = Percentage.mulBpsDown(tvl, targetBps);
                 if (currentCash < target) {
                     uint256 gap = target - currentCash;
@@ -370,20 +365,27 @@ contract LiquidityOpsModule {
                 IStrategyRouter.Allocation[] memory deposits = new IStrategyRouter.Allocation[](depositCount);
                 uint256 dk = 0;
                 uint256 remaining = totalWithdrawn;
-                for (uint256 i = 0; i < ek && remaining > 0;) {
-                    if (targets[i] > currentAllocs[i]) {
-                        uint256 need = targets[i] - currentAllocs[i];
-                        uint256 give = need > remaining ? remaining : need;
-                        (bool ok, bytes memory assetData) =
-                            address(this).staticcall(abi.encodeWithSignature("asset()"));
-                        if (ok && assetData.length == 32) {
-                            address assetAddr = abi.decode(assetData, (address));
+                // Hoisted out of the loop below: asset() is invariant across
+                // iterations, so this replaces what was previously up to
+                // `depositCount` identical self-calls with exactly one. Same
+                // tolerant-failure semantics as before: if the query fails,
+                // assetAddr stays address(0) and every iteration's transfer is
+                // skipped, matching the old per-iteration "ok && length==32" gate.
+                (bool assetOk, bytes memory assetData) =
+                    address(this).staticcall(abi.encodeWithSignature("asset()"));
+                address assetAddr =
+                    (assetOk && assetData.length == 32) ? abi.decode(assetData, (address)) : address(0);
+                if (assetAddr != address(0)) {
+                    for (uint256 i = 0; i < ek && remaining > 0;) {
+                        if (targets[i] > currentAllocs[i]) {
+                            uint256 need = targets[i] - currentAllocs[i];
+                            uint256 give = need > remaining ? remaining : need;
                             IERC20(assetAddr).safeTransfer(eligible[i], give);
                             deposits[dk++] = IStrategyRouter.Allocation(eligible[i], give, true);
                             remaining -= give;
                         }
+                        unchecked { ++i; }
                     }
-                    unchecked { ++i; }
                 }
                 assembly { mstore(deposits, dk) }
                 if (dk > 0) {
@@ -590,23 +592,13 @@ contract LiquidityOpsModule {
         }
         cs.packedFlags |= CoreStorage.FLAG_REENTRANCY_LOCKED;
 
-        // Get NAV breakdown via staticcall to self (= CoreVault in delegatecall)
-        (bool ok, bytes memory data) =
-            address(this).staticcall(abi.encodeWithSignature("totalAssetsBreakdown()"));
-        if (!ok || data.length < 96) {
-            cs.packedFlags &= ~CoreStorage.FLAG_REENTRANCY_LOCKED;
-            revert NavQueryFailed();
-        }
-        (uint256 nav, uint256 hot, uint256 warm) = abi.decode(data, (uint256, uint256, uint256));
+        // Direct interface call instead of staticcall+abi.encodeWithSignature --
+        // same semantics (delegatecall context, address(this) is the vault),
+        // cheaper, and any revert here unwinds this whole call (including the
+        // FLAG_REENTRANCY_LOCKED write above) without needing to manually clear it.
+        (uint256 nav, uint256 hot, uint256 warm) = ICoreVault(address(this)).totalAssetsBreakdown();
 
-        // Get asset address via staticcall (robust ABI check)
-        bytes memory assetData;
-        (ok, assetData) = address(this).staticcall(abi.encodeWithSignature("asset()"));
-        if (!ok || assetData.length < 32) {
-            cs.packedFlags &= ~CoreStorage.FLAG_REENTRANCY_LOCKED;
-            revert AssetQueryFailed();
-        }
-        address assetAddr = abi.decode(assetData, (address));
+        address assetAddr = ICoreVault(address(this)).asset();
 
         // Compute deployable surplus (same formula as canDeploy)
         IBufferManager.BufferConfig memory cfg = bm.getConfig();

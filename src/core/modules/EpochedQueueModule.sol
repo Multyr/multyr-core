@@ -239,13 +239,13 @@ contract EpochedQueueModule {
 
         // Initialise epoch 0 if this is the very first submission
         epochId = eq.currentEpochId;
-        if (eq.epochs[epochId].openedAt == 0) {
-            eq.epochs[epochId].openedAt = uint64(block.timestamp);
-            eq.epochs[epochId].state    = EpochQueueStorage.EpochState.Open;
+        EpochQueueStorage.EpochData storage epoch = eq.epochs[epochId];
+        if (epoch.openedAt == 0) {
+            epoch.openedAt = uint64(block.timestamp);
+            epoch.state    = EpochQueueStorage.EpochState.Open;
             emit EpochOpened(epochId, uint64(block.timestamp));
         }
 
-        EpochQueueStorage.EpochData storage epoch = eq.epochs[epochId];
         if (epoch.state != EpochQueueStorage.EpochState.Open) revert EpochNotOpen();
 
         _trySoftRefreshWarmNav();
@@ -278,8 +278,11 @@ contract EpochedQueueModule {
         eq.outstandingClaimCount += 1;
 
         // --- Incentives sync (best-effort) -----------------------------------
-        uint256 grossAssets = _convertToAssets(shares);
-        _notifyIncentivesExit(user, grossAssets, core);
+        // Skip the convertToAssets() call entirely when no engine is wired --
+        // _notifyIncentivesExit would just discard the value anyway.
+        if (address(core.incentivesEngine) != address(0)) {
+            _notifyIncentivesExit(user, _convertToAssets(shares), core);
+        }
 
         emit EpochWithdrawalRequested(epochId, claimId, user, shares, netShares, feeShares);
     }
@@ -715,7 +718,13 @@ contract EpochedQueueModule {
         IParamsProvider.WithdrawalParams memory wp = core.params.getWithdrawalParams(address(this));
         uint256 gross = _convertToAssets(shares);
 
-        if (_canInstant(gross, wp, core)) {
+        // _canInstant fetches assetAddr lazily (only once the cheaper lock/cap
+        // checks pass) and hands it back so a successful settlement reuses it
+        // below instead of a second _asset() call; failing fast still costs
+        // zero extra calls.
+        (bool instantOk, address assetAddr) = _canInstant(gross, wp, core);
+
+        if (instantOk) {
             // Settle now
             (uint256 feeShares, uint256 netShares) =
                 ExitEngineLib.computeFeeShares(shares, ExitEngineLib.ExitMode.INSTANT, f.fee);
@@ -729,7 +738,7 @@ contract EpochedQueueModule {
             }
             _burn(msg.sender, netShares);
 
-            IERC20(_asset()).safeTransfer(msg.sender, netAssets);
+            IERC20(assetAddr).safeTransfer(msg.sender, netAssets);
             ExitEngineLib.consumeEpochCap(core, gross);
 
             emit Events.InstantExit(msg.sender, shares, netAssets, feeShares);
@@ -914,24 +923,29 @@ contract EpochedQueueModule {
     // INTERNAL: INSTANT SETTLEMENT CHECK
     // =========================================================================
 
+    /// @dev Returns the resolved asset address alongside the result so a
+    ///      successful caller can reuse it instead of a second _asset() call.
+    ///      assetAddr is only fetched lazily, once the cheaper lock/cap checks
+    ///      have already passed, so failing fast still costs zero extra calls.
     function _canInstant(
         uint256 gross,
         IParamsProvider.WithdrawalParams memory wp,
         CoreStorage.Layout storage core
-    ) internal view returns (bool) {
+    ) internal view returns (bool ok, address assetAddr) {
         // Lock period
         if (wp.lockPeriod > 0 &&
             block.timestamp < uint256(core.lastDepositTs[msg.sender]) + wp.lockPeriod)
-            return false;
+            return (false, address(0));
 
         // Epoch cap -- single source of truth via WithdrawalCapLib (same lib
         // ExitEngineLib.calculateCapRemaining uses), including dynamic cap support.
-        if (gross > _epochCapRemaining(core, wp, _totalAssets())) return false;
+        if (gross > _epochCapRemaining(core, wp, _totalAssets())) return (false, address(0));
 
         // Liquidity
-        if (IERC20(_asset()).balanceOf(address(this)) < gross) return false;
+        assetAddr = _asset();
+        if (IERC20(assetAddr).balanceOf(address(this)) < gross) return (false, address(0));
 
-        return true;
+        return (true, assetAddr);
     }
 
     /// @dev Remaining immediate-withdrawal capacity for the current cap epoch.
