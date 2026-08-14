@@ -287,13 +287,10 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
         require(strategyAllowlist[strat], "not-allowlisted");
         require(_idx[strat] == 0, "exists");
         // Enforce: strategy.asset() must equal core.asset() (USDC native on Arbitrum)
-        (bool okCore, bytes memory dataCore) = core.staticcall(abi.encodeWithSignature("asset()"));
-        require(okCore && dataCore.length == 32, "core.asset()");
-        address coreAsset = abi.decode(dataCore, (address));
-        (bool okStrat, bytes memory dataStrat) =
-            strat.staticcall(abi.encodeWithSignature("asset()"));
-        require(okStrat && dataStrat.length == 32, "strat.asset()");
-        address stratAsset = abi.decode(dataStrat, (address));
+        // Direct interface calls instead of staticcall+abi.encodeWithSignature —
+        // same revert-on-failure semantics, cheaper (no runtime selector hashing).
+        address coreAsset = ICoreVault(core).asset();
+        address stratAsset = IStrategy(strat).asset();
         require(stratAsset == coreAsset, "asset-mismatch");
         _strats.push(
             StrategyInfo({ strat: strat, enabled: true, priority: priority, weightBps: weightBps })
@@ -697,11 +694,11 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
         }
     }
 
-    /// @dev Get current NAV from core (totalAssets)
+    /// @dev Get current NAV from core (totalAssets). Direct interface call instead
+    ///      of staticcall+abi.encodeWithSignature — same revert-on-failure semantics,
+    ///      cheaper (no runtime selector hashing / manual decode).
     function _getCoreNav() internal view returns (uint256) {
-        (bool ok, bytes memory data) = core.staticcall(abi.encodeWithSignature("totalAssets()"));
-        require(ok && data.length == 32, "totalAssets()");
-        return abi.decode(data, (uint256));
+        return ICoreVault(core).totalAssets();
     }
 
     /// @dev Extract adapter addresses from Allocation array
@@ -1064,14 +1061,10 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
     }
 
     // ---------------- helpers ----------------
+    /// @dev Direct interface calls instead of staticcall+abi.encodeWithSignature —
+    ///      same revert-on-failure semantics, cheaper (no runtime selector hashing).
     function _balance(address a) internal view returns (uint256) {
-        // chiama ERC20(asset).balanceOf(a) via staticcall (eviti import OZ)
-        (bool ok, bytes memory data) = core.staticcall(abi.encodeWithSignature("asset()"));
-        require(ok && data.length == 32, "core.asset()");
-        address token = abi.decode(data, (address));
-        (ok, data) = token.staticcall(abi.encodeWithSignature("balanceOf(address)", a));
-        require(ok && data.length == 32, "balanceOf");
-        return abi.decode(data, (uint256));
+        return IERC20(ICoreVault(core).asset()).balanceOf(a);
     }
 
     /// @dev Check if strategy is healthy for deposits (FAIL-CLOSED)
