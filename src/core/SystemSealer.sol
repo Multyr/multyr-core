@@ -14,6 +14,7 @@ import { IRewardsPayoutManager } from "../interfaces/IRewardsPayoutManager.sol";
 import { SelectorRegistry } from "./libraries/SelectorRegistry.sol";
 
 import { AccessControl } from "@openzeppelin/contracts/access/AccessControl.sol";
+import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 /**
  * @title SystemSealer
@@ -59,6 +60,8 @@ import { AccessControl } from "@openzeppelin/contracts/access/AccessControl.sol"
  * [x] Strategy: CORE_ROLE -> CoreVault
  * [x] No deployer retains any admin roles
  * [x] Dead deposit seeded (inflation attack hardening)
+ * [x] Non-6dp vault asset has VAULT_CAP/WITHDRAWAL/GOV_CAPS overrides set
+ *     (GlobalConfig defaults are 6dp/USDC-shaped and would brick the vault)
  */
 contract SystemSealer {
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -291,6 +294,16 @@ contract SystemSealer {
         }
 
         // ─────────────────────────────────────────────────────────────────────────
+        // INVARIANT 12: Non-6dp vault asset has required GlobalConfig overrides
+        // ─────────────────────────────────────────────────────────────────────────
+        // GlobalConfig's defaults (defaultVaultDepositCap, defaultMinDeployAmount, etc.)
+        // are 6dp/USDC-shaped. An 18dp vault (e.g. WETH) sealed without the per-vault
+        // overrides gets a deposit cap of ~0.00001 WETH and a near-zero minDeployAmount —
+        // a bricked configuration. The override setters exist but nothing else enforces
+        // their use, so require them here before the vault becomes unconfigurable.
+        _checkDecimalsOverrides(vault, gc, config.vault);
+
+        // ─────────────────────────────────────────────────────────────────────────
         // ALL INVARIANTS PASSED - COMPUTE CONFIG HASH AND SEAL ATOMICALLY
         // ─────────────────────────────────────────────────────────────────────────
 
@@ -348,6 +361,27 @@ contract SystemSealer {
         // Guardian should have KEEPER_ROLE (backup)
         if (!strategy.hasRole(keeperRole, config.guardian)) {
             revert InvariantViolation("Strategy: Guardian missing KEEPER_ROLE (backup)");
+        }
+    }
+
+    /// @dev Reverts unless a non-6dp vault has all three decimals-sensitive GlobalConfig
+    ///      overrides (VAULT_CAP, WITHDRAWAL, GOV_CAPS) set. 6dp vaults match the
+    ///      GlobalConfig defaults and are exempt.
+    function _checkDecimalsOverrides(CoreVault vault, GlobalConfig gc, address vaultAddr)
+        internal
+        view
+    {
+        uint8 assetDecimals = IERC20Metadata(vault.asset()).decimals();
+        if (assetDecimals == 6) return;
+
+        if (!gc.hasOverride(vaultAddr, GlobalConfig.ParamType.VAULT_CAP)) {
+            revert InvariantViolation("Non-6dp vault missing VAULT_CAP override");
+        }
+        if (!gc.hasOverride(vaultAddr, GlobalConfig.ParamType.WITHDRAWAL)) {
+            revert InvariantViolation("Non-6dp vault missing WITHDRAWAL override");
+        }
+        if (!gc.hasOverride(vaultAddr, GlobalConfig.ParamType.GOV_CAPS)) {
+            revert InvariantViolation("Non-6dp vault missing GOV_CAPS override");
         }
     }
 
@@ -456,6 +490,22 @@ contract SystemSealer {
         // Dead deposit (inflation attack hardening)
         if (!IAdminModule(config.vault).isDeadDepositDone()) {
             return (false, "Dead deposit not seeded");
+        }
+
+        // Non-6dp vault asset must have VAULT_CAP/WITHDRAWAL/GOV_CAPS overrides set —
+        // see _checkDecimalsOverrides in verifyAndSeal for why.
+        GlobalConfig gcView = GlobalConfig(config.globalConfig);
+        uint8 assetDecimals = IERC20Metadata(vault.asset()).decimals();
+        if (assetDecimals != 6) {
+            if (!gcView.hasOverride(config.vault, GlobalConfig.ParamType.VAULT_CAP)) {
+                return (false, "Non-6dp vault missing VAULT_CAP override");
+            }
+            if (!gcView.hasOverride(config.vault, GlobalConfig.ParamType.WITHDRAWAL)) {
+                return (false, "Non-6dp vault missing WITHDRAWAL override");
+            }
+            if (!gcView.hasOverride(config.vault, GlobalConfig.ParamType.GOV_CAPS)) {
+                return (false, "Non-6dp vault missing GOV_CAPS override");
+            }
         }
 
         // All checks passed

@@ -84,7 +84,6 @@ contract RouterRebalanceGuard is IRouterRebalanceGuard {
     uint256 public baseGasCostUsd       = 50 * 1e18;
     uint16 public baseSlippageBps       = 5;
     uint16 public basePenaltyBps        = 50;
-    uint32 public maxAcceptableGasCost  = 500 * 1e6;
     uint16 public maxAcceptableSlippageBps = 1_000;
 
     // ─────────────────────────────────────────────────────────────────────

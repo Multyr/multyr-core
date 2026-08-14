@@ -87,9 +87,7 @@ contract FixedMaturityModule {
         // Overflow guard: 1B whole asset units, scaled by the vault asset's actual decimals
         // (was hardcoded to 6dp/USDC; that made realistic 18dp-asset (e.g. WETH) funding
         // targets spuriously rejected).
-        (bool assetOk, bytes memory assetData) = address(this).staticcall(abi.encodeWithSignature("asset()"));
-        if (!assetOk || assetData.length != 32) revert InvalidVaultState();
-        address vaultAsset = abi.decode(assetData, (address));
+        address vaultAsset = _asset();
         if (targetFundingAssets_ > 1_000_000_000 * (10 ** IERC20Metadata(vaultAsset).decimals())) {
             revert InvalidVaultState();
         }

@@ -22,6 +22,12 @@ contract MockPriceOracleMiddleware is IPriceOracleMiddleware {
         states[asset] = AssetState({ priceWad: priceWad, lastUpdate: uint48(block.timestamp), fresh: true, set: true });
     }
 
+    /// @notice Set a fresh WAD price for `asset` with an explicit lastUpdate timestamp
+    ///         (e.g. one in the future, to exercise the future-timestamp fail-closed branch).
+    function setPriceAtTimestamp(address asset, uint256 priceWad, uint48 lastUpdate) external {
+        states[asset] = AssetState({ priceWad: priceWad, lastUpdate: lastUpdate, fresh: true, set: true });
+    }
+
     /// @notice Mark `asset`'s price as stale without changing its value.
     function setStale(address asset) external {
         states[asset].fresh = false;

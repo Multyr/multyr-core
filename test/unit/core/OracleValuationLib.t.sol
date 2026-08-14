@@ -109,4 +109,41 @@ contract OracleValuationLib_Test is Test {
         vm.expectRevert();
         lib_.getFreshPriceWad(params, usdc, vault);
     }
+
+    function test_getFreshPriceWad_revertsWhenPriceZero() public {
+        vm.prank(governor);
+        params.setAssetOracleConfig(usdc, address(oracle), 3600);
+        oracle.setPrice(usdc, 0);
+
+        vm.expectRevert();
+        lib_.getFreshPriceWad(params, usdc, vault);
+    }
+
+    function test_getFreshPriceWad_revertsWhenFutureTimestamp() public {
+        vm.prank(governor);
+        params.setAssetOracleConfig(usdc, address(oracle), 3600);
+        oracle.setPriceAtTimestamp(usdc, 1e18, uint48(block.timestamp + 1));
+
+        vm.expectRevert();
+        lib_.getFreshPriceWad(params, usdc, vault);
+    }
+
+    function test_getFreshPriceWad_revertsOnOracleCallFailed() public {
+        RevertingOracle bad = new RevertingOracle();
+        vm.prank(governor);
+        params.setAssetOracleConfig(usdc, address(bad), 3600);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(OracleValuationLib.OracleCallFailed.selector, address(bad), bytes(""))
+        );
+        lib_.getFreshPriceWad(params, usdc, vault);
+    }
+}
+
+/// @notice getQuote(address) always reverts with empty data — exercises OracleValuationLib's
+///         staticcall-failure path (as opposed to a malformed/mis-sized return).
+contract RevertingOracle {
+    function getQuote(address) external pure returns (uint256, uint48, bool, uint8) {
+        revert();
+    }
 }
