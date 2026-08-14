@@ -153,6 +153,8 @@ contract SelectorRegistry {
         if (selector == EpochedQueueModule.canCloseCurrentEpoch.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.currentEpochClaimCount.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.epochDeficit.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.reservedForClaims.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.closedPendingAssets.selector) return ROLE_PUBLIC;
 
         // ─────────────────────────────────────────────────────────────────────────
         // ERC4626MODULE SELECTORS (10 total) - MUST BE ROLE_PUBLIC

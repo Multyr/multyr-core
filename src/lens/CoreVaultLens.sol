@@ -46,6 +46,8 @@ interface ICoreVaultLensTarget {
     function outstandingClaimCount() external view returns (uint256);
     function nextClaimIdForEpoch(uint256 epochId) external view returns (uint256);
     function totalEscrowedShares() external view returns (uint256);
+    function reservedForClaims() external view returns (uint256);
+    function closedPendingAssets() external view returns (uint256);
     function epochData(uint256 epochId) external view returns (EpochQueueStorage.EpochData memory);
     function epochClaim(uint256 epochId, uint256 claimId)
         external
@@ -327,7 +329,17 @@ contract CoreVaultLens {
         r.totalSupply = v.totalSupply();
         r.pricePerShare = pps(vault);
         r.availableLiquidity = IERC20(v.asset()).balanceOf(vault);
-        r.pendingWithdrawals = v.convertToAssets(v.totalEscrowedShares());
+        // Exact, O(1): the still-open epoch's shares haven't locked a pps yet
+        // (valued live), while closed/funded epochs' liabilities are already
+        // locked-pps-correct by construction (see EpochQueueStorage.Layout).
+        // Replaces the old convertToAssets(totalEscrowedShares()) approximation,
+        // which priced ALL escrowed shares (including already-locked ones) at
+        // the CURRENT live pps -- wrong whenever pps moved since a closed
+        // epoch's ppsAtClose.
+        EpochQueueStorage.EpochData memory openEpoch = v.epochData(v.currentEpochId());
+        r.pendingWithdrawals = v.convertToAssets(openEpoch.totalNetShares)
+            + v.closedPendingAssets()
+            + v.reservedForClaims();
         r.capRemaining = this.calculateCapImmediateRemaining(vault);
         r.outstandingClaims = v.outstandingClaimCount();
         r.canSettleNow = this.canSettle(vault);
@@ -353,9 +365,23 @@ contract CoreVaultLens {
         r.assetsValue = v.convertToAssets(r.shares);
         (uint256[] memory epochIds, uint256[] memory claimIds) =
             this.getUserEpochClaims(vault, user, fromEpoch, toEpoch);
+        // A closed/funded epoch pays at its own locked ppsAtClose, not live
+        // pps -- cache the last epoch fetched since claims are usually
+        // grouped by epoch, to avoid refetching per claim.
+        uint256 cachedEpochId;
+        EpochQueueStorage.EpochData memory cachedEpoch;
+        bool haveCached;
         for (uint256 i = 0; i < claimIds.length; ++i) {
             EpochQueueStorage.EpochClaim memory c = v.epochClaim(epochIds[i], claimIds[i]);
-            if (!c.claimed) r.pendingClaims += v.convertToAssets(c.netShares);
+            if (c.claimed) continue;
+            if (!haveCached || cachedEpochId != epochIds[i]) {
+                cachedEpoch = v.epochData(epochIds[i]);
+                cachedEpochId = epochIds[i];
+                haveCached = true;
+            }
+            r.pendingClaims += cachedEpoch.state == EpochQueueStorage.EpochState.Open
+                ? v.convertToAssets(c.netShares)
+                : FixedPoint.mulWadDown(c.netShares, cachedEpoch.ppsAtClose);
         }
         r.pendingBonus = this.pendingLoyaltyBonus(vault, user);
     }

@@ -33,6 +33,19 @@ contract FixedMaturityVaultUpkeep is AutomationCompatibleInterface {
     address public immutable vault;
     bool    public immutable strictMode;
 
+    // EPOCH_FUND stall backoff -- mirrors VaultUpkeep.sol's mechanism. In the
+    // Matured state, EPOCH_FUND and EPOCH_CLOSE are the ONLY two ops, and
+    // fundEpoch() can legitimately no-op forever under a persistent liquidity
+    // shortfall. Without this, checkUpkeep's unconditional EPOCH_FUND
+    // priority would starve EPOCH_CLOSE indefinitely for any claims
+    // accumulating in the still-open epoch. No Ownable here, so the
+    // threshold/backoff are fixed rather than governance-configurable.
+    uint256 internal lastEpochFundTargetId = type(uint256).max;
+    uint16  internal epochFundStallCount;
+    uint64  internal lastEpochFundStallTs;
+    uint16  internal constant EPOCH_FUND_STALL_THRESHOLD = 1;
+    uint32  internal constant EPOCH_FUND_STALL_BACKOFF_SECONDS = 900; // 15min
+
     event FixedMaturityUpkeepChecked(uint8 indexed op, bool upkeepNeeded, uint8 indexed state);
     event FixedMaturityUpkeepPerformed(uint8 indexed op, uint8 indexed stateBefore, uint8 indexed stateAfter);
     event FixedMaturityUpkeepNoOp(uint8 indexed op, uint8 indexed state);
@@ -87,11 +100,20 @@ contract FixedMaturityVaultUpkeep is AutomationCompatibleInterface {
             if (_stratWithdrawable(strat) > 0) return (false, "");
 
             // Priority: unlock a backlogged closed-but-unfunded epoch first —
-            // fundEpoch() runs its own liquidity waterfall internally.
+            // fundEpoch() runs its own liquidity waterfall internally. Unless
+            // this exact epoch already stalled past the threshold, in which
+            // case yield to EPOCH_CLOSE for a cooldown window so claims
+            // accumulating in the still-open epoch aren't blocked forever by
+            // one persistently-underfunded epoch.
             uint256 oldestUnfunded = _oldestUnfundedEpochId();
             uint256 curEpoch = _currentEpochId();
             if (oldestUnfunded < curEpoch) {
-                return (true, abi.encode(OP_FM_EPOCH_FUND, oldestUnfunded));
+                bool stalled = oldestUnfunded == lastEpochFundTargetId
+                    && epochFundStallCount >= EPOCH_FUND_STALL_THRESHOLD
+                    && block.timestamp < uint256(lastEpochFundStallTs) + uint256(EPOCH_FUND_STALL_BACKOFF_SECONDS);
+                if (!stalled) {
+                    return (true, abi.encode(OP_FM_EPOCH_FUND, oldestUnfunded));
+                }
             }
 
             // Otherwise close the current epoch once its min duration has
@@ -139,6 +161,22 @@ contract FixedMaturityVaultUpkeep is AutomationCompatibleInterface {
             // fundEpoch() runs its own warm-refill -> strategy-redeem waterfall
             // internally; a partial fund is retried next cycle, not a failure.
             EpochedQueueModule(vault).fundEpoch(arg);
+
+            // Track whether this attempt made progress on the SAME target
+            // epoch, so checkUpkeep can yield priority once it stalls.
+            uint256 stillOldest = _oldestUnfundedEpochId();
+            if (stillOldest == arg) {
+                if (lastEpochFundTargetId == arg) {
+                    epochFundStallCount++;
+                } else {
+                    lastEpochFundTargetId = arg;
+                    epochFundStallCount = 1;
+                }
+                lastEpochFundStallTs = uint64(block.timestamp);
+            } else {
+                lastEpochFundTargetId = type(uint256).max;
+                epochFundStallCount = 0;
+            }
         } else if (op == OP_FM_CLOSE) {
             IFixedMaturityModule(vault).closeFixedMaturityCycle();
         } else if (op == OP_FM_MONITOR_ONLY) {

@@ -29,7 +29,7 @@ import {
 library EpochQueueStorage {
     // keccak256(abi.encode(uint256(keccak256("multyr.storage.EpochQueue.v1")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 internal constant SLOT =
-        0x3e5f2b4af1c6d7890a2b1c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c400;
+        0xd8f6996c75206120e7e007afb307a0ab5673f8e6af6fff1bc619c574ef0f3000;
 
     enum EpochState { Open, Closed, Funded }
 
@@ -81,6 +81,21 @@ library EpochQueueStorage {
         // epochs (funding can happen out of order, so this only advances when
         // the just-funded epoch IS the current cursor position).
         uint256 oldestUnfundedEpochId;
+        // Assets earmarked for FUNDED-but-unclaimed claims across ALL funded
+        // epochs. This is what makes FUNDED a real claim on assets instead of
+        // a snapshot: every consumer of "hot balance" for another purpose
+        // (instant exits, deployToStrategies, funding a LATER epoch) must
+        // treat `hot - reservedForClaims` as the only spendable balance.
+        // Incremented in fundEpoch() when an epoch is marked Funded,
+        // decremented in claimEpochAssets()/batchClaimEpochAssets() as each
+        // claim is actually paid out.
+        uint256 reservedForClaims;
+        // Locked-pps liability for CLOSED-but-not-yet-FUNDED epochs. Unlike
+        // reservedForClaims this is not yet backed by any specific cash
+        // (fundEpoch() hasn't succeeded for it), but tracking it lets views
+        // (see CoreVaultLens.getVaultReport) value total pending withdrawals
+        // exactly, in O(1), without scanning epochs.
+        uint256 closedPendingAssets;
     }
 
     function layout() internal pure returns (Layout storage l) {
@@ -151,6 +166,7 @@ contract EpochedQueueModule {
     error ReentrancyGuardLocked();
     error EpochAlreadyFunded();
     error InsufficientEscrow();
+    error ClaimTooSmall();
 
     // =========================================================================
     // EVENTS (epoch lifecycle + claims)
@@ -249,6 +265,14 @@ contract EpochedQueueModule {
         if (epoch.state != EpochQueueStorage.EpochState.Open) revert EpochNotOpen();
 
         _trySoftRefreshWarmNav();
+
+        // --- Anti-spam floor (ported from QueueModule.requestClaim) ----------
+        // Enforced on the queue path only: this is what's exploitable as a
+        // dust-claim griefing vector against outstandingClaimCount (a claim
+        // never enters the queue on the truly-instant settlement path).
+        IParamsProvider.WithdrawalParams memory wp = core.params.getWithdrawalParams(address(this));
+        uint256 gross = _convertToAssets(shares);
+        if (wp.minClaimAmount > 0 && gross < wp.minClaimAmount) revert ClaimTooSmall();
 
         // --- Fee computation (STANDARD mode, rounding UP for protocol) -------
         (uint256 feeShares, uint256 netShares) =
@@ -354,6 +378,10 @@ contract EpochedQueueModule {
         epoch.closedAt       = uint64(block.timestamp);
         epoch.state          = EpochQueueStorage.EpochState.Closed;
 
+        // Locked-pps liability, not yet backed by reserved cash (that only
+        // happens once fundEpoch() succeeds) -- see EpochQueueStorage.Layout.
+        eq.closedPendingAssets += epoch.totalNetAssets;
+
         // --- Batch fee transfer (one safeTransfer vs n transfers in QueueModule)
         // Fee shares have been sitting in escrow since submission.
         // Transfer all of them to feeCollector atomically here.
@@ -400,10 +428,16 @@ contract EpochedQueueModule {
         address assetAddr = _asset();
         uint256 hot       = IERC20(assetAddr).balanceOf(address(this));
 
+        // "needed" is this epoch's liability PLUS everything already reserved
+        // for other FUNDED-but-unclaimed epochs -- hot must cover both before
+        // this epoch can be marked Funded, otherwise funding it would just be
+        // spending cash another epoch's claimants already own.
+        uint256 needed = epoch.totalNetAssets + eq.reservedForClaims;
+
         emit EpochFundAttempt(epochId, epoch.totalNetAssets, hot, 0 /* filled below */);
 
-        if (hot < epoch.totalNetAssets) {
-            uint256 deficit = epoch.totalNetAssets - hot;
+        if (hot < needed) {
+            uint256 deficit = needed - hot;
             CoreStorage.Layout storage core = CoreStorage.layout();
 
             // --- Step 1: try warm refill (cheaper than strategy redeem) ------
@@ -417,7 +451,7 @@ contract EpochedQueueModule {
                         emit Events.QueueWarmRefillFailed(epochId, pullWarm, reason);
                     }
                     hot    = IERC20(assetAddr).balanceOf(address(this));
-                    deficit = hot < epoch.totalNetAssets ? epoch.totalNetAssets - hot : 0;
+                    deficit = hot < needed ? needed - hot : 0;
                 }
             }
 
@@ -438,10 +472,13 @@ contract EpochedQueueModule {
 
         emit EpochFundAttempt(epochId, epoch.totalNetAssets, 0 /* filled above */, hot);
 
-        // Mark funded only when fully covered
-        if (hot >= epoch.totalNetAssets) {
+        // Mark funded only when fully covered (this epoch's liability AND
+        // everything already reserved for other funded epochs)
+        if (hot >= needed) {
             epoch.state    = EpochQueueStorage.EpochState.Funded;
             epoch.fundedAt = uint64(block.timestamp);
+            eq.closedPendingAssets -= epoch.totalNetAssets;
+            eq.reservedForClaims   += epoch.totalNetAssets;
             emit EpochFunded(epochId, epoch.totalNetAssets);
 
             // Advance the oldest-unfunded cursor past any now-consecutively-
@@ -495,6 +532,8 @@ contract EpochedQueueModule {
         // only netShares remain in escrow for this claim.
         eq.escrowedShares   -= claim.netShares;
         eq.outstandingClaimCount -= 1;
+        // This claim's assets are no longer reserved -- they've been paid.
+        eq.reservedForClaims -= assets;
 
         // Burn net shares from escrow
         _burn(address(this), claim.netShares);
@@ -538,6 +577,8 @@ contract EpochedQueueModule {
                 // feeShares already left escrow at close; only netShares remain.
                 eq.escrowedShares -= claim.netShares;
                 eq.outstandingClaimCount -= 1;
+                // This claim's assets are no longer reserved -- they've been paid.
+                eq.reservedForClaims -= assets;
 
                 _burn(address(this), claim.netShares);
 
@@ -809,13 +850,30 @@ contract EpochedQueueModule {
         return EpochQueueStorage.layout().oldestUnfundedEpochId;
     }
 
-    /// @notice Returns the shortfall in hot assets to fund a specific epoch.
-    ///         Returns 0 if the epoch is already funded or hot >= totalNetAssets.
+    /// @notice Returns the shortfall in hot assets to fund a specific epoch,
+    ///         net of everything already reserved for other funded epochs --
+    ///         matches fundEpoch()'s actual "needed" requirement.
+    ///         Returns 0 if the epoch is already funded or fully covered.
     function epochDeficit(uint256 epochId) external view returns (uint256) {
-        EpochQueueStorage.EpochData storage e = EpochQueueStorage.layout().epochs[epochId];
+        EpochQueueStorage.Layout storage eq = EpochQueueStorage.layout();
+        EpochQueueStorage.EpochData storage e = eq.epochs[epochId];
         if (e.state != EpochQueueStorage.EpochState.Closed) return 0;
         uint256 hot = IERC20(_asset()).balanceOf(address(this));
-        return hot < e.totalNetAssets ? e.totalNetAssets - hot : 0;
+        uint256 needed = e.totalNetAssets + eq.reservedForClaims;
+        return hot < needed ? needed - hot : 0;
+    }
+
+    /// @notice Assets earmarked for FUNDED-but-unclaimed claims across ALL
+    ///         funded epochs. This much of the hot balance is off-limits to
+    ///         instant exits, strategy deploys, and funding any other epoch.
+    function reservedForClaims() external view returns (uint256) {
+        return EpochQueueStorage.layout().reservedForClaims;
+    }
+
+    /// @notice Locked-pps liability for CLOSED-but-not-yet-FUNDED epochs.
+    ///         Not yet backed by reserved cash (see reservedForClaims()).
+    function closedPendingAssets() external view returns (uint256) {
+        return EpochQueueStorage.layout().closedPendingAssets;
     }
 
     /// @notice Returns true when the current open epoch can be closed.
@@ -941,9 +999,14 @@ contract EpochedQueueModule {
         // ExitEngineLib.calculateCapRemaining uses), including dynamic cap support.
         if (gross > _epochCapRemaining(core, wp, _totalAssets())) return (false, address(0));
 
-        // Liquidity
+        // Liquidity -- hot balance net of everything already reserved for
+        // FUNDED-but-unclaimed epochs; an instant exit must never dip into
+        // cash another epoch's claimants already own.
         assetAddr = _asset();
-        if (IERC20(assetAddr).balanceOf(address(this)) < gross) return (false, address(0));
+        uint256 hot = IERC20(assetAddr).balanceOf(address(this));
+        uint256 reserved = EpochQueueStorage.layout().reservedForClaims;
+        uint256 free = hot > reserved ? hot - reserved : 0;
+        if (free < gross) return (false, address(0));
 
         return (true, assetAddr);
     }

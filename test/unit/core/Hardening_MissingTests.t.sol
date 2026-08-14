@@ -11,7 +11,7 @@ import { MockParamsProvider } from "../../helpers/MockParamsProvider.sol";
 import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTests.sol";
 import { VaultUpkeep, Op } from "../../../src/automation/VaultUpkeep.sol";
 import { IStrategyRouter } from "../../../src/interfaces/IStrategyRouter.sol";
-import { EpochedQueueModule } from "../../../src/core/modules/EpochedQueueModule.sol";
+import { EpochedQueueModule, EpochQueueStorage } from "../../../src/core/modules/EpochedQueueModule.sol";
 
 interface IQueueModule {
     function requestInstantWithdrawal(uint256 shares)
@@ -303,6 +303,87 @@ contract Hardening_MissingTests is Test {
         IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
 
         assertGt(usdc.balanceOf(user1), usdcBefore, "settle at stale NAV");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PR #13 review fix: minClaimAmount re-enforced (closes the dust-claim
+    // outstandingClaimCount griefing vector -- was silently unenforced after
+    // the QueueModule -> EpochedQueueModule cutover, even though GlobalConfig
+    // still ships/documents it as an anti-spam floor).
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    function test_minClaimAmount_blocksQueuedDustClaim() public {
+        params.setMinClaimAmount(50e6);
+
+        vm.prank(user1);
+        vm.expectRevert(EpochedQueueModule.ClaimTooSmall.selector);
+        IQueueModule(address(vault)).requestEpochWithdrawal(10e6);
+    }
+
+    function test_minClaimAmount_allowsClaimAtFloor() public {
+        params.setMinClaimAmount(50e6);
+
+        vm.prank(user1);
+        (, uint256 claimId) = IQueueModule(address(vault)).requestEpochWithdrawal(50e6);
+        assertGt(claimId, 0, "exactly-at-floor claim is accepted");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PR #13 review fix: EPOCH_FUND livelock. checkUpkeep() used to return
+    // EPOCH_FUND unconditionally whenever a closed-but-unfunded epoch existed,
+    // with no fall-through -- so one persistently-underfunded epoch (no
+    // router/warm liquidity to cover the gap) starved
+    // CRYSTALLIZE/REBALANCE/DEPLOY/REALIZE/RECONCILE forever.
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    function test_epochFund_yieldsPriorityAfterStall_thenReclaimsAfterBackoff() public {
+        // Queue a large claim, then drain hot so it can never be fully funded
+        // (no router configured; MockBufferManagerForTests' warm refill is a
+        // permanent no-op -- see MockBufferManagerForTests.refill()).
+        vm.prank(user1);
+        (uint256 epochId,) = IQueueModule(address(vault)).requestEpochWithdrawal(9_000_000e6);
+
+        vm.warp(block.timestamp + 7 days + 1);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+
+        vm.prank(address(vault));
+        usdc.transfer(makeAddr("elsewhere"), 8_000_000e6);
+
+        StubRouterReader stubRouter = new StubRouterReader();
+        StubGlobalConfigReader stubConfig = new StubGlobalConfigReader();
+        VaultUpkeep upkeep = new VaultUpkeep(
+            address(vault), address(0), address(stubRouter), address(stubConfig),
+            type(uint256).max, type(uint256).max, 10, 10000
+        );
+
+        // Cycle 1: EPOCH_FUND takes priority.
+        (bool needed1, bytes memory data1) = upkeep.checkUpkeep("");
+        assertTrue(needed1, "EPOCH_FUND needed on the first cycle");
+        (Op op1,) = abi.decode(data1, (Op, uint256));
+        assertTrue(op1 == Op.EPOCH_FUND);
+        upkeep.performUpkeep(data1); // attempts fundEpoch(epochId); stays underfunded -> stall count = 1
+
+        EpochQueueStorage.EpochData memory epochAfterAttempt =
+            EpochedQueueModule(address(vault)).epochData(epochId);
+        assertTrue(
+            epochAfterAttempt.state == EpochQueueStorage.EpochState.Closed,
+            "still underfunded -- no progress made"
+        );
+
+        // Cycle 2: same epoch still unfundable -- must yield priority instead
+        // of retrying EPOCH_FUND forever.
+        (bool needed2, bytes memory data2) = upkeep.checkUpkeep("");
+        if (needed2) {
+            (Op op2,) = abi.decode(data2, (Op, uint256));
+            assertTrue(op2 != Op.EPOCH_FUND, "EPOCH_FUND must yield priority once stalled");
+        }
+
+        // After the backoff window elapses, EPOCH_FUND reclaims priority.
+        vm.warp(block.timestamp + upkeep.epochFundStallBackoffSeconds() + 1);
+        (bool needed3, bytes memory data3) = upkeep.checkUpkeep("");
+        assertTrue(needed3, "EPOCH_FUND retried after the backoff window");
+        (Op op3,) = abi.decode(data3, (Op, uint256));
+        assertTrue(op3 == Op.EPOCH_FUND);
     }
 }
 

@@ -100,6 +100,21 @@ contract VaultUpkeep is AutomationCompatibleInterface, Ownable {
     // RECONCILE threshold
     uint256 public reconcileHighThreshold = 20;
 
+    // EPOCH_FUND stall backoff: fundEpoch() can legitimately no-op forever if
+    // liquidity is short (deficit remains after its own warm-refill/strategy-
+    // redeem waterfall). Without this, checkUpkeep's unconditional EPOCH_FUND
+    // priority starves CRYSTALLIZE/REBALANCE/DEPLOY/REALIZE/RECONCILE every
+    // single cycle -- including the DEPLOY/REALIZE ops that could actually
+    // free up the liquidity fundEpoch needs. Track whether the last attempt
+    // on the current target epoch made progress; once stalled past the
+    // threshold, yield priority for a cooldown window so other ops can run.
+    uint256 public lastEpochFundTargetId = type(uint256).max;
+    uint16  public epochFundStallCount;
+    uint64  public lastEpochFundStallTs;
+    uint16  public epochFundStallThreshold = 1;
+    uint32  public epochFundStallBackoffSeconds = 900; // 15min
+    event EpochFundStallBackoffConfigured(uint16 threshold, uint32 backoffSeconds);
+
     // DEPLOY/REALIZE fairness state
     uint64 public lastDeployTs;
     uint64 public lastRealizeTs;
@@ -180,13 +195,23 @@ contract VaultUpkeep is AutomationCompatibleInterface, Ownable {
         // before opening/closing new ones. fundEpoch() runs the full warm-refill
         // → strategy-redeem liquidity waterfall internally, so no separate
         // deficit/realize probe is needed here (unlike the old SETTLE path).
+        // EXCEPT: if this exact epoch already stalled (funded() ran and made no
+        // progress) past the threshold, yield priority for a cooldown window so
+        // CRYSTALLIZE/REBALANCE/DEPLOY/REALIZE/RECONCILE get a chance to run —
+        // one persistently-underfunded epoch must not livelock the whole keeper.
         {
             uint256 oldestUnfunded;
             uint256 curEpoch;
             try core.oldestUnfundedEpochId() returns (uint256 id) { oldestUnfunded = id; } catch {}
             try core.currentEpochId() returns (uint256 id) { curEpoch = id; } catch {}
             if (oldestUnfunded < curEpoch) {
-                return (true, abi.encode(Op.EPOCH_FUND, oldestUnfunded));
+                bool stalled = oldestUnfunded == lastEpochFundTargetId
+                    && epochFundStallCount >= epochFundStallThreshold
+                    && block.timestamp < uint256(lastEpochFundStallTs) + uint256(epochFundStallBackoffSeconds);
+                if (!stalled) {
+                    return (true, abi.encode(Op.EPOCH_FUND, oldestUnfunded));
+                }
+                // Stalled and within backoff — fall through to lower priorities.
             }
         }
 
@@ -326,8 +351,30 @@ contract VaultUpkeep is AutomationCompatibleInterface, Ownable {
                 success = true;
             } catch {}
             emit UpkeepPerformed(Op.EPOCH_FUND, arg, success);
-            if (success) { failureCountByOp[Op.EPOCH_FUND] = 0; _recordSuccess(); }
-            else { failureCountByOp[Op.EPOCH_FUND]++; _recordRealFailure(); }
+            if (success) {
+                failureCountByOp[Op.EPOCH_FUND] = 0;
+                _recordSuccess();
+
+                // Track whether this attempt made progress on the SAME target
+                // epoch, so checkUpkeep can yield priority once it stalls.
+                uint256 stillOldest = arg;
+                try core.oldestUnfundedEpochId() returns (uint256 id) { stillOldest = id; } catch {}
+                if (stillOldest == arg) {
+                    if (lastEpochFundTargetId == arg) {
+                        epochFundStallCount++;
+                    } else {
+                        lastEpochFundTargetId = arg;
+                        epochFundStallCount = 1;
+                    }
+                    lastEpochFundStallTs = uint64(block.timestamp);
+                } else {
+                    lastEpochFundTargetId = type(uint256).max;
+                    epochFundStallCount = 0;
+                }
+            } else {
+                failureCountByOp[Op.EPOCH_FUND]++;
+                _recordRealFailure();
+            }
             return;
         }
 
@@ -453,6 +500,14 @@ contract VaultUpkeep is AutomationCompatibleInterface, Ownable {
         failureThreshold = threshold;
         failureBackoffSeconds = backoffSeconds;
         emit FailureBackoffConfigured(threshold, backoffSeconds);
+    }
+
+    function setEpochFundStallBackoff(uint16 threshold, uint32 backoffSeconds) external onlyOwner {
+        require(threshold >= 1 && threshold <= 10, "bad threshold");
+        require(backoffSeconds >= 60 && backoffSeconds <= 86400, "bad backoff");
+        epochFundStallThreshold = threshold;
+        epochFundStallBackoffSeconds = backoffSeconds;
+        emit EpochFundStallBackoffConfigured(threshold, backoffSeconds);
     }
 
     event DeployRealizeCooldownSet(uint64 cooldown);

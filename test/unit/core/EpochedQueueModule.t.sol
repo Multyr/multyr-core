@@ -340,4 +340,102 @@ contract EpochedQueueModule_Test is Test {
             "cursor must NOT skip past epoch 0 just because the later epoch 1 got funded first"
         );
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // BUG FIX (PR #13 review, critical): a FUNDED epoch is a real claim on
+    // assets, not a snapshot. Funding a LATER epoch must never spend cash
+    // already reserved for an EARLIER funded-but-unclaimed epoch, and an
+    // instant exit must never dip into it either. Reproduces the reviewer's
+    // PoC: Alice's epoch funds at pps 1.0 for 1M against 2M hot; NAV drops
+    // 50%; epoch N+1 closes at pps 0.5 and must NOT be fundable out of
+    // Alice's reserved cash.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    function test_fundEpoch_cannotFundLaterEpoch_outOfEarlierFundedEpochsReservedCash() public {
+        // Track time via a local counter -- block.timestamp is not reliably
+        // re-readable mid-test through the CoreHarness delegatecall stack here
+        // (same quirk worked around elsewhere in this suite).
+        uint256 t = block.timestamp;
+
+        uint256 aliceShares = _deposit(user, 1_000_000e6);
+        _deposit(userB, 1_000_000e6); // 2M hot, 2M supply, pps 1.0
+
+        vm.prank(user);
+        (uint256 epoch0Id, uint256 aliceClaimId) =
+            EpochedQueueModule(address(core)).requestEpochWithdrawal(aliceShares);
+
+        t += 7 days + 1;
+        vm.warp(t);
+        EpochedQueueModule(address(core)).closeCurrentEpoch(); // opens epoch 1
+
+        EpochedQueueModule(address(core)).fundEpoch(epoch0Id);
+        EpochQueueStorage.EpochData memory e0 = EpochedQueueModule(address(core)).epochData(epoch0Id);
+        assertTrue(e0.state == EpochQueueStorage.EpochState.Funded, "epoch 0 funded out of the 2M hot");
+        assertEq(
+            EpochedQueueModule(address(core)).reservedForClaims(), 1_000_000e6,
+            "Alice's payout is now reserved"
+        );
+
+        // NAV drops 50% (e.g. a strategy loss) -- drain hot directly by
+        // exactly what's reserved for Alice, leaving hot == reservedForClaims.
+        vm.prank(address(core));
+        IERC20(USDC_UNDERLYING).transfer(makeAddr("elsewhere"), 1_000_000e6);
+
+        vm.prank(userB);
+        EpochedQueueModule(address(core)).requestEpochWithdrawal(500_000e6);
+
+        t += 7 days + 1;
+        vm.warp(t);
+        EpochedQueueModule(address(core)).closeCurrentEpoch(); // opens epoch 2
+        uint256 epoch1Id = epoch0Id + 1;
+        EpochQueueStorage.EpochData memory e1Closed = EpochedQueueModule(address(core)).epochData(epoch1Id);
+        assertEq(e1Closed.ppsAtClose, 0.5e18, "NAV halved relative to unchanged supply");
+
+        // Pre-fix, fundEpoch compared hot(1,000,000) >= totalNetAssets(250,000)
+        // directly and would have wrongly marked epoch 1 Funded out of
+        // Alice's reserved cash. Post-fix it must stay CLOSED.
+        EpochedQueueModule(address(core)).fundEpoch(epoch1Id);
+        EpochQueueStorage.EpochData memory e1After = EpochedQueueModule(address(core)).epochData(epoch1Id);
+        assertTrue(
+            e1After.state == EpochQueueStorage.EpochState.Closed,
+            "epoch 1 must stay CLOSED: hot is fully reserved for epoch 0, no spare liquidity"
+        );
+
+        // Alice's original Funded claim is still fully payable.
+        vm.prank(user);
+        uint256 assets = EpochedQueueModule(address(core)).claimEpochAssets(epoch0Id, aliceClaimId);
+        assertEq(assets, 1_000_000e6, "Alice paid in full despite the later NAV drop and funding attempt");
+    }
+
+    function test_canInstant_rejectsExit_thatWouldDipIntoReservedForClaims() public {
+        uint256 aliceShares = _deposit(user, 1_000_000e6);
+        _deposit(userB, 1_000_000e6);
+
+        vm.prank(user);
+        (uint256 epoch0Id, uint256 aliceClaimId) =
+            EpochedQueueModule(address(core)).requestEpochWithdrawal(aliceShares);
+
+        vm.warp(block.timestamp + 7 days + 1);
+        EpochedQueueModule(address(core)).closeCurrentEpoch();
+        EpochedQueueModule(address(core)).fundEpoch(epoch0Id);
+        assertEq(EpochedQueueModule(address(core)).reservedForClaims(), 1_000_000e6);
+
+        // Drain hot down to exactly reservedForClaims -- zero free liquidity.
+        vm.prank(address(core));
+        IERC20(USDC_UNDERLYING).transfer(makeAddr("elsewhere"), 1_000_000e6);
+
+        // Pre-fix, _canInstant compared raw hot(1,000,000) >= gross and would
+        // have let this through, spending into Alice's reserved payout.
+        vm.prank(userB);
+        (bool settledImmediately,,) =
+            EpochedQueueModule(address(core)).requestInstantWithdrawal(1_000e6);
+
+        assertFalse(settledImmediately, "instant exit must not dip into cash reserved for a funded epoch");
+
+        // Alice's reservation is untouched, still fully payable at her locked
+        // ppsAtClose (unaffected by the live-pps drop from the drain above).
+        vm.prank(user);
+        uint256 assets = EpochedQueueModule(address(core)).claimEpochAssets(epoch0Id, aliceClaimId);
+        assertEq(assets, 1_000_000e6);
+    }
 }

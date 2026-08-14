@@ -15,6 +15,7 @@ import { IExecutionMemory } from "../../interfaces/IExecutionMemory.sol";
 import { AllocationTypes } from "../../interfaces/IAllocationTypes.sol";
 import { ICoreVault } from "../../interfaces/ICoreVault.sol";
 import { AllocationInvariantLib } from "../libraries/AllocationInvariantLib.sol";
+import { EpochQueueStorage } from "./EpochedQueueModule.sol";
 import {
     FixedMaturityStorage,
     _checkOpenEndedDeployAllowed
@@ -71,6 +72,12 @@ contract LiquidityOpsModule {
         if (!ok || data.length < 96) return false;
         (uint256 nav, uint256 hot, uint256 warm) = abi.decode(data, (uint256, uint256, uint256));
         if (nav == 0) return false;
+
+        // Cash earmarked for FUNDED-but-unclaimed epoch claims is never
+        // deployable -- otherwise a strategy deploy could spend money a
+        // claimant already owns.
+        uint256 reserved = EpochQueueStorage.layout().reservedForClaims;
+        hot = hot > reserved ? hot - reserved : 0;
 
         // Compute surplus after reserve + warm headroom
         IBufferManager.BufferConfig memory cfg = bm.getConfig();
@@ -425,15 +432,21 @@ contract LiquidityOpsModule {
     }
 
     /// @dev Build QueueSafetyContext from current vault state.
-    ///      queueReservedUsd / queuePressureBps derived via staticcalls on self (delegatecall context = vault).
+    ///      queueReservedUsd / queuePressureBps derived from EpochQueueStorage directly --
+    ///      all modules share the vault's storage via delegatecall, so this is both
+    ///      correct and avoids a cross-selector staticcall to a function that may not
+    ///      be routed (the old QueueModule.pendingShares() staticcall this replaced
+    ///      silently failed post-EpochedQueueModule cutover: no module wires
+    ///      ClaimsMixin anymore, so the staticcall always returned ok=false and
+    ///      queuePressureBps stayed permanently 0).
     function _buildQueueSafetyContext(uint256 tvl)
         internal view returns (AllocationTypes.QueueSafetyContext memory qs)
     {
-        // Read pendingShares → queueReservedUsd approximation
-        (bool ok, bytes memory data) = address(this).staticcall(abi.encodeWithSignature("pendingShares()"));
-        if (ok && data.length == 32) {
-            uint256 pending = abi.decode(data, (uint256));
-            // Approx: pendingShares * pps ≈ reserved USD. We use a crude lower bound.
+        // escrowedShares → queueReservedUsd approximation (shares currently sitting
+        // in escrow across all epochs, open + closed + funded-unclaimed)
+        {
+            uint256 pending = EpochQueueStorage.layout().escrowedShares;
+            // Approx: escrowedShares * pps ≈ reserved USD. We use a crude lower bound.
             qs.queueReservedUsd = pending; // caller may refine; this is fail-safe upper estimate in shares
             if (tvl > 0) {
                 uint256 pressure = (pending * 10_000) / (tvl + 1);
@@ -599,6 +612,11 @@ contract LiquidityOpsModule {
         (uint256 nav, uint256 hot, uint256 warm) = ICoreVault(address(this)).totalAssetsBreakdown();
 
         address assetAddr = ICoreVault(address(this)).asset();
+
+        // Cash earmarked for FUNDED-but-unclaimed epoch claims is never
+        // deployable -- see canDeploy().
+        uint256 reserved = EpochQueueStorage.layout().reservedForClaims;
+        hot = hot > reserved ? hot - reserved : 0;
 
         // Compute deployable surplus (same formula as canDeploy)
         IBufferManager.BufferConfig memory cfg = bm.getConfig();
