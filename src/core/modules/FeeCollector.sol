@@ -110,6 +110,10 @@ contract FeeCollector is ReentrancyGuard, Pausable {
     event HarvestDustBurned(address indexed token, uint256 shares);
     /// @notice A queued claim could not be pulled yet (its epoch is not funded).
     event HarvestClaimNotReady(address indexed token, uint256 epochId, uint256 claimId);
+    /// @notice The harvest could not proceed this round and the shares were left
+    ///         in place to be retried. Never a revert: fee distribution must not
+    ///         be blockable by the state of the queue.
+    event HarvestDeferred(address indexed token, uint256 shares, string reason);
     event HarvestSettled(
         address indexed token, address indexed underlying, uint256 sharesRedeemed, uint256 underlyingOut
     );
@@ -246,8 +250,28 @@ contract FeeCollector is ReentrancyGuard, Pausable {
                 // exhausted. FeeCollector is exempt from the queue's
                 // minClaimAmount floor precisely so this contract holds: small
                 // fee accruals queue instead of reverting the distribution.
-                (bool settledImmediately, uint256 epochId, uint256 claimId) =
-                    IQueueModule(token).requestInstantWithdrawal(bal);
+                // try/catch, not a bare call: the vault can legitimately refuse
+                // this exit -- the queue's minClaimAmount floor rejects fee
+                // accruals below it, and withdrawals can be paused -- and a fee
+                // distribution must never be the thing that breaks. The floor
+                // applies to every caller with no address carve-out, so the
+                // handling belongs here, on the side that cannot tolerate the
+                // revert, rather than as an exemption inside the check itself.
+                bool settledImmediately;
+                uint256 epochId;
+                uint256 claimId;
+                try IQueueModule(token).requestInstantWithdrawal(bal) returns (
+                    bool settled_, uint256 epochId_, uint256 claimId_
+                ) {
+                    settledImmediately = settled_;
+                    epochId = epochId_;
+                    claimId = claimId_;
+                } catch {
+                    // Shares stay here and accumulate; the next distribute()
+                    // retries with a larger balance.
+                    emit HarvestDeferred(token, bal, "vault refused the exit");
+                    return;
+                }
 
                 uint256 out = IERC20(sc.underlying).balanceOf(address(this)) - underBefore;
 

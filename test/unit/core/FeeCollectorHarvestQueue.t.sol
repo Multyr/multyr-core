@@ -189,4 +189,48 @@ contract FeeCollectorHarvestQueue is Test {
         _q().requestEpochWithdrawal(200_000e6);
         collector.distribute(address(vault));
     }
+    // ═════════════════════════════════════════════════════════════════════════
+    // DEGRADATION: distribute() must never be the thing that breaks.
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /// @notice Fee accruals below the queue's minClaimAmount used to be handled
+    ///         by exempting feeCollector inside the floor check. The exemption
+    ///         is gone; the collector absorbs the refusal instead, leaving the
+    ///         shares in place to accumulate.
+    function test_subFloorHarvest_defersInsteadOfReverting() public {
+        params.setMinClaimAmount(100_000e6); // far above anything accrued here
+        params.setCapPerEpochBps(1);         // and no instant route either
+
+        vm.prank(alice);
+        vault.deposit(1_000_000e6, alice);
+        _accrueFeeShares(200_000e6);
+
+        uint256 collectorShares = vault.balanceOf(address(collector));
+        assertGt(collectorShares, 0, "collector holds fee shares");
+
+        // Does not revert.
+        collector.distribute(address(vault));
+
+        assertEq(
+            vault.balanceOf(address(collector)), collectorShares,
+            "shares stay put, ready to be retried with a larger balance"
+        );
+        assertEq(
+            collector.pendingHarvestClaimCount(address(vault)), 0,
+            "nothing queued, so nothing to strand"
+        );
+        assertEq(
+            collector.pendingHarvestShares(address(vault)), 0,
+            "and the collector is not left in a half-queued state"
+        );
+
+        // Once the floor is clearable, the same call goes through.
+        params.setMinClaimAmount(0);
+        collector.distribute(address(vault));
+        assertEq(
+            collector.pendingHarvestClaimCount(address(vault)), 1,
+            "the deferred harvest queues on the next attempt"
+        );
+    }
+
 }

@@ -360,22 +360,31 @@ contract Hardening_MissingTests is Test {
         IQueueModule(address(vault)).requestInstantWithdrawal(50e6);
     }
 
-    /// @notice feeCollector is exempt: its AUTO_HARVEST fallback must queue, not
-    ///         revert, or small fee accruals become undistributable.
-    function test_minClaimAmount_feeCollectorIsExempt() public {
+    /// @notice The floor applies to every caller, with no address carve-out.
+    ///         An exemption inside a security check is an invitation to widen
+    ///         it; callers that cannot tolerate the revert -- FeeCollector's
+    ///         AUTO_HARVEST is the one in-protocol case -- absorb it on their
+    ///         own side instead. See FeeCollectorHarvestQueue.
+    function test_minClaimAmount_appliesToEveryCallerIncludingFeeCollector() public {
         params.setMinClaimAmount(100e6);
 
-        // Give the configured feeCollector a share balance to exit with.
         usdc._mint(feeCollector, 1_000e6);
         vm.startPrank(feeCollector);
         usdc.approve(address(vault), type(uint256).max);
         vault.deposit(1_000e6, feeCollector);
 
-        (, uint256 claimId) = IQueueModule(address(vault)).requestEpochWithdrawal(50e6);
+        vm.expectRevert(EpochedQueueModule.ClaimTooSmall.selector);
+        IQueueModule(address(vault)).requestEpochWithdrawal(50e6);
         vm.stopPrank();
 
-        assertGt(claimId, 0, "feeCollector's sub-floor claim is accepted");
-        assertEq(IQueueModule(address(vault)).outstandingClaimCount(), 1, "claim queued");
+        assertEq(
+            IQueueModule(address(vault)).outstandingClaimCount(), 0,
+            "no claim reaches the queue below the floor, whoever asks"
+        );
+        assertEq(
+            IQueueModule(address(vault)).totalEscrowedShares(), 0,
+            "and nothing was escrowed on the way to the revert"
+        );
     }
 
     /// @notice A fundEpoch that REVERTS must still register as a stall. The

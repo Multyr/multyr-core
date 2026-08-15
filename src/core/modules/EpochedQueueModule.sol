@@ -269,7 +269,7 @@ contract EpochedQueueModule {
         returns (uint256 epochId, uint256 claimId)
     {
         _enterNonReentrant();
-        (epochId, claimId) = _requestEpochWithdrawal(msg.sender, shares, false);
+        (epochId, claimId) = _requestEpochWithdrawal(msg.sender, shares);
         _exitNonReentrant();
     }
 
@@ -280,7 +280,7 @@ contract EpochedQueueModule {
     ///      resulting claim to the vault instead of the real withdrawing user.
     ///      Caller is responsible for the reentrancy guard and for gating
     ///      access via _checkStandardExitAllowed(..., false).
-    function _requestEpochWithdrawal(address user, uint256 shares, bool floorAlreadyChecked)
+    function _requestEpochWithdrawal(address user, uint256 shares)
         internal
         returns (uint256 epochId, uint256 claimId)
     {
@@ -306,10 +306,15 @@ contract EpochedQueueModule {
         _trySoftRefreshWarmNav();
 
         // --- Anti-spam floor (ported from QueueModule.requestClaim) ----------
-        // Skipped when the caller already enforced it (the instant path checks
-        // up front, see requestInstantWithdrawal) so the conversion is not paid
-        // for twice on the fallback route.
-        if (!floorAlreadyChecked) _checkMinClaimAmount(core, user, shares);
+        // Unconditional, and here rather than at the entry points, because this
+        // is the single choke point where a claim enters the queue: no future
+        // entry point can create one without passing through it. The instant
+        // path checks the same thing up front as well, so its outcome depends
+        // on the caller's input rather than on vault state; the resulting double
+        // check on the fallback route is idempotent and costs one extra
+        // conversion on the rare branch. That is the intended trade -- there is
+        // deliberately no way to signal "already checked" and skip it.
+        _checkMinClaimAmount(core, shares);
 
         // --- Fee computation (STANDARD mode, rounding UP for protocol) -------
         (uint256 feeShares, uint256 netShares) =
@@ -348,18 +353,16 @@ contract EpochedQueueModule {
         emit EpochWithdrawalRequested(epochId, claimId, user, shares, netShares, feeShares);
     }
 
-    /// @dev Anti-spam floor on exits. The floor exists to bound dust-claim
-    ///      griefing against outstandingClaimCount, which is a per-caller
-    ///      concern, so feeCollector is exempt: it is a single trusted protocol
-    ///      address whose own bookkeeping already caps it at one outstanding
-    ///      claim per share token, and applying the floor to it would strand
-    ///      small fee accruals with no way to distribute them.
-    function _checkMinClaimAmount(
-        CoreStorage.Layout storage core,
-        address user,
-        uint256 shares
-    ) internal view {
-        if (user == core.feeCollector) return;
+    /// @dev Anti-spam floor on exits, bounding dust-claim griefing against
+    ///      outstandingClaimCount. Applies to every caller without exception:
+    ///      an address-based carve-out inside a security check is a standing
+    ///      invitation to widen it. Callers that cannot tolerate a revert --
+    ///      FeeCollector's AUTO_HARVEST is the one in-protocol case -- absorb
+    ///      the failure on their own side instead of being special-cased here.
+    function _checkMinClaimAmount(CoreStorage.Layout storage core, uint256 shares)
+        internal
+        view
+    {
         uint256 floor_ = core.params.getWithdrawalParams(address(this)).minClaimAmount;
         if (floor_ == 0) return;
         if (_convertToAssets(shares) < floor_) revert ClaimTooSmall();
@@ -867,13 +870,11 @@ contract EpochedQueueModule {
 
         _trySoftRefreshWarmNav();
 
-        // Anti-spam floor, enforced BEFORE the cap/liquidity branch. Checking it
-        // only on the fallback leg made the outcome depend on vault state rather
-        // than on the caller's input: the same sub-floor request settled while
-        // the cap had room and reverted once it was exhausted, breaking the
-        // documented "falls back to the epoch queue (no revert)" contract that
-        // FeeCollector's AUTO_HARVEST mode relies on.
-        _checkMinClaimAmount(core, msg.sender, shares);
+        // Anti-spam floor, enforced BEFORE the cap/liquidity branch so the
+        // outcome tracks the caller's input rather than vault state. Without
+        // this, the same sub-floor request settled while the cap had room and
+        // reverted once it was exhausted.
+        _checkMinClaimAmount(core, shares);
 
         bool rolled = ExitEngineLib.rollEpochIfNeeded(core);
         if (rolled) emit Events.WithdrawalCapEpochRolled(core.epochStart);
@@ -913,7 +914,7 @@ contract EpochedQueueModule {
             // Fallback: enqueue in current epoch as standard claim.
             // Calls the internal helper directly (never `this.foo()`) so the
             // claim is correctly attributed to msg.sender, not to the vault.
-            (epochId, claimId) = _requestEpochWithdrawal(msg.sender, shares, true);
+            (epochId, claimId) = _requestEpochWithdrawal(msg.sender, shares);
             settledImmediately = false;
         }
 
