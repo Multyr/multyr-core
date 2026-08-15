@@ -369,6 +369,7 @@ contract EpochedQueueModule {
     ///         Returns all gross shares (netShares + feeShares) to the user.
     ///         Not allowed once the epoch has closed.
     function cancelEpochWithdrawal(uint256 epochId, uint256 claimId) external {
+        _enterNonReentrant();
         EpochQueueStorage.Layout storage eq = EpochQueueStorage.layout();
         EpochQueueStorage.EpochData  storage epoch = eq.epochs[epochId];
         EpochQueueStorage.EpochClaim storage claim = eq.claims[epochId][claimId];
@@ -398,6 +399,8 @@ contract EpochedQueueModule {
         _transferShares(address(this), msg.sender, grossShares);
 
         emit EpochWithdrawalCancelled(epochId, claimId, msg.sender, grossShares);
+
+        _exitNonReentrant();
     }
 
     /// @notice Close the current epoch and lock the PPS snapshot.
@@ -406,6 +409,10 @@ contract EpochedQueueModule {
     ///         feeCollector in a single call (vs. per-claim in QueueModule).
     ///         Opens a fresh epoch immediately so new submissions are not blocked.
     function closeCurrentEpoch() external {
+        // Guarded for the same reason as the rest: it refreshes warm NAV and
+        // batch-transfers fee shares out, both external calls, before writing
+        // the epoch's locked price.
+        _enterNonReentrant();
         _checkSettlementAllowed(FixedMaturityStorage.layout());
 
         EpochQueueStorage.Layout storage eq = EpochQueueStorage.layout();
@@ -462,6 +469,8 @@ contract EpochedQueueModule {
         eq.epochs[nextId].openedAt         = uint64(block.timestamp);
         eq.epochs[nextId].state            = EpochQueueStorage.EpochState.Open;
         emit EpochOpened(nextId, uint64(block.timestamp));
+
+        _exitNonReentrant();
     }
 
     /// @notice Pull liquidity deficit for a CLOSED epoch.
@@ -473,6 +482,12 @@ contract EpochedQueueModule {
     ///         Core improvement over QueueModule: a single external-call pull
     ///         covers ALL claims in the epoch, not one pull per settled claim.
     function fundEpoch(uint256 epochId) external {
+        // Guarded like every other state-changing entry point on this module.
+        // This one calls out to the buffer manager and the strategy router
+        // mid-body and then re-reads the hot balance to decide whether to mark
+        // the epoch FUNDED, so a reentrant call landing between the pull and
+        // that read is exactly the shape worth excluding.
+        _enterNonReentrant();
         EpochQueueStorage.Layout storage eq = EpochQueueStorage.layout();
         EpochQueueStorage.EpochData storage epoch = eq.epochs[epochId];
 
@@ -485,6 +500,7 @@ contract EpochedQueueModule {
         // with no way back. Syncing the cursor first makes the call self-heal.
         if (epoch.state == EpochQueueStorage.EpochState.Funded) {
             _syncOldestUnfunded(eq);
+            _exitNonReentrant();
             return;
         }
 
@@ -571,6 +587,8 @@ contract EpochedQueueModule {
                 needed - hot
             );
         }
+
+        _exitNonReentrant();
     }
 
     /// @notice Advance oldestUnfundedEpochId past any leading FUNDED epochs.

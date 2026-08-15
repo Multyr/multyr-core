@@ -21,6 +21,7 @@ import { MockUSDC } from "../../helpers/MockUSDC.sol";
 import { ERC4626Module } from "../../../src/core/modules/ERC4626Module.sol";
 import { EpochedQueueModule } from "../../../src/core/modules/EpochedQueueModule.sol";
 import { EpochQueueStorage } from "../../../src/core/modules/EpochedQueueModule.sol";
+import { CoreStorage } from "../../../src/core/storage/CoreStorage.sol";
 import { MockQueueEpochParamsProvider } from "../../sprint-test/QueueEpochModule_WithdrawFlow_POC.t.sol";
 
 contract EpochedQueueModule_Test is Test {
@@ -591,5 +592,55 @@ contract EpochedQueueModule_Test is Test {
             }
         }
         assertEq(seen, 1, "exactly one attempt event per call");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // REENTRANCY: every state-changing entry point takes the same guard.
+    // fundEpoch in particular calls out to the buffer manager and the router
+    // and then re-reads the hot balance to decide whether to mark the epoch
+    // FUNDED, so a reentrant call landing in between is the shape that matters.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    function test_stateChangingEntryPoints_areAllGuarded() public {
+        uint256 t = block.timestamp;
+        _deposit(user, 1_000_000e6);
+
+        vm.prank(user);
+        (uint256 epochId, uint256 claimId) =
+            EpochedQueueModule(address(core)).requestEpochWithdrawal(100_000e6);
+
+        // Force the guard flag on, as a reentrant caller would find it.
+        _setReentrancyLock(true);
+
+        vm.prank(user);
+        vm.expectRevert(EpochedQueueModule.ReentrancyGuardLocked.selector);
+        EpochedQueueModule(address(core)).cancelEpochWithdrawal(epochId, claimId);
+
+        vm.expectRevert(EpochedQueueModule.ReentrancyGuardLocked.selector);
+        EpochedQueueModule(address(core)).closeCurrentEpoch();
+
+        vm.expectRevert(EpochedQueueModule.ReentrancyGuardLocked.selector);
+        EpochedQueueModule(address(core)).fundEpoch(epochId);
+
+        // Released again, the same calls go through.
+        _setReentrancyLock(false);
+        t += 7 days + 1;
+        vm.warp(t);
+        EpochedQueueModule(address(core)).closeCurrentEpoch();
+        EpochedQueueModule(address(core)).fundEpoch(epochId);
+
+        vm.prank(user);
+        uint256 assets = EpochedQueueModule(address(core)).claimEpochAssets(epochId, claimId);
+        assertGt(assets, 0, "guard releases cleanly, the claim still pays out");
+    }
+
+    /// @dev packedFlags sits at offset 10 of CoreStorage.Layout, after the ten
+    ///      one-slot address fields. If that ever shifts, the guard assertions
+    ///      below fail rather than passing silently.
+    function _setReentrancyLock(bool locked) internal {
+        bytes32 slot = bytes32(uint256(CoreStorage.SLOT) + 10);
+        uint256 flags = uint256(vm.load(address(core), slot));
+        uint256 bit = CoreStorage.FLAG_REENTRANCY_LOCKED;
+        vm.store(address(core), slot, bytes32(locked ? flags | bit : flags & ~bit));
     }
 }
