@@ -218,7 +218,10 @@ contract FeeCollector is ReentrancyGuard, Pausable {
                 uint256 underBefore = IERC20(sc.underlying).balanceOf(address(this));
 
                 // requestInstantWithdrawal settles inline if cap+liquidity OK;
-                // falls back to the epoch queue (no revert) when the cap is exhausted.
+                // falls back to the epoch queue (no revert) when the cap is
+                // exhausted. FeeCollector is exempt from the queue's
+                // minClaimAmount floor precisely so this contract holds: small
+                // fee accruals queue instead of reverting the distribution.
                 (bool settledImmediately, uint256 epochId, uint256 claimId) =
                     IQueueModule(token).requestInstantWithdrawal(bal);
 

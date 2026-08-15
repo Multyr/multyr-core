@@ -336,6 +336,48 @@ contract Hardening_MissingTests is Test {
     // CRYSTALLIZE/REBALANCE/DEPLOY/REALIZE/RECONCILE forever.
     // ═══════════════════════════════════════════════════════════════════════════
 
+    /// @notice The floor is enforced on BOTH legs, so a sub-floor instant
+    ///         request reverts on the caller's input rather than on whatever
+    ///         the cap happens to allow at that moment.
+    function test_minClaimAmount_instantPath_revertsDeterministically() public {
+        params.setMinClaimAmount(100e6);
+        params.setCapPerEpochBps(10); // 0.1% of TVL == 1_000 USDC of allowance
+
+        // Cap wide open: still rejected on the input alone.
+        vm.prank(user1);
+        vm.expectRevert(EpochedQueueModule.ClaimTooSmall.selector);
+        IQueueModule(address(vault)).requestInstantWithdrawal(50e6);
+
+        // Consume the cap allowance with an above-floor exit.
+        vm.prank(user1);
+        (bool settled,,) = IQueueModule(address(vault)).requestInstantWithdrawal(900e6);
+        assertTrue(settled, "above-floor instant exit settles");
+
+        // Cap exhausted: same rejection, same reason. Previously this leg
+        // reverted while the first one succeeded.
+        vm.prank(user1);
+        vm.expectRevert(EpochedQueueModule.ClaimTooSmall.selector);
+        IQueueModule(address(vault)).requestInstantWithdrawal(50e6);
+    }
+
+    /// @notice feeCollector is exempt: its AUTO_HARVEST fallback must queue, not
+    ///         revert, or small fee accruals become undistributable.
+    function test_minClaimAmount_feeCollectorIsExempt() public {
+        params.setMinClaimAmount(100e6);
+
+        // Give the configured feeCollector a share balance to exit with.
+        usdc._mint(feeCollector, 1_000e6);
+        vm.startPrank(feeCollector);
+        usdc.approve(address(vault), type(uint256).max);
+        vault.deposit(1_000e6, feeCollector);
+
+        (, uint256 claimId) = IQueueModule(address(vault)).requestEpochWithdrawal(50e6);
+        vm.stopPrank();
+
+        assertGt(claimId, 0, "feeCollector's sub-floor claim is accepted");
+        assertEq(IQueueModule(address(vault)).outstandingClaimCount(), 1, "claim queued");
+    }
+
     /// @notice A fundEpoch that REVERTS must still register as a stall. The
     ///         accounting used to sit inside the success branch, so a target
     ///         that reverts every cycle left the counters untouched, the
