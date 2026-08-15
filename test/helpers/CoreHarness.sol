@@ -230,6 +230,16 @@ contract CoreHarness is CoreVault {
         CoreStorage.layout().router = IStrategyRouter(r);
     }
 
+    /// @notice Wire the V10 Policy/Guard/ExecutionMemory triad for rebalanceStrategies()/
+    ///         canRebalanceStrategies() tests. Pass address(0) for executionMemory to leave
+    ///         the Guard's fallback cost model in effect (matches production default state).
+    function setRebalanceModulesUnsafe(address policy, address guard, address executionMemory) external {
+        CoreStorage.Layout storage core = CoreStorage.layout();
+        core.rebalancePolicy = policy;
+        core.rebalanceGuard = guard;
+        core.executionMemory = executionMemory;
+    }
+
     function setGuardianUnsafe(address g) external {
         CoreStorage.layout().guardian = g;
     }

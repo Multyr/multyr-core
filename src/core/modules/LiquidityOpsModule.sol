@@ -566,7 +566,9 @@ contract LiquidityOpsModule {
                 slipBps = slip > type(uint16).max ? type(uint16).max : uint16(slip);
             }
             // Gas usage best-effort: approximate with a fixed scalar (keeper records exact later off-chain).
-            uint256 gasUsed = 100_000; // stub; real gas tracked by keeper post-tx
+            // ExecutionMemory.recordExecution expects a WAD (18dp) USD cost; rescaled from the
+            // original 6dp-shaped 100_000 (=$0.10) stub so it doesn't decay the EMA to ~zero.
+            uint256 gasUsed = 100_000 * 1e12; // stub; real gas tracked by keeper post-tx
             int256 realizedVsExpected = 0; // placeholder; keeper updates with realized APY delta later
             try IExecutionMemory(cs.executionMemory).recordExecution(
                 scaled.strategies[i], gasUsed, slipBps, realizedVsExpected, totalWithdrawn > 0

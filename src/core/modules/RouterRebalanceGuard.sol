@@ -4,8 +4,11 @@ pragma solidity ^0.8.28;
 import { IRouterRebalanceGuard } from "../../interfaces/IRouterRebalanceGuard.sol";
 import { IExecutionMemory } from "../../interfaces/IExecutionMemory.sol";
 import { IStrategyCoordination } from "../../interfaces/IStrategyCoordination.sol";
+import { IParamsProvider } from "../../interfaces/IParamsProvider.sol";
 import { AllocationTypes } from "../../interfaces/IAllocationTypes.sol";
 import { AllocationInvariantLib } from "../libraries/AllocationInvariantLib.sol";
+import { OracleValuationLib } from "../libraries/OracleValuationLib.sol";
+import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 /// @title RouterRebalanceGuard — portfolio-grade gate (P0-P3 + budget + queue safety + safety exception)
 /// @notice SINGLE source of decision for whether a rebalance proceeds. Integrated scaling (Correction #2),
@@ -22,7 +25,10 @@ contract RouterRebalanceGuard is IRouterRebalanceGuard {
 
     address public owner;
     address public keeper;
-    address public orchestrator; // LiquidityOpsModule / CoreVault
+    address public orchestrator; // LiquidityOpsModule / CoreVault — also used as the vault ref for oracle lookups
+    address public immutable asset; // vault's deposit asset
+    uint8 public immutable assetDecimals; // decimals of `asset` (e.g. 6 for USDC, 18 for WETH)
+    IParamsProvider public params; // GlobalConfig — resolves the oracle for `asset`/orchestrator
 
     // ─────────────────────────────────────────────────────────────────────
     // P0 — Gate config
@@ -30,7 +36,7 @@ contract RouterRebalanceGuard is IRouterRebalanceGuard {
 
     uint16 public entryDriftBps           = 500;    // 5%
     uint16 public exitDriftBps            = 200;    // 2%
-    uint256 public minMoveUsd             = 1000 * 1e6;
+    uint256 public minMoveUsd             = 1000 * 1e18; // WAD USD; converted to asset units via oracle at eval time
     uint16 public minMoveBps              = 10;     // 0.1%
     uint16 public minBenefitCostRatioBps  = 15_000; // 1.5x
     uint16 public gateHorizonDays         = 30;
@@ -64,7 +70,7 @@ contract RouterRebalanceGuard is IRouterRebalanceGuard {
 
     uint16 public queuePressureThresholdBps      = 3_000;
     uint16 public minAvailableIdleAfterPlanBps   = 500;
-    uint256 public queueReserveFloorUsd;
+    uint256 public queueReserveFloorUsd; // Currently unused by evaluatePlan (dead knob, pre-existing)
 
     // ─────────────────────────────────────────────────────────────────────
     // Cost model pointer
@@ -73,11 +79,11 @@ contract RouterRebalanceGuard is IRouterRebalanceGuard {
     address public override executionMemory;
     bool public strictExecutionMemory;
 
-    // Fallback cost if ExecutionMemory absent/below threshold.
-    uint256 public baseGasCostUsd       = 50 * 1e6;
+    // Fallback cost if ExecutionMemory absent/below threshold. WAD USD; converted to
+    // asset units via oracle at eval time (see _estimateCost / _estimateCostScaled).
+    uint256 public baseGasCostUsd       = 50 * 1e18;
     uint16 public baseSlippageBps       = 5;
     uint16 public basePenaltyBps        = 50;
-    uint32 public maxAcceptableGasCost  = 500 * 1e6;
     uint16 public maxAcceptableSlippageBps = 1_000;
 
     // ─────────────────────────────────────────────────────────────────────
@@ -124,11 +130,16 @@ contract RouterRebalanceGuard is IRouterRebalanceGuard {
     // Constructor
     // ─────────────────────────────────────────────────────────────────────
 
-    constructor(address owner_, address keeper_) {
+    constructor(address owner_, address keeper_, address asset_, address params_) {
         if (owner_ == address(0)) revert ZeroAddress();
         if (keeper_ == address(0)) revert ZeroAddress();
+        if (asset_ == address(0)) revert ZeroAddress();
+        if (params_ == address(0)) revert ZeroAddress();
         owner = owner_;
         keeper = keeper_;
+        asset = asset_;
+        assetDecimals = IERC20Metadata(asset_).decimals();
+        params = IParamsProvider(params_);
         lastBudgetResetTs = uint64(block.timestamp);
 
         // Default regime configs
@@ -171,6 +182,16 @@ contract RouterRebalanceGuard is IRouterRebalanceGuard {
             r.reasonCode = uint8(AllocationTypes.GuardReason.INVALID_PLAN);
             return r;
         }
+
+        // Fixed-dollar floors/ceilings below (minMoveUsd, baseGasCostUsd) are WAD USD;
+        // convert to the plan's raw asset-unit terms using a fresh oracle price.
+        // plan.totalMoveUsd itself stays in raw asset units by design (see
+        // RouterAllocationPolicy) — only these absolute dollar constants need conversion.
+        // NOTE: fetched unconditionally (even for isSafetyPlan) since cost/benefit are
+        // computed unconditionally below for the return struct; a stale oracle therefore
+        // reverts evaluatePlan entirely — fail-closed, including for safety plans.
+        uint256 assetPriceWad = OracleValuationLib.getFreshPriceWad(params, asset, orchestrator);
+        uint256 minMoveAssetUnits = OracleValuationLib.usdToAssetUnits(minMoveUsd, assetPriceWad, assetDecimals);
 
         AllocationTypes.RegimeConfig memory rc = regimeConfigs[currentRegime];
 
@@ -217,7 +238,7 @@ contract RouterRebalanceGuard is IRouterRebalanceGuard {
         // Step 5: Min move
         if (!plan.isSafetyPlan) {
             uint256 minFromBps = (tvl * uint256(minMoveBps)) / BPS;
-            uint256 minRequired = minMoveUsd > minFromBps ? minMoveUsd : minFromBps;
+            uint256 minRequired = minMoveAssetUnits > minFromBps ? minMoveAssetUnits : minFromBps;
             if (plan.totalMoveUsd < minRequired) {
                 r.reasonCode = uint8(AllocationTypes.GuardReason.MIN_MOVE);
                 return r;
@@ -227,7 +248,7 @@ contract RouterRebalanceGuard is IRouterRebalanceGuard {
         // Step 6: Benefit / cost (pre-scale)
         uint16 horizon = rc.horizonDays > 0 ? rc.horizonDays : gateHorizonDays;
         uint16 finalConf = _finalConfidence(plan.aggregateConfidence, rc.confidenceMultBps);
-        uint256 costUsd = _estimateCost(plan);
+        uint256 costUsd = _estimateCost(plan, assetPriceWad);
 
         r.netBenefitBpsBeforeScale = AllocationInvariantLib.computeNetBenefitBps(
             plan.totalMoveUsd, plan.deltaAPYBps, finalConf, horizon, costUsd
@@ -275,12 +296,12 @@ contract RouterRebalanceGuard is IRouterRebalanceGuard {
 
         // Step 9: Post-scale re-evaluation
         r.netBenefitBpsAfterScale = AllocationInvariantLib.computeNetBenefitBps(
-            scaled.totalMoveUsd, scaled.deltaAPYBps, finalConf, horizon, _estimateCostScaled(scaled)
+            scaled.totalMoveUsd, scaled.deltaAPYBps, finalConf, horizon, _estimateCostScaled(scaled, assetPriceWad)
         );
 
         if (!plan.isSafetyPlan) {
             uint256 minFromBps = (tvl * uint256(minMoveBps)) / BPS;
-            uint256 minRequired = minMoveUsd > minFromBps ? minMoveUsd : minFromBps;
+            uint256 minRequired = minMoveAssetUnits > minFromBps ? minMoveAssetUnits : minFromBps;
             if (scaled.totalMoveUsd < minRequired) {
                 r.reasonCode = uint8(AllocationTypes.GuardReason.MIN_MOVE);
                 return r;
@@ -306,27 +327,35 @@ contract RouterRebalanceGuard is IRouterRebalanceGuard {
         return AllocationInvariantLib.clamp16(uint16(adjusted), minConfidenceBps, maxConfidenceBps);
     }
 
-    function _estimateCost(AllocationTypes.RebalancePlan calldata plan) internal view returns (uint256) {
-        uint256 totalGas;
+    /// @dev totalGas accumulates in WAD USD (baseGasCostUsd and ExecutionMemory's recorded
+    ///      costs are both WAD-scaled) and is converted to the plan's raw asset-unit terms
+    ///      once, at the end, before being combined with totalSlippage/totalPenalty (which
+    ///      are already asset-unit since they're derived from plan.totalMoveUsd).
+    function _estimateCost(AllocationTypes.RebalancePlan calldata plan, uint256 assetPriceWad)
+        internal view returns (uint256)
+    {
+        uint256 totalGasUsdWad;
         uint256 totalSlippage;
         uint256 totalPenalty;
 
         if (executionMemory == address(0)) {
             // No memory → fallback scaled per strategy
-            totalGas = baseGasCostUsd * plan.strategies.length;
+            totalGasUsdWad = baseGasCostUsd * plan.strategies.length;
             totalSlippage = (plan.totalMoveUsd * uint256(baseSlippageBps)) / BPS;
             totalPenalty = (plan.totalMoveUsd * uint256(basePenaltyBps)) / BPS;
         } else {
             for (uint256 i = 0; i < plan.strategies.length; i++) {
                 if (plan.withdrawAmounts[i] == 0 && plan.depositAmounts[i] == 0) continue;
                 (uint256 g, uint16 slip) = IExecutionMemory(executionMemory).getExpectedCost(plan.strategies[i]);
-                totalGas += g;
+                totalGasUsdWad += g;
                 uint256 moveUsd = plan.withdrawAmounts[i] + plan.depositAmounts[i];
                 totalSlippage += (moveUsd * uint256(slip)) / BPS;
             }
             uint16 aggPenalty = IExecutionMemory(executionMemory).getAggregatePenalty(plan.strategies);
             totalPenalty = (plan.totalMoveUsd * uint256(aggPenalty)) / BPS;
         }
+
+        uint256 totalGas = OracleValuationLib.usdToAssetUnits(totalGasUsdWad, assetPriceWad, assetDecimals);
 
         // Coordination penalty: if any strategy was recently rebalanced internally, apply a penalty
         // Reads IStrategyCoordination hooks live (Correction #4).
@@ -350,22 +379,27 @@ contract RouterRebalanceGuard is IRouterRebalanceGuard {
         return totalGas + totalSlippage + totalPenalty + coordPen;
     }
 
-    function _estimateCostScaled(AllocationTypes.RebalancePlan memory plan) internal view returns (uint256) {
+    function _estimateCostScaled(AllocationTypes.RebalancePlan memory plan, uint256 assetPriceWad)
+        internal view returns (uint256)
+    {
         if (executionMemory == address(0)) {
-            uint256 g = baseGasCostUsd * plan.strategies.length;
+            uint256 g = OracleValuationLib.usdToAssetUnits(
+                baseGasCostUsd * plan.strategies.length, assetPriceWad, assetDecimals
+            );
             uint256 s = (plan.totalMoveUsd * uint256(baseSlippageBps)) / BPS;
             uint256 p = (plan.totalMoveUsd * uint256(basePenaltyBps)) / BPS;
             return g + s + p;
         }
-        uint256 totalGas;
+        uint256 totalGasUsdWad;
         uint256 totalSlippage;
         for (uint256 i = 0; i < plan.strategies.length; i++) {
             if (plan.withdrawAmounts[i] == 0 && plan.depositAmounts[i] == 0) continue;
             (uint256 g, uint16 slip) = IExecutionMemory(executionMemory).getExpectedCost(plan.strategies[i]);
-            totalGas += g;
+            totalGasUsdWad += g;
             uint256 moveUsd = plan.withdrawAmounts[i] + plan.depositAmounts[i];
             totalSlippage += (moveUsd * uint256(slip)) / BPS;
         }
+        uint256 totalGas = OracleValuationLib.usdToAssetUnits(totalGasUsdWad, assetPriceWad, assetDecimals);
         uint16 aggPenalty = IExecutionMemory(executionMemory).getAggregatePenalty(plan.strategies);
         uint256 penalty = (plan.totalMoveUsd * uint256(aggPenalty)) / BPS;
         return totalGas + totalSlippage + penalty;
@@ -496,6 +530,12 @@ contract RouterRebalanceGuard is IRouterRebalanceGuard {
     function setOrchestrator(address o) external onlyOwner {
         require(o != address(0), "zero");
         orchestrator = o;
+    }
+
+    /// @notice Update the params provider (GlobalConfig) used to resolve the oracle for `asset`.
+    function setParams(address p) external onlyOwner {
+        require(p != address(0), "zero");
+        params = IParamsProvider(p);
     }
 
     function setKeeper(address k) external onlyOwner {

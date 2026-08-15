@@ -7,6 +7,7 @@ import { ReentrancyGuard } from "@openzeppelin/contracts/security/ReentrancyGuar
 import { IBufferManager } from "../../interfaces/IBufferManager.sol";
 import { ICoreVault } from "../../interfaces/ICoreVault.sol";
 import { IWarmAdapter } from "../../interfaces/IWarmAdapter.sol";
+import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 /// @title BufferManager
 /// @notice Manages hot/warm buffer around target percentages. Core holds the asset; warm adapter holds deployed funds.
@@ -60,7 +61,7 @@ contract BufferManager is IBufferManager, ReentrancyGuard {
     /// @notice FIX B: Rebalance cooldown and threshold for upkeep trigger
     uint40 public lastRebalanceTs;
     uint32 public rebalanceCooldown = 10 minutes;
-    uint256 public minRebalanceAmount = 5_000e6; // 5k USDC (asset has 6 decimals)
+    uint256 public minRebalanceAmount; // set in constructor: 5k asset-units, scaled by the vault asset's decimals
 
     /// @notice NAV refresh interval - trigger rebalance() just to refresh cache even if no funds to move
     /// @dev Must be less than CoreVault.MAX_WARM_NAV_AGE (15 min) to prevent deposit deadlock
@@ -115,6 +116,7 @@ contract BufferManager is IBufferManager, ReentrancyGuard {
         if (owner_ == address(0) || core_ == address(0)) revert ZeroAddress();
         owner = owner_;
         core = core_;
+        minRebalanceAmount = 5_000 * (10 ** IERC20Metadata(ICoreVault(core_).asset()).decimals());
         _setConfig(cfg_);
         // Initialize warm NAV cache - valid=true because no adapters configured yet (warm=0 is correct)
         // Keeper must call rebalance() within MAX_WARM_NAV_AGE to maintain freshness

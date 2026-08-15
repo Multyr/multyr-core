@@ -9,6 +9,11 @@ interface IRouterRebalanceGuard {
     /// @notice Evaluate a RebalancePlan and return proceed/skip decision with scaled benefit.
     /// @dev Integrated scaling: Guard computes allowedMoveBps and re-evaluates benefit post-scale.
     ///      Uses AllocationInvariantLib.computeNetBenefitBps as the SINGLE benefit formula (Fix #2).
+    ///      Internally fetches a fresh oracle price (reverting if stale/unset — fail-closed) to
+    ///      convert fixed-dollar floors (minMoveUsd, cost fallbacks) into the plan's raw
+    ///      asset-unit terms; see OracleValuationLib.getFreshPriceWad. Callers that want
+    ///      graceful degradation on oracle failure (e.g. a view-only "should I rebalance"
+    ///      check) should wrap this call in try/catch — see LiquidityOpsModule.canRebalanceStrategies.
     function evaluatePlan(
         AllocationTypes.RebalancePlan calldata plan,
         uint256 tvl,
