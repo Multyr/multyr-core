@@ -12,6 +12,7 @@ pragma solidity ^0.8.28;
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { Test } from "lib/forge-std/src/Test.sol";
+import { Vm } from "lib/forge-std/src/Vm.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
@@ -510,5 +511,85 @@ contract EpochedQueueModule_Test is Test {
     ///      escrowedShares, outstandingClaimCount, then this one).
     function _forceCursor(uint256 value) internal {
         vm.store(address(core), bytes32(uint256(EpochQueueStorage.SLOT) + 6), bytes32(value));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FUNDING OBSERVABILITY: a failed or partial fundEpoch() used to emit
+    // nothing, so a stalled epoch was invisible until a user complained.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    event EpochFundingShortfall(
+        uint256 indexed epochId,
+        uint256 needed,
+        uint256 freeLiquidity,
+        uint256 shortfall
+    );
+    event EpochFundAttempt(
+        uint256 indexed epochId,
+        uint256 needed,
+        uint256 hotBefore,
+        uint256 hotAfter
+    );
+
+    function test_fundEpoch_emitsShortfallWhenItCannotFund() public {
+        uint256 t = block.timestamp;
+        _deposit(user, 1_000_000e6);
+
+        vm.prank(user);
+        (uint256 epochId,) =
+            EpochedQueueModule(address(core)).requestEpochWithdrawal(1_000_000e6);
+        t += 7 days + 1;
+        vm.warp(t);
+        EpochedQueueModule(address(core)).closeCurrentEpoch();
+
+        uint256 owed = EpochedQueueModule(address(core)).epochData(epochId).totalNetAssets;
+
+        // Drain most of the hot balance so the epoch cannot be funded.
+        vm.prank(address(core));
+        IERC20(USDC_UNDERLYING).transfer(makeAddr("elsewhere"), 900_000e6);
+        uint256 hotLeft = IERC20(USDC_UNDERLYING).balanceOf(address(core));
+
+        vm.expectEmit(true, false, false, true, address(core));
+        emit EpochFundingShortfall(epochId, owed, hotLeft, owed - hotLeft);
+        EpochedQueueModule(address(core)).fundEpoch(epochId);
+
+        assertTrue(
+            EpochedQueueModule(address(core)).epochData(epochId).state
+                == EpochQueueStorage.EpochState.Closed,
+            "epoch stayed closed, and said so"
+        );
+    }
+
+    function test_fundEpoch_emitsOneAttemptEventWithBothBalances() public {
+        uint256 t = block.timestamp;
+        _deposit(user, 1_000_000e6);
+
+        vm.prank(user);
+        (uint256 epochId,) =
+            EpochedQueueModule(address(core)).requestEpochWithdrawal(100_000e6);
+        t += 7 days + 1;
+        vm.warp(t);
+        EpochedQueueModule(address(core)).closeCurrentEpoch();
+
+        uint256 owed = EpochedQueueModule(address(core)).epochData(epochId).totalNetAssets;
+        uint256 hot = IERC20(USDC_UNDERLYING).balanceOf(address(core));
+
+        vm.recordLogs();
+        EpochedQueueModule(address(core)).fundEpoch(epochId);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        bytes32 sig = keccak256("EpochFundAttempt(uint256,uint256,uint256,uint256)");
+        uint256 seen;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics.length > 0 && logs[i].topics[0] == sig) {
+                seen++;
+                (uint256 needed, uint256 hotBefore, uint256 hotAfter) =
+                    abi.decode(logs[i].data, (uint256, uint256, uint256));
+                assertEq(needed, owed, "needed reported");
+                assertEq(hotBefore, hot, "hotBefore populated, not zeroed");
+                assertEq(hotAfter, hot, "hotAfter populated, not zeroed");
+            }
+        }
+        assertEq(seen, 1, "exactly one attempt event per call");
     }
 }

@@ -220,6 +220,19 @@ contract EpochedQueueModule {
         uint256 hotAfter
     );
     event EpochFunded(uint256 indexed epochId, uint256 totalNetAssets);
+    /// @notice A fundEpoch() attempt left the epoch CLOSED. Emitted on every
+    ///         failed or partial attempt so a stalled epoch is visible to
+    ///         monitoring without waiting for a user complaint.
+    /// @param epochId       the epoch that could not be funded
+    /// @param needed        the epoch's own locked-pps liability
+    /// @param freeLiquidity hot balance net of other funded epochs' reservations
+    /// @param shortfall     how much more is required before it can be funded
+    event EpochFundingShortfall(
+        uint256 indexed epochId,
+        uint256 needed,
+        uint256 freeLiquidity,
+        uint256 shortfall
+    );
     event EpochAssetsClaimed(
         uint256 indexed epochId,
         uint256 indexed claimId,
@@ -484,7 +497,7 @@ contract EpochedQueueModule {
         // spending cash another epoch's claimants already own.
         uint256 needed = epoch.totalNetAssets + eq.reservedForClaims;
 
-        emit EpochFundAttempt(epochId, epoch.totalNetAssets, hot, 0 /* filled below */);
+        uint256 hotBefore = hot;
 
         if (hot < needed) {
             uint256 deficit = needed - hot;
@@ -520,7 +533,11 @@ contract EpochedQueueModule {
             }
         }
 
-        emit EpochFundAttempt(epochId, epoch.totalNetAssets, 0 /* filled above */, hot);
+        // One event per call, with both balances populated. It used to be
+        // emitted twice, once with hotAfter zeroed and once with hotBefore
+        // zeroed, so an indexer reading either line in isolation got a
+        // fabricated balance.
+        emit EpochFundAttempt(epochId, epoch.totalNetAssets, hotBefore, hot);
 
         // Mark funded only when fully covered (this epoch's liability AND
         // everything already reserved for other funded epochs)
@@ -538,9 +555,22 @@ contract EpochedQueueModule {
             if (epochId == eq.oldestUnfundedEpochId) {
                 _syncOldestUnfunded(eq);
             }
+        } else {
+            // Underfunded: the epoch stays CLOSED and fundEpoch() can be
+            // retried as liquidity arrives. This branch used to emit nothing at
+            // all, so a funding failure was invisible to monitoring -- the only
+            // symptom was a user reporting they had not been paid. Free
+            // liquidity is reported net of other funded epochs' reservations,
+            // which is the number that actually governs whether this epoch can
+            // ever be funded.
+            uint256 reserved = eq.reservedForClaims;
+            emit EpochFundingShortfall(
+                epochId,
+                epoch.totalNetAssets,
+                hot > reserved ? hot - reserved : 0,
+                needed - hot
+            );
         }
-        // If still underfunded the epoch remains CLOSED;
-        // fundEpoch() can be retried as more liquidity becomes available.
     }
 
     /// @notice Advance oldestUnfundedEpochId past any leading FUNDED epochs.
@@ -828,7 +858,7 @@ contract EpochedQueueModule {
         _checkMinClaimAmount(core, msg.sender, shares);
 
         bool rolled = ExitEngineLib.rollEpochIfNeeded(core);
-        if (rolled) emit Events.EpochRolled(core.epochStart);
+        if (rolled) emit Events.WithdrawalCapEpochRolled(core.epochStart);
 
         IParamsProvider.WithdrawalParams memory wp = core.params.getWithdrawalParams(address(this));
         uint256 gross = _convertToAssets(shares);

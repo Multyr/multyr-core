@@ -470,7 +470,7 @@ Events emitted on exit paths:
 | `ForceWithdrawExecuted(user, assets, shares, feeShares)` | ERC4626Module | `forceWithdraw` completion |
 | `ForceWithdrawAllExecuted(user, assets, shares, feeShares)` | ERC4626Module | `forceWithdrawAll` completion |
 | `ForceExit(owner, receiver, assets)` | ERC4626Module | Both FORCE paths |
-| `EpochRolled(epochStart, epochDuration)` | ExitEngineLib | On cap-epoch boundary roll (distinct from the settlement `EpochOpened`/`EpochClosed`) |
+| `WithdrawalCapEpochRolled(newEpochStart)` | ExitEngineLib | On cap-epoch boundary roll. Renamed from `EpochRolled`: the old name invited indexers to merge the withdrawal-cap window with the settlement queue's `EpochOpened`/`EpochClosed`/`EpochFunded`, which are unrelated |
 
 ---
 
