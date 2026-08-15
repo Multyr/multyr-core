@@ -89,7 +89,7 @@ contract Hardening_PayRewardShares is Test {
         uint256 tooMuch = vault.convertToAssets(treasuryBal) * 2;
 
         vm.prank(payoutManager);
-        vm.expectRevert();
+        vm.expectRevert("ERC20: transfer amount exceeds balance");
         vault.payRewardShares(user, tooMuch);
     }
 

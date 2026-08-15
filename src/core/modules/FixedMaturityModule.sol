@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { IERC4626 } from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
@@ -83,7 +84,13 @@ contract FixedMaturityModule {
         if (fundingDeadlineTs_ >= maturityTs_) revert InvalidVaultState();
         if (minFundingAssets_ == 0) revert ZeroAmount();
         if (targetFundingAssets_ < minFundingAssets_) revert InvalidVaultState();
-        if (targetFundingAssets_ > 1_000_000_000e6) revert InvalidVaultState(); // overflow guard
+        // Overflow guard: 1B whole asset units, scaled by the vault asset's actual decimals
+        // (was hardcoded to 6dp/USDC; that made realistic 18dp-asset (e.g. WETH) funding
+        // targets spuriously rejected).
+        address vaultAsset = _asset();
+        if (targetFundingAssets_ > 1_000_000_000 * (10 ** IERC20Metadata(vaultAsset).decimals())) {
+            revert InvalidVaultState();
+        }
         if (preMaturityForceExitPenaltyBps_ > 5_000) revert InvalidVaultState(); // max 50%
         if (fixedTermStrategy_ == address(0)) revert InvalidVaultState();
 

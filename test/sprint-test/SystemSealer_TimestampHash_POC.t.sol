@@ -41,7 +41,6 @@ import { IAdminModule } from "../../src/interfaces/IAdminModule.sol";
 import { IBufferManager } from "../../src/interfaces/IBufferManager.sol";
 import { IncentivesTimelock } from "../../src/governance/IncentivesTimelock.sol";
 import { ERC20Mock } from "../../src/mocks/ERC20Mock.sol";
-import { MockParamsProvider } from "../helpers/MockParamsProvider.sol";
 
 contract SystemSealer_TimestampHash_POC is Test {
     uint256 constant TIMELOCK_DELAY = 2 days;
@@ -72,8 +71,6 @@ contract SystemSealer_TimestampHash_POC is Test {
         vm.startPrank(deployer);
 
         usdc = new ERC20Mock("USDC", "USDC", 6);
-        MockParamsProvider params = new MockParamsProvider();
-        params.setLockPeriod(0);
 
         address[] memory proposers = new address[](1);
         address[] memory executors = new address[](1);
@@ -82,13 +79,15 @@ contract SystemSealer_TimestampHash_POC is Test {
         rootTimelock = new IncentivesTimelock(TIMELOCK_DELAY, proposers, executors, deployer);
 
         feeCollector = new FeeCollector(address(rootTimelock), treasury, treasury, treasury, 7000, 200, 3000);
-        globalConfig = new GlobalConfig(address(rootTimelock), 50, 100, 2000, 86400, 10, 500, 3600, 3600);
+        globalConfig = new GlobalConfig(address(rootTimelock), 50, 100, 2000, 0, 10, 500, 3600, 3600);
 
         systemSealer = new SystemSealer();
         SelectorRegistry selectorRegistry = new SelectorRegistry();
 
+        // SystemSealer requires config.globalConfig == vault.params(), so the vault must
+        // resolve its params from the same contract the seal config names.
         vault = new CoreVault(
-            IERC20Metadata(address(usdc)), "Vault", "V", deployer, address(feeCollector), address(params)
+            IERC20Metadata(address(usdc)), "Vault", "V", deployer, address(feeCollector), address(globalConfig)
         );
 
         _wireModules(address(selectorRegistry));

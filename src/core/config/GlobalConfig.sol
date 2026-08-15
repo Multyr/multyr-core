@@ -513,6 +513,20 @@ contract GlobalConfig is IParamsProvider {
         emit VaultOracleOverrideSet(vault, oracle, maxStaleness_);
     }
 
+    /// @notice Per-vault withdrawal config override — completes the previously dead
+    ///         WITHDRAWAL override path (vaultWithdrawalOverrides/DefaultWithdrawalUpdated
+    ///         existed but nothing ever wrote them). Needed for non-USDC vaults: minClaimAmount
+    ///         is asset-unit denominated and the global default (100e6) assumes 6dp.
+    function setVaultWithdrawalOverride(address vault, WithdrawalConfig calldata cfg)
+        external
+        onlyGovernor
+    {
+        if (vault == address(0)) revert ZeroAddress();
+        vaultWithdrawalOverrides[vault] = cfg;
+        hasOverride[vault][ParamType.WITHDRAWAL] = true;
+        emit VaultOverrideSet(vault, ParamType.WITHDRAWAL);
+    }
+
     function setVaultAdapterOverride(address vault, address adapter, bool allowed, uint256 cap)
         external
         onlyGovernor
@@ -919,6 +933,57 @@ contract GlobalConfig is IParamsProvider {
 
         emit DefaultGovCapsUpdated(
             _minParamDelay, _maxPerfRate, _maxFeeBps,
+            _maxImmExitBps, _maxForceExitBps, _guardianPauseCooldown,
+            _minDeployAmount, _stratTaGas, _opsMaxBps
+        );
+    }
+
+    event VaultGovCapsOverrideSet(
+        address indexed vault,
+        uint64 minParamDelay, uint256 maxPerfRate, uint16 maxFeeBps,
+        uint16 maxImmExitBps, uint16 maxForceExitBps, uint64 guardianPauseCooldown,
+        uint256 minDeployAmount, uint256 stratTaGas, uint16 opsMaxBps
+    );
+
+    /// @notice Per-vault override for the GOV_CAPS family. All nine fields share a single
+    ///         hasOverride[vault][GOV_CAPS] flag (every GOV_CAPS getter checks the same
+    ///         flag) — so unlike the single-field VAULT_CAP/WITHDRAWAL overrides, this MUST
+    ///         set every field together, or the other 8 getters would silently start
+    ///         reading zero-value override mappings for this vault. Needed for non-USDC
+    ///         vaults: minDeployAmount is asset-unit denominated and the global default
+    ///         (10e6) assumes 6dp.
+    function setVaultGovCaps(
+        address vault,
+        uint64 _minParamDelay,
+        uint256 _maxPerfRate,
+        uint16 _maxFeeBps,
+        uint16 _maxImmExitBps,
+        uint16 _maxForceExitBps,
+        uint64 _guardianPauseCooldown,
+        uint256 _minDeployAmount,
+        uint256 _stratTaGas,
+        uint16 _opsMaxBps
+    ) external onlyGovernor {
+        if (vault == address(0)) revert ZeroAddress();
+        if (_maxFeeBps > 10000) revert InvalidBps();
+        if (_maxImmExitBps > 10000) revert InvalidBps();
+        if (_maxForceExitBps > 10000) revert InvalidBps();
+        if (_opsMaxBps > 10000) revert InvalidBps();
+
+        vaultMinParamDelayOverrides[vault] = _minParamDelay;
+        vaultMaxPerfRateOverrides[vault] = _maxPerfRate;
+        vaultMaxFeeBpsOverrides[vault] = _maxFeeBps;
+        vaultMaxImmExitPenaltyOverrides[vault] = _maxImmExitBps;
+        vaultMaxForceExitPenaltyOverrides[vault] = _maxForceExitBps;
+        vaultGuardianPauseCooldownOverrides[vault] = _guardianPauseCooldown;
+        vaultMinDeployAmountOverrides[vault] = _minDeployAmount;
+        vaultStratTaGasOverrides[vault] = _stratTaGas;
+        vaultOpsMaxBpsOverrides[vault] = _opsMaxBps;
+        hasOverride[vault][ParamType.GOV_CAPS] = true;
+
+        emit VaultOverrideSet(vault, ParamType.GOV_CAPS);
+        emit VaultGovCapsOverrideSet(
+            vault, _minParamDelay, _maxPerfRate, _maxFeeBps,
             _maxImmExitBps, _maxForceExitBps, _guardianPauseCooldown,
             _minDeployAmount, _stratTaGas, _opsMaxBps
         );
