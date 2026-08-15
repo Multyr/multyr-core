@@ -89,12 +89,32 @@ library EpochQueueStorage {
         // Incremented in fundEpoch() when an epoch is marked Funded,
         // decremented in claimEpochAssets()/batchClaimEpochAssets() as each
         // claim is actually paid out.
+        //
+        // NOT an exact round trip: the reservation is taken as
+        // mulWadDown(totalNetShares, ppsAtClose) while each release is
+        // mulWadDown(netShares_i, ppsAtClose), and per-claim truncation makes
+        // the releases sum to at most the reservation. A fully drained epoch
+        // therefore leaves under one asset-unit behind -- measured at 1 wei per
+        // multi-claim epoch, which for 6-decimal USDC is 1e-6. It is dust by
+        // construction and no claimant is ever short-paid by it, but it does
+        // mean this counter is monotonically non-zero once the first
+        // multi-claim epoch settles. NEVER write an invariant asserting
+        // reservedForClaims == 0; bound it against the epoch count instead.
         uint256 reservedForClaims;
         // Locked-pps liability for CLOSED-but-not-yet-FUNDED epochs. Unlike
         // reservedForClaims this is not yet backed by any specific cash
         // (fundEpoch() hasn't succeeded for it), but tracking it lets views
         // (see CoreVaultLens.getVaultReport) value total pending withdrawals
         // exactly, in O(1), without scanning epochs.
+        //
+        // Monotone per epoch by design: incremented at close, and moved into
+        // reservedForClaims when (and only when) that epoch funds. An epoch
+        // that closes and never funds keeps its share of this total forever,
+        // which is correct rather than a leak -- Closed is terminal until
+        // funding succeeds (claimEpochAssets requires Funded, and
+        // cancelEpochWithdrawal requires Open), so the liability really is
+        // still outstanding. Each epoch contributes to exactly one of the three
+        // buckets getVaultReport sums, so there is no double count.
         uint256 closedPendingAssets;
     }
 

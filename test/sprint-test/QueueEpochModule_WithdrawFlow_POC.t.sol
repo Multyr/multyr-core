@@ -73,6 +73,7 @@ contract MockQueueEpochParamsProvider is IParamsProvider {
     uint256 private _dcpThreshold;
     bool private _dcpEnabled;
     uint64 private _epochDuration = 1 days;
+    uint256 private _minClaimAmount;
 
     function setLockPeriod(uint64 v) external { _lockPeriod = v; }
     function setCapPerEpochBps(uint16 v) external { _capPerEpochBps = v; }
@@ -83,6 +84,7 @@ contract MockQueueEpochParamsProvider is IParamsProvider {
         _dcpThreshold = threshold;
     }
     function setEpochDuration(uint64 v) external { _epochDuration = v; }
+    function setMinClaimAmount(uint256 v) external { _minClaimAmount = v; }
 
     function getFeeParams(address) external pure returns (FeeParams memory) {
         return FeeParams({ depositFeeBps: 0, withdrawFeeBps: 0, perfRateX: 0, minCrystallizeInterval: 0, treasury: address(0) });
@@ -92,7 +94,7 @@ contract MockQueueEpochParamsProvider is IParamsProvider {
             capPerEpochBps: _capPerEpochBps,
             maxWithdrawalPerBlock: 0,
             maxWithdrawalPerTx: 0,
-            minClaimAmount: 0,
+            minClaimAmount: _minClaimAmount,
             lockPeriod: _lockPeriod
         });
     }
