@@ -122,6 +122,9 @@ contract CoreVault_ClaimsQueue_Invariants is StdInvariant, Test {
         vault.setModule(
             EpochedQueueModule.totalEscrowedShares.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
+        vault.setModule(
+            EpochedQueueModule.reservedForClaims.selector, address(queueModule), vault.ROLE_PUBLIC()
+        );
         vault.setModule(EpochedQueueModule.outstandingClaimCount.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(EpochedQueueModule.canCloseCurrentEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(EpochedQueueModule.currentEpochClaimCount.selector, address(queueModule), vault.ROLE_PUBLIC());
@@ -218,6 +221,24 @@ contract CoreVault_ClaimsQueue_Invariants is StdInvariant, Test {
     /**
      * @notice Vault should remain solvent through all queue operations
      */
+    /**
+     * @notice The reservation must always be backed. Every consumer of the hot
+     *         balance is supposed to treat `hot - reservedForClaims` as the only
+     *         spendable amount, so the vault can never hold less than it has
+     *         already promised to FUNDED-but-unclaimed claimants. This is the
+     *         property the split close/fund/claim handlers exist to stress: it
+     *         is only interesting once the fuzzer can reach a backlog.
+     */
+    function invariant_reservationIsAlwaysBacked() public view {
+        uint256 reserved = IQueueModule(address(vault)).reservedForClaims();
+        if (reserved == 0) return;
+        assertGe(
+            usdc.balanceOf(address(vault)),
+            reserved,
+            "RESERVE: hot balance must cover every funded-but-unclaimed claim"
+        );
+    }
+
     function invariant_vaultSolvency() public view {
         uint256 totalAssets = vault.totalAssets();
         uint256 totalSupply = vault.totalSupply();
@@ -281,6 +302,8 @@ contract ClaimQueueHandler is Test {
     uint256 public calls_immediateClaim;
     uint256 public calls_cancelClaim;
     uint256 public calls_processQueue;
+    uint256 public calls_closeEpoch;
+    uint256 public calls_fundEpoch;
     uint256 public calls_yield;
 
     // Claim tracking -- handler-side sequential IDs (the epoch model's own
@@ -431,22 +454,50 @@ contract ClaimQueueHandler is Test {
         }
     }
 
-    function processQueue(uint256 maxClaims) public {
-        maxClaims = bound(maxClaims, 1, 25);
+    // Close, fund and claim are SEPARATE handler actions on purpose. Fusing
+    // them into one call meant the fuzzer could never reach a state with an
+    // epoch closed-but-unfunded while a later epoch also closed -- which is
+    // exactly the state space the reservation bugs lived in.
 
-        // Warp to ensure claims can be settled
+    /// @notice Close the open epoch. Does not fund it and does not settle it.
+    function closeEpoch() public {
         vm.warp(block.timestamp + 7 days);
-
         if (!queueModule.canCloseCurrentEpoch() || queueModule.currentEpochClaimCount() == 0) {
             return;
         }
-
-        uint256 epochId = queueModule.currentEpochId();
         try queueModule.closeCurrentEpoch() {
-            uint256 processed = _fundAndSettleEpoch(epochId, maxClaims);
-            ghost_processedClaims += processed;
-            calls_processQueue++;
+            calls_closeEpoch++;
         } catch { }
+    }
+
+    /// @notice Attempt to fund an ARBITRARY epoch, not necessarily the oldest,
+    ///         so out-of-order funding and repeated failed attempts are both
+    ///         reachable.
+    function fundSomeEpoch(uint256 epochSeed) public {
+        uint256 current = queueModule.currentEpochId();
+        if (current == 0) return;
+        uint256 target = bound(epochSeed, 0, current - 1);
+        try queueModule.fundEpoch(target) {
+            calls_fundEpoch++;
+        } catch { }
+    }
+
+    /// @notice Settle up to `maxClaims` tracked claims that are actually
+    ///         claimable, across ANY epoch.
+    function claimReady(uint256 maxClaims) public {
+        maxClaims = bound(maxClaims, 1, 25);
+        uint256 processed;
+        for (uint256 i = 0; i < nextClaimId && processed < maxClaims; i++) {
+            if (claimSettled[i] || claimCancelled[i] || claimOwners[i] == address(0)) continue;
+            vm.prank(claimOwners[i]);
+            try queueModule.claimEpochAssets(claimVaultEpochId[i], claimVaultClaimId[i]) {
+                claimSettled[i] = true;
+                processed++;
+                if (ghost_openClaims > 0) ghost_openClaims--;
+            } catch { }
+        }
+        ghost_processedClaims += processed;
+        if (processed > 0) calls_processQueue++;
     }
 
     /// @dev Shared close-side helper: funds `epochId` and self-claims (pull-based)

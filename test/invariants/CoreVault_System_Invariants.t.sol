@@ -121,6 +121,9 @@ contract CoreVault_System_Invariants is StdInvariant, Test {
         vault.setModule(
             EpochedQueueModule.totalEscrowedShares.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
+        vault.setModule(
+            EpochedQueueModule.reservedForClaims.selector, address(queueModule), vault.ROLE_PUBLIC()
+        );
         vault.setModule(EpochedQueueModule.outstandingClaimCount.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(EpochedQueueModule.canCloseCurrentEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(EpochedQueueModule.currentEpochClaimCount.selector, address(queueModule), vault.ROLE_PUBLIC());
@@ -282,6 +285,24 @@ contract CoreVault_System_Invariants is StdInvariant, Test {
      * @notice Queue state must be consistent
      * @dev O(1) - reads pendingShares and vault balance
      */
+    /**
+     * @notice The reservation must always be backed. Every consumer of the hot
+     *         balance is supposed to treat `hot - reservedForClaims` as the only
+     *         spendable amount, so the vault can never hold less than it has
+     *         already promised to FUNDED-but-unclaimed claimants. This is the
+     *         property the split close/fund/claim handlers exist to stress: it
+     *         is only interesting once the fuzzer can reach a backlog.
+     */
+    function invariant_reservationIsAlwaysBacked() public view {
+        uint256 reserved = IQueueModule(address(vault)).reservedForClaims();
+        if (reserved == 0) return;
+        assertGe(
+            usdc.balanceOf(address(vault)),
+            reserved,
+            "RESERVE: hot balance must cover every funded-but-unclaimed claim"
+        );
+    }
+
     function invariant_queue_integrity() public view {
         uint256 pendingShares = IQueueModule(address(vault)).totalEscrowedShares();
 
@@ -637,6 +658,69 @@ contract VaultHandler is Test {
         } catch {
             reverts_cancelClaim++;
         }
+    }
+
+    /* ========== HANDLER: SETTLE_QUEUE ========== */
+
+    // Close, fund and claim are SEPARATE handler actions on purpose. Fusing
+    // them into one settleQueue call meant the fuzzer never reached a state
+    // with an epoch closed-but-unfunded while a later epoch also closed, which
+    // is the state space the reservation bugs lived in.
+
+    /// @notice Close the open epoch and stop there.
+    function closeEpoch() public {
+        vm.warp(block.timestamp + 7 days);
+        if (
+            !IQueueModule(address(vault)).canCloseCurrentEpoch()
+                || IQueueModule(address(vault)).currentEpochClaimCount() == 0
+        ) {
+            reverts_settle++;
+            return;
+        }
+        try IQueueModule(address(vault)).closeCurrentEpoch() {
+            calls_settle++;
+        } catch {
+            reverts_settle++;
+        }
+    }
+
+    /// @notice Attempt to fund an arbitrary epoch, so out-of-order funding and
+    ///         repeated failed attempts are both reachable.
+    function fundSomeEpoch(uint256 epochSeed) public {
+        uint256 current = IQueueModule(address(vault)).currentEpochId();
+        if (current == 0) {
+            reverts_settle++;
+            return;
+        }
+        uint256 target = bound(epochSeed, 0, current - 1);
+        try IQueueModule(address(vault)).fundEpoch(target) {
+            calls_settle++;
+        } catch {
+            reverts_settle++;
+        }
+    }
+
+    /// @notice Settle up to `maxClaims` tracked claims that are claimable, in
+    ///         any epoch, rather than only the one just closed.
+    function claimReady(uint256 maxClaims) public {
+        maxClaims = bound(maxClaims, 1, 20);
+
+        uint256 processed = 0;
+        uint256 i = 0;
+        while (i < pendingClaims.length && processed < maxClaims) {
+            PendingClaim memory pc = pendingClaims[i];
+            vm.prank(pc.actor);
+            try IQueueModule(address(vault)).claimEpochAssets(pc.epochId, pc.claimId) {
+                processed++;
+                if (ghost_pendingClaims > 0) ghost_pendingClaims--;
+                if (actorClaimCount[pc.actor] > 0) actorClaimCount[pc.actor]--;
+                _removePendingClaim(i);
+                continue; // don't advance i -- swap-removed a new element into place
+            } catch { }
+            i++;
+        }
+        ghost_processedClaims += processed;
+        if (processed > 0) calls_settle++;
     }
 
     function _removePendingClaim(uint256 idx) internal {

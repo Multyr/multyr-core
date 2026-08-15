@@ -8,6 +8,13 @@ import { CoreHarness } from "../../helpers/CoreHarness.sol";
 import { ERC20Mock } from "../../../src/mocks/ERC20Mock.sol";
 import { MockParamsProvider } from "../../helpers/MockParamsProvider.sol";
 import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTests.sol";
+import { StrategyMock } from "../../helpers/StrategyMock.sol";
+import { MockPriceOracleMiddleware } from "../../helpers/MockPriceOracleMiddleware.sol";
+
+interface IDeploy {
+    function deployToStrategies(uint256 maxAmount) external;
+}
+import { EpochQueueStorage } from "../../../src/core/modules/EpochedQueueModule.sol";
 
 interface IQueueModule {
     function requestInstantWithdrawal(uint256 shares)
@@ -20,6 +27,7 @@ interface IQueueModule {
     function closeCurrentEpoch() external;
     function fundEpoch(uint256 epochId) external;
     function claimEpochAssets(uint256 epochId, uint256 claimId) external returns (uint256 assets);
+    function epochData(uint256 epochId) external view returns (EpochQueueStorage.EpochData memory);
     function currentEpochId() external view returns (uint256);
     function canCloseCurrentEpoch() external view returns (bool);
     function currentEpochClaimCount() external view returns (uint256);
@@ -111,8 +119,79 @@ contract Hardening_GasAndChaos is Test {
         uint256 gasUsed = g - gasleft();
         console2.log("fundEpoch() gas:", gasUsed);
 
-        // Gas report — characterization, not hard assertion
-        console2.log("Gas limit check: gasUsed=", gasUsed, "limit=5000000");
+        // fundEpoch() never touches per-claim storage, so its cost must not
+        // move with queue depth. Asserted, not just logged: the flat-gas claim
+        // is one of the load-bearing reasons the epoch model replaced the
+        // per-claim keeper scan, and a characterization that only prints a
+        // number cannot catch a regression.
+        assertLt(gasUsed, FUND_EPOCH_GAS_CEILING, "fundEpoch cost must stay flat in queue depth");
+    }
+
+    /// @dev Comfortably above the measured ~39k for the pre-funded path and the
+    ///      strategy-redeem path below, far below anything that would scale
+    ///      with claim count.
+    uint256 internal constant FUND_EPOCH_GAS_CEILING = 400_000;
+
+    /// @notice The characterization above pre-funds the vault, so fundEpoch
+    ///         short-circuits before its liquidity waterfall ever runs. This
+    ///         exercises the branch that actually pulls: hot is short, the
+    ///         router has to redeem from a strategy, and the epoch only reaches
+    ///         FUNDED because of that pull.
+    function test_fundEpoch_executesStrategyRedeemWaterfall() public {
+        StrategyMock strat = new StrategyMock(address(usdc));
+        vault.addStrategyUnsafe(address(strat));
+
+        // StrategyRouter.executeRedeemBatch values the asset through
+        // OracleValuationLib and reverts OracleNotConfigured without a fresh
+        // oracle -- for 6dp USDC too, not just 18dp assets. fundEpoch swallows
+        // that revert, so without this the waterfall silently no-ops.
+        MockPriceOracleMiddleware oracle = new MockPriceOracleMiddleware();
+        oracle.setPrice(address(usdc), 1e18);
+        params.setOracle(address(oracle));
+
+        address user = address(0xC0FFEE);
+        _fundAndDeposit(user, 1_000_000e6);
+
+        vm.prank(user);
+        (uint256 epochId, uint256 claimId) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(500_000e6);
+
+        vm.warp(block.timestamp + 7 days + 1);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        uint256 owed = IQueueModule(address(vault)).epochData(epochId).totalNetAssets;
+
+        // Refresh the quote after the warp: the staleness window is an hour and
+        // epochs are days long, so at fund time the oracle must have been
+        // updated since the epoch closed or the redeem reverts and the epoch
+        // silently stays CLOSED.
+        oracle.setPrice(address(usdc), 1e18);
+
+        // Push hot into the strategy through the real deploy path, so the
+        // router's own accounting matches and a redeem can actually pull it
+        // back. A raw transfer would leave the router thinking the strategy
+        // holds nothing.
+        IDeploy(address(vault)).deployToStrategies(type(uint256).max);
+        assertGt(usdc.balanceOf(address(strat)), 0, "strategy is funded");
+        assertLt(usdc.balanceOf(address(vault)), owed, "hot is genuinely short before funding");
+
+        uint256 g = gasleft();
+        IQueueModule(address(vault)).fundEpoch(epochId);
+        uint256 gasUsed = g - gasleft();
+        console2.log("fundEpoch() gas with strategy redeem:", gasUsed);
+
+        assertTrue(
+            IQueueModule(address(vault)).epochData(epochId).state
+                == EpochQueueStorage.EpochState.Funded,
+            "the waterfall pulled enough to fund the epoch"
+        );
+        assertLt(gasUsed, FUND_EPOCH_GAS_CEILING, "redeem path stays within the same ceiling");
+
+        // And the claimant is actually paid out of the redeemed liquidity.
+        uint256 before = usdc.balanceOf(user);
+        vm.prank(user);
+        uint256 paid = IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
+        assertEq(usdc.balanceOf(user) - before, paid, "claim paid from redeemed assets");
+        assertGt(paid, 0, "and it was a real payout");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

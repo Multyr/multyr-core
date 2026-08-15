@@ -59,6 +59,12 @@ interface IQueueModule {
 
     function totalEscrowedShares() external view returns (uint256);
 
+    /// @notice Assets earmarked for FUNDED-but-unclaimed claims across all epochs
+    function reservedForClaims() external view returns (uint256);
+
+    /// @notice Locked-pps liability for CLOSED-but-not-yet-FUNDED epochs
+    function closedPendingAssets() external view returns (uint256);
+
     /// @notice Total unclaimed claims across all epochs -- dynamic-cap "queue depth" signal
     function outstandingClaimCount() external view returns (uint256);
 

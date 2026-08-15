@@ -92,6 +92,7 @@ contract SharePriceCollapse_Security is Test {
             EpochedQueueModule.totalEscrowedShares.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
         vault.setModule(EpochedQueueModule.outstandingClaimCount.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.reservedForClaims.selector, address(queueModule), vault.ROLE_PUBLIC());
 
         // AdminModule selectors (OWNER)
         vault.setModule(
@@ -326,4 +327,71 @@ contract SharePriceCollapse_Security is Test {
         assertEq(IQueueModule(address(vault)).totalEscrowedShares(), 0, "No pending shares");
         assertEq(vault.balanceOf(address(vault)), 0, "Vault should not hold shares");
     }
+
+    /**
+     * @notice THE ORDER THE EPOCH MODEL INTRODUCES: close first, collapse
+     *         after. Every other collapse test here closes the epoch AFTER the
+     *         loss, which locks ppsAtClose at the already-reduced price and is
+     *         the harmless direction. Closing first locks the price HIGH and
+     *         then removes the assets backing it, which is where the original
+     *         unpayable-claimant bug lived.
+     * @dev The reservation is what makes this safe now: epoch 0 can only be
+     *      marked Funded while the vault genuinely holds its liability, and
+     *      once reserved that cash cannot be spent by anything else.
+     */
+    function test_closeBeforeCollapse_fundedClaimIsStillHonoured() public {
+        usdc._mint(alice, 1_000_000e6);
+        vm.startPrank(alice);
+        usdc.approve(address(vault), 1_000_000e6);
+        vault.deposit(1_000_000e6, alice);
+        vm.stopPrank();
+
+        usdc._mint(bob, 1_000_000e6);
+        vm.startPrank(bob);
+        usdc.approve(address(vault), 1_000_000e6);
+        vault.deposit(1_000_000e6, bob);
+        vm.stopPrank();
+
+        uint256 aliceShares = vault.balanceOf(alice);
+        vm.prank(alice);
+        (uint256 epochId, uint256 claimId) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(aliceShares);
+
+        // CLOSE FIRST: ppsAtClose is locked at the healthy price.
+        vm.warp(block.timestamp + 7 days);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epochId);
+
+        uint256 reserved = IQueueModule(address(vault)).reservedForClaims();
+        assertGt(reserved, 0, "alice's payout is reserved at the pre-collapse price");
+
+        // COLLAPSE AFTER: 50% of the vault's assets vanish.
+        uint256 totalAssets = vault.totalAssets();
+        vm.prank(address(vault));
+        usdc.transfer(address(0xDEAD), totalAssets / 2);
+
+        // Bob's force exit may only spend free liquidity, so it cannot eat into
+        // what alice is owed.
+        vm.prank(bob);
+        IForceExitAll(address(vault)).forceWithdrawAll(bob, 0);
+        assertGe(
+            usdc.balanceOf(address(vault)),
+            IQueueModule(address(vault)).reservedForClaims(),
+            "hot still covers the reservation after the collapse and a force exit"
+        );
+
+        // Alice is paid in full at the price locked before the collapse.
+        uint256 aliceBefore = usdc.balanceOf(alice);
+        vm.prank(alice);
+        uint256 paid = IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
+
+        assertEq(paid, reserved, "paid exactly the reserved amount");
+        assertEq(usdc.balanceOf(alice) - aliceBefore, paid, "and it actually arrived");
+        assertEq(IQueueModule(address(vault)).reservedForClaims(), 0, "reservation released");
+    }
+}
+
+interface IForceExitAll {
+    function forceWithdrawAll(address receiver, uint256 minAssetsOut)
+        external returns (uint256 assetsReceived);
 }
