@@ -80,8 +80,6 @@ contract BaseVaultTest is Test {
                 address(0), // buffer manager (optional wiring)
                 address(stubRouter),
                 address(stubConfig),
-                25,
-                100,
                 type(uint256).max,
                 type(uint256).max,
                 10, // minRealizeGapBps (0.1%)

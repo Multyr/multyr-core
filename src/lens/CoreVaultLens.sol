@@ -10,6 +10,7 @@ import { IParamsProvider } from "../interfaces/IParamsProvider.sol";
 import { Percentage } from "../libs/Percentage.sol";
 import { FixedPoint } from "../libs/FixedPoint.sol";
 import { WithdrawalCapLib } from "../core/libraries/WithdrawalCapLib.sol";
+import { EpochQueueStorage } from "../core/modules/EpochedQueueModule.sol";
 
 interface ICoreVaultLensTarget {
     function asset() external view returns (address);
@@ -28,12 +29,6 @@ interface ICoreVaultLensTarget {
     function navSmooth() external view returns (uint256);
     function navSmoothInitialized() external view returns (bool);
     function epochWithdrawn() external view returns (uint256);
-    function head() external view returns (uint256);
-    function queue(uint256) external view returns (uint256);
-    function claims(uint256)
-        external
-        view
-        returns (address user, uint256 shares, uint64 ts, bool immediate, bool settled);
     function perf()
         external
         view
@@ -42,7 +37,22 @@ interface ICoreVaultLensTarget {
         external
         view
         returns (uint16 depBps, uint16 witBps, address treasury, bool recipientFrozen);
-    function pendingShares() external view returns (uint256);
+
+    // Epoch-model queue (EpochedQueueModule, delegatecall-dispatched)
+    function currentEpochId() external view returns (uint256);
+    function currentEpochClaimCount() external view returns (uint256);
+    function canCloseCurrentEpoch() external view returns (bool);
+    function oldestUnfundedEpochId() external view returns (uint256);
+    function outstandingClaimCount() external view returns (uint256);
+    function nextClaimIdForEpoch(uint256 epochId) external view returns (uint256);
+    function totalEscrowedShares() external view returns (uint256);
+    function reservedForClaims() external view returns (uint256);
+    function closedPendingAssets() external view returns (uint256);
+    function epochData(uint256 epochId) external view returns (EpochQueueStorage.EpochData memory);
+    function epochClaim(uint256 epochId, uint256 claimId)
+        external
+        view
+        returns (EpochQueueStorage.EpochClaim memory);
 }
 
 contract CoreVaultLens {
@@ -170,10 +180,13 @@ contract CoreVaultLens {
         IParamsProvider pp = v.params();
         IParamsProvider.DynamicCapParams memory d = pp.getDynamicCapParams(vault);
         if (d.minBps == 0 || d.maxBps == 0) return pp.getWithdrawalParams(vault).capPerEpochBps;
-        uint256 qLen = _queueLength(vault);
+        // Must match EpochedQueueModule._epochCapRemaining()'s signal exactly —
+        // outstandingClaimCount (cross-epoch total), not a per-epoch count —
+        // otherwise this preview would show a different cap than the vault enforces.
+        uint256 queueDepth = v.outstandingClaimCount();
         return
             WithdrawalCapLib.calculateDynamicCapBps(
-                d.minBps, d.maxBps, d.queueStressThreshold, qLen
+                d.minBps, d.maxBps, d.queueStressThreshold, queueDepth
             );
     }
 
@@ -191,8 +204,12 @@ contract CoreVaultLens {
         return m > ew ? m - ew : 0;
     }
 
+    /// @notice True if there's epoch-queue work: a closeable non-empty open
+    ///         epoch, or a closed-but-unfunded backlog. Mirrors CoreVault.canSettle().
     function canSettle(address vault) external view returns (bool) {
-        return _queueLength(vault) > 0;
+        ICoreVaultLensTarget v = ICoreVaultLensTarget(vault);
+        if (v.canCloseCurrentEpoch() && v.currentEpochClaimCount() > 0) return true;
+        return v.oldestUnfundedEpochId() < v.currentEpochId();
     }
 
     function canCrystallize(address vault) external view returns (bool) {
@@ -213,53 +230,48 @@ contract CoreVaultLens {
         return IERC20(v.asset()).balanceOf(vault) < Percentage.mulBpsDown(v.totalAssets(), t);
     }
 
-    function getClaim(address vault, uint256 id)
+    /// @notice Fetch a single claim within a specific epoch (claim IDs restart
+    ///         at 1 per epoch in the epoch model — there is no single global ID).
+    function getEpochClaim(address vault, uint256 epochId, uint256 claimId)
         external
         view
-        returns (address user, uint256 shares, bool immediate, bool settled)
+        returns (address user, uint256 netShares, bool claimed)
     {
-        ICoreVaultLensTarget v = ICoreVaultLensTarget(vault);
-        (user, shares,, immediate, settled) = v.claims(id);
+        EpochQueueStorage.EpochClaim memory c = ICoreVaultLensTarget(vault).epochClaim(epochId, claimId);
+        return (c.user, c.netShares, c.claimed);
     }
 
-    function getUserClaims(address vault, address user)
+    /// @notice Scan a caller-supplied epoch range for a user's claims. Bounded
+    ///         by the caller (not the whole vault history) — an indexer/frontend
+    ///         already knows which epochs a user interacted with from
+    ///         EpochWithdrawalRequested events, so this avoids an unbounded
+    ///         full-history scan that only grows over the vault's lifetime.
+    function getUserEpochClaims(address vault, address user, uint256 fromEpoch, uint256 toEpoch)
         external
         view
-        returns (uint256[] memory ids)
+        returns (uint256[] memory epochIds, uint256[] memory claimIds)
     {
         ICoreVaultLensTarget v = ICoreVaultLensTarget(vault);
-        uint256 h = v.head();
-        uint256 n = h + _queueLength(vault);
-        uint256 c = 0;
-        for (uint256 i = h; i < n; ++i) {
-            (address u,,,,) = v.claims(v.queue(i));
-            if (u == user) c++;
-        }
-        ids = new uint256[](c);
-        uint256 j;
-        for (uint256 i = h; i < n; ++i) {
-            uint256 qid = v.queue(i);
-            (address u,,,,) = v.claims(qid);
-            if (u == user) ids[j++] = qid;
-        }
-    }
-
-    function queueLength(address vault) external view returns (uint256) {
-        return _queueLength(vault);
-    }
-
-    function _queueLength(address vault) internal view returns (uint256) {
-        ICoreVaultLensTarget v = ICoreVaultLensTarget(vault);
-        uint256 h = v.head();
-        uint256 i = h;
-        while (true) {
-            try v.queue(i) returns (uint256) {
-                i++;
-            } catch {
-                break;
+        uint256 count;
+        for (uint256 e = fromEpoch; e <= toEpoch; ++e) {
+            uint256 nextId = v.nextClaimIdForEpoch(e);
+            for (uint256 c = 1; c <= nextId; ++c) {
+                if (v.epochClaim(e, c).user == user) count++;
             }
         }
-        return i - h;
+        epochIds = new uint256[](count);
+        claimIds = new uint256[](count);
+        uint256 j;
+        for (uint256 e = fromEpoch; e <= toEpoch; ++e) {
+            uint256 nextId = v.nextClaimIdForEpoch(e);
+            for (uint256 c = 1; c <= nextId; ++c) {
+                if (v.epochClaim(e, c).user == user) {
+                    epochIds[j] = e;
+                    claimIds[j] = c;
+                    j++;
+                }
+            }
+        }
     }
 
     function pendingLoyaltyBonus(address vault, address user) external view returns (uint256) {
@@ -306,7 +318,7 @@ contract CoreVaultLens {
         uint256 availableLiquidity;
         uint256 pendingWithdrawals;
         uint256 capRemaining;
-        uint256 queueLen;
+        uint256 outstandingClaims;
         bool canSettleNow;
         bool canCrystallizeNow;
     }
@@ -317,10 +329,20 @@ contract CoreVaultLens {
         r.totalSupply = v.totalSupply();
         r.pricePerShare = pps(vault);
         r.availableLiquidity = IERC20(v.asset()).balanceOf(vault);
-        r.pendingWithdrawals = v.convertToAssets(v.pendingShares());
+        // Exact, O(1): the still-open epoch's shares haven't locked a pps yet
+        // (valued live), while closed/funded epochs' liabilities are already
+        // locked-pps-correct by construction (see EpochQueueStorage.Layout).
+        // Replaces the old convertToAssets(totalEscrowedShares()) approximation,
+        // which priced ALL escrowed shares (including already-locked ones) at
+        // the CURRENT live pps -- wrong whenever pps moved since a closed
+        // epoch's ppsAtClose.
+        EpochQueueStorage.EpochData memory openEpoch = v.epochData(v.currentEpochId());
+        r.pendingWithdrawals = v.convertToAssets(openEpoch.totalNetShares)
+            + v.closedPendingAssets()
+            + v.reservedForClaims();
         r.capRemaining = this.calculateCapImmediateRemaining(vault);
-        r.queueLen = _queueLength(vault);
-        r.canSettleNow = r.queueLen > 0;
+        r.outstandingClaims = v.outstandingClaimCount();
+        r.canSettleNow = this.canSettle(vault);
         r.canCrystallizeNow = this.canCrystallize(vault);
     }
 
@@ -331,7 +353,9 @@ contract CoreVaultLens {
         uint256 pendingBonus;
     }
 
-    function getUserReport(address vault, address user)
+    /// @param fromEpoch/toEpoch bounds the epoch scan for pendingClaims — see
+    ///        getUserEpochClaims() for why this isn't a full-history scan.
+    function getUserReport(address vault, address user, uint256 fromEpoch, uint256 toEpoch)
         external
         view
         returns (UserReport memory r)
@@ -339,10 +363,25 @@ contract CoreVaultLens {
         ICoreVaultLensTarget v = ICoreVaultLensTarget(vault);
         r.shares = v.balanceOf(user);
         r.assetsValue = v.convertToAssets(r.shares);
-        uint256[] memory ids = this.getUserClaims(vault, user);
-        for (uint256 i = 0; i < ids.length; ++i) {
-            (, uint256 sh,,, bool settled) = v.claims(ids[i]);
-            if (!settled) r.pendingClaims += v.convertToAssets(sh);
+        (uint256[] memory epochIds, uint256[] memory claimIds) =
+            this.getUserEpochClaims(vault, user, fromEpoch, toEpoch);
+        // A closed/funded epoch pays at its own locked ppsAtClose, not live
+        // pps -- cache the last epoch fetched since claims are usually
+        // grouped by epoch, to avoid refetching per claim.
+        uint256 cachedEpochId;
+        EpochQueueStorage.EpochData memory cachedEpoch;
+        bool haveCached;
+        for (uint256 i = 0; i < claimIds.length; ++i) {
+            EpochQueueStorage.EpochClaim memory c = v.epochClaim(epochIds[i], claimIds[i]);
+            if (c.claimed) continue;
+            if (!haveCached || cachedEpochId != epochIds[i]) {
+                cachedEpoch = v.epochData(epochIds[i]);
+                cachedEpochId = epochIds[i];
+                haveCached = true;
+            }
+            r.pendingClaims += cachedEpoch.state == EpochQueueStorage.EpochState.Open
+                ? v.convertToAssets(c.netShares)
+                : FixedPoint.mulWadDown(c.netShares, cachedEpoch.ppsAtClose);
         }
         r.pendingBonus = this.pendingLoyaltyBonus(vault, user);
     }

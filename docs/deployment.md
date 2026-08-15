@@ -106,7 +106,7 @@ require(block.chainid == 42161, "WRONG_CHAIN: DeployCoreSystem is Arbitrum-only 
 flowchart TD
     A["Phase 1: Infrastructure<br/>VaultFactory + GlobalConfig + FeeCollector<br/>PriceOracle + StrategyHealthRegistry<br/>(script/DeployCoreSystem.s.sol:228)"] --> B
     B["Phase 2: Security<br/>SelectorRegistry + SystemSealer<br/>(script/DeployCoreSystem.s.sol:278)"] --> C
-    C["Phase 3: Core + Modules<br/>CoreVault (PAUSED) + QueueModule<br/>AdminModule + ERC4626Module + LiquidityOpsModule<br/>(script/DeployCoreSystem.s.sol:299)"] --> D
+    C["Phase 3: Core + Modules<br/>CoreVault (PAUSED) + EpochedQueueModule<br/>AdminModule + ERC4626Module + LiquidityOpsModule<br/>(script/DeployCoreSystem.s.sol)"] --> D
     D["Phase 4: Ecosystem Base<br/>BufferManager + StrategyRouter<br/>+ WarmAdapters (opt) + Incentives (opt) + VaultUpkeep (opt)<br/>(script/DeployCoreSystem.s.sol:356)"] --> E
     E["Phase 5: Wiring<br/>Module routing + Ecosystem config<br/>Oracle config + Fees + Perf params<br/>Dead deposit + ComponentsTimelock<br/>Ownership transfer → ROOT_TIMELOCK<br/>(script/DeployCoreSystem.s.sol:450)"] --> F
     F["Phase 6: Inline Assertions<br/>17 MUST-pass postconditions<br/>(script/DeployCoreSystem.s.sol:188)"]
@@ -145,7 +145,7 @@ flowchart TD
 |----------|----------|-------|
 | `CoreVault` | `multyr-core/script/DeployCoreSystem.s.sol:304` | Starts **PAUSED** — invariant verified at `multyr-core/script/DeployCoreSystem.s.sol:313` |
 | Factory registration | `multyr-core/script/DeployCoreSystem.s.sol:316` | **Immediate** after deploy (subgraph event ordering) |
-| `QueueModule` | `multyr-core/script/DeployCoreSystem.s.sol:333` | Stateless; handles deposit/withdrawal queue |
+| `EpochedQueueModule` | `multyr-core/script/DeployCoreSystem.s.sol` | Stateless delegatecall target; the sole withdrawal-queue mechanism |
 | `AdminModule` | `multyr-core/script/DeployCoreSystem.s.sol:337` | Stateless; handles admin operations |
 | `ERC4626Module` | `multyr-core/script/DeployCoreSystem.s.sol:340` | Stateless; implements ERC-4626 vault interface |
 | `LiquidityOpsModule` | `multyr-core/script/DeployCoreSystem.s.sol:344` | Stateless; handles liquidity operations |
@@ -203,7 +203,7 @@ Configured via `_configureModuleRouting()` (`multyr-core/script/DeployCoreSystem
 
 | Module | Selectors | Role |
 |--------|-----------|------|
-| `QueueModule` | write + view selectors | `ROLE_PUBLIC` |
+| `EpochedQueueModule` | write + view selectors | `ROLE_PUBLIC` |
 | `AdminModule` | owner selectors | `ROLE_OWNER` |
 | `AdminModule` | view selectors | `ROLE_PUBLIC` |
 | `ERC4626Module` | all selectors | `ROLE_PUBLIC` |
@@ -365,7 +365,7 @@ For partial re-deployments (e.g., after migration or upkeep contract failure):
 | `DeployVaultUpkeep.s.sol` | `multyr-core/script/DeployVaultUpkeep.s.sol` | Redeploy VaultUpkeep + wire to BufferManager |
 | `DeployBufferManager.s.sol` | `multyr-core/script/DeployBufferManager.s.sol` | Redeploy BufferManager + migrate warm adapters |
 | `DeployStrategyRouter.s.sol` | `multyr-core/script/DeployStrategyRouter.s.sol` | Redeploy StrategyRouter + re-register strategies |
-| `DeployQueueModule.s.sol` | `multyr-core/script/DeployQueueModule.s.sol` | Redeploy QueueModule + update module routing |
+| `DeployQueueModule.s.sol` | `multyr-core/script/DeployQueueModule.s.sol` | Redeploy EpochedQueueModule + update module routing |
 | `DeployWarmAdapters.s.sol` | `multyr-core/script/DeployWarmAdapters.s.sol` | Redeploy Aave + Morpho warm adapters |
 
 > **Note**: All standalone scripts require `VAULT_ADDRESS` and `TIMELOCK_ADDRESS` env vars.
@@ -440,6 +440,35 @@ After `DeployCoreSystem.s.sol` completes (`multyr-core/script/DeployCoreSystem.s
 | `feeCollector.governor()` | ROOT_TIMELOCK (immutable) |
 
 ---
+
+## Manual Post-Deploy Parameters
+
+Three settings are NOT written by any deploy script. The system deploys and
+seals without them, so nothing fails loudly at deploy time; each one is either a
+risk control that silently sits wide open, or a hard dependency for queue
+settlement. Set all three before the vault takes real deposits.
+
+| Parameter | Where | Script default | Why it matters |
+|---|---|---|---|
+| Vault deposit cap | `GlobalConfig.setVaultDepositLimits(vault, cap, userCap, minDeposit)`, read via `IParamsProvider.getDepositLimits` | **10,000,000e6 (10M USDC)** from `defaultVaultDepositCap` | No script narrows it. A vault intended to launch at 20,000 USDC will accept 10M until governance says otherwise. |
+| Asset oracle | `GlobalConfig` oracle config for the vault's asset, read via `oracleConfigFor(asset, vault)` | **unset** | `StrategyRouter.executeRedeemBatch` values the asset through `OracleValuationLib` and reverts `OracleNotConfigured` without it — for 6-decimal USDC as much as an 18-decimal asset. `fundEpoch` swallows that revert, so with no oracle the strategy-redeem leg of the funding waterfall silently does nothing and epochs stay `Closed`. The quote must also be fresher than the configured staleness window at the moment `fundEpoch` runs, which for a multi-day epoch means the keeper has to refresh it near funding time, not at close. |
+| `queueStressThreshold` | `GlobalConfig` dynamic-cap config, read via `IParamsProvider.getDynamicCapParams` | **100 claims** | Drives `WithdrawalCapLib.calculateDynamicCapBps`: once `outstandingClaimCount` reaches it, the instant-exit cap collapses to `minBps` for everyone. At the default, and with `minClaimAmount` at its own 100 USDC default, pinning the cap at its floor costs roughly 100 x 100 = 10,000 USDC of refundable capital. On a 20,000 USDC vault that is half the deposit cap; on a 10M vault it is negligible. Tune it against the real cap. |
+
+Also worth setting deliberately rather than accepting the default:
+
+- **Warm adapter allowance cap** — `CoreVault.approveWarmAdapters(adapters, cap)` takes an explicit ceiling instead of granting an unlimited allowance. `DeployCoreSystem` passes `WARM_ADAPTER_ALLOWANCE_CAP`, defaulting to 1,000,000e6. The allowance depletes as adapters pull and does not renew, so an undersized cap eventually stalls warm deploys, and an oversized one weakens the bound. Size it against the deposit cap and expected warm cycling.
+
+### Verification
+
+```bash
+cast call $GLOBAL_CONFIG "getDepositLimits(address)" $VAULT --rpc-url $RPC
+cast call $GLOBAL_CONFIG "oracleConfigFor(address,address)" $ASSET $VAULT --rpc-url $RPC
+cast call $GLOBAL_CONFIG "getDynamicCapParams(address)" $VAULT --rpc-url $RPC
+cast call $ASSET "allowance(address,address)" $VAULT $WARM_ADAPTER --rpc-url $RPC
+```
+
+A zero oracle address in the second call means queue settlement cannot pull from
+strategies. Watch `EpochFundingShortfall` for the runtime symptom.
 
 ## Next Steps (Modular Path B)
 

@@ -291,6 +291,17 @@ contract BufferManager is IBufferManager, ReentrancyGuard {
         return (nav * _cfg.targetHotBps) / 1e4;
     }
 
+    /// @dev Assets the vault has already promised to FUNDED-but-unclaimed epoch
+    ///      claimants. Read through the vault's selector routing rather than a
+    ///      typed interface so a core deployed without the epoch queue wired
+    ///      (or an older core) degrades to "nothing reserved" instead of
+    ///      bricking every buffer operation.
+    function _reservedForClaims() internal view returns (uint256 reserved) {
+        (bool ok, bytes memory data) =
+            core.staticcall(abi.encodeWithSignature("reservedForClaims()"));
+        if (ok && data.length == 32) reserved = abi.decode(data, (uint256));
+    }
+
     function plan() public view override returns (uint256 needRefill, uint256 needDeploy) {
         BufferConfig memory cfg = _cfg; // Cache storage to save ~2 SLOADs
 
@@ -298,6 +309,14 @@ contract BufferManager is IBufferManager, ReentrancyGuard {
         // This avoids redundant warmBalance() call when we need warm for maxWarmBps cap
         (uint256 nav, uint256 hot, uint256 warm) = ICoreVault(core).totalAssetsBreakdown();
         if (nav == 0) return (0, 0);
+
+        // The buffer manages FREE liquidity only. Cash earmarked for
+        // FUNDED-but-unclaimed epoch claims is not the buffer's to move: the
+        // warm adapters pull it straight out of the vault under the standing
+        // allowance from CoreVault.approveWarmAdapters(), which is a transfer
+        // path no module-level reservation check can see. Netting it out here
+        // shrinks needDeploy and grows needRefill, both in the safe direction.
+        hot = hot > _reservedForClaims() ? hot - _reservedForClaims() : 0;
 
         uint256 targetHotAmt = (nav * cfg.targetHotBps) / 1e4;
         uint256 minHot = (nav * cfg.minHotBps) / 1e4;

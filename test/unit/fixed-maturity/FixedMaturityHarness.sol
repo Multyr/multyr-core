@@ -8,7 +8,6 @@ import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.s
 import { CoreHarness } from "../../helpers/CoreHarness.sol";
 import { CoreStorage } from "../../../src/core/storage/CoreStorage.sol";
 import { FixedMaturityStorage, VaultMode, VaultState } from "../../../src/core/storage/FixedMaturityStorage.sol";
-import { QueueStorage } from "../../../src/core/storage/QueueStorage.sol";
 import { FixedMaturityModule } from "../../../src/core/modules/FixedMaturityModule.sol";
 import { LiquidityOpsModule } from "../../../src/core/modules/LiquidityOpsModule.sol";
 
@@ -116,10 +115,6 @@ contract FixedMaturityHarness is CoreHarness {
         fm.fixedTermCommittedAssets = committed_;
         fm.retainedHotBuffer        = hotBuffer_;
         fm.startingTs               = uint64(block.timestamp);
-    }
-
-    function setPendingSharesUnsafe(uint256 pendingShares_) external {
-        QueueStorage.layout().pendingShares = pendingShares_;
     }
 
     // ── Storage getters (for test assertions) ────────────────────────────────

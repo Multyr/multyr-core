@@ -9,7 +9,7 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { ERC20Mock } from "../../src/mocks/ERC20Mock.sol";
 import { MockParamsProvider } from "../helpers/MockParamsProvider.sol";
-import { QueueModule } from "../../src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "../../src/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "../../src/core/modules/AdminModule.sol";
 import { IQueueModule } from "../../src/interfaces/IQueueModule.sol";
 
@@ -27,7 +27,7 @@ contract CoreVault_Adversarial_Invariants is StdInvariant, Test {
     MockParamsProvider public params;
     ERC20Mock public usdc;
     AdversarialHandler public handler;
-    QueueModule public queueModule;
+    EpochedQueueModule public queueModule;
     AdminModule public adminModule;
 
     address public owner = address(0xA11CE);
@@ -44,7 +44,7 @@ contract CoreVault_Adversarial_Invariants is StdInvariant, Test {
         feeCollector = new FeeCollector(owner, treasury, opsSafe, safetyReserve, 7000, 200, 3000);
 
         // Deploy modules
-        queueModule = new QueueModule();
+        queueModule = new EpochedQueueModule();
         adminModule = new AdminModule();
 
         // Deploy vault with 6-param constructor
@@ -79,23 +79,26 @@ contract CoreVault_Adversarial_Invariants is StdInvariant, Test {
     }
 
     function _wireModules() internal {
-        // QueueModule selectors (PUBLIC)
+        // EpochedQueueModule selectors (PUBLIC)
         vault.setModule(
-            QueueModule.requestClaim.selector, address(queueModule), vault.ROLE_PUBLIC()
+            EpochedQueueModule.requestEpochWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
-        vault.setModule(QueueModule.cancelClaim.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.cancelEpochWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.closeCurrentEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.fundEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.claimEpochAssets.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.batchClaimEpochAssets.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.requestInstantWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(
-            QueueModule.processQueuedRedemptions.selector, address(queueModule), vault.ROLE_PUBLIC()
+            EpochedQueueModule.endEpochCrystallize.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
+        vault.setModule(EpochedQueueModule.currentEpochId.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(
-            QueueModule.settleFeesAndProcessQueue.selector,
-            address(queueModule),
-            vault.ROLE_PUBLIC()
+            EpochedQueueModule.totalEscrowedShares.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
-        vault.setModule(
-            QueueModule.pendingShares.selector, address(queueModule), vault.ROLE_PUBLIC()
-        );
-        vault.setModule(QueueModule.queueLength.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.outstandingClaimCount.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.canCloseCurrentEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.currentEpochClaimCount.selector, address(queueModule), vault.ROLE_PUBLIC());
 
         // AdminModule selectors (OWNER)
         vault.setModule(
@@ -110,14 +113,14 @@ contract CoreVault_Adversarial_Invariants is StdInvariant, Test {
     }
 
     /**
-     * @notice CRITICAL INVARIANT: Escrowed shares MUST equal pendingShares
+     * @notice CRITICAL INVARIANT: Escrowed shares MUST equal totalEscrowedShares
      * @dev This was the bug found in the original test
      */
     function invariant_escrowedShares_equalsPendingShares() public view {
         uint256 vaultShares = vault.balanceOf(address(vault));
-        uint256 pending = IQueueModule(address(vault)).pendingShares();
+        uint256 pending = IQueueModule(address(vault)).totalEscrowedShares();
 
-        assertEq(vaultShares, pending, "ESCROW: Vault shares must equal pendingShares");
+        assertEq(vaultShares, pending, "ESCROW: Vault shares must equal totalEscrowedShares");
     }
 
     /**
@@ -181,10 +184,10 @@ contract CoreVault_Adversarial_Invariants is StdInvariant, Test {
      * @dev This would indicate a double-counting bug
      */
     function invariant_pendingShares_bounded() public view {
-        uint256 pending = IQueueModule(address(vault)).pendingShares();
+        uint256 pending = IQueueModule(address(vault)).totalEscrowedShares();
         uint256 supply = vault.totalSupply();
 
-        assertLe(pending, supply, "PENDING: pendingShares cannot exceed totalSupply");
+        assertLe(pending, supply, "PENDING: totalEscrowedShares cannot exceed totalSupply");
     }
 
     function invariant_callSummary() public view {
@@ -257,7 +260,7 @@ contract AdversarialHandler is Test {
         uint256 grossAssets = vault.convertToAssets(withdrawShares);
         uint256 balBefore = usdc.balanceOf(actor);
 
-        try IQueueModule(address(vault)).requestClaim(true, withdrawShares) {
+        try IQueueModule(address(vault)).requestInstantWithdrawal(withdrawShares) {
             uint256 balAfter = usdc.balanceOf(actor);
             // Only track if immediate settlement happened (user received assets)
             // If claim went to queue (insufficient liquidity/cap), track nothing here -
@@ -288,16 +291,24 @@ contract AdversarialHandler is Test {
         usdc._mint(address(vault), yieldAmount);
         ghost_totalYield += yieldAmount;
 
-        // Crystallize and process queue
-        // Track assets leaving vault during queue processing
-        uint256 vaultBalBefore = usdc.balanceOf(address(vault));
-        vm.warp(block.timestamp + 2 hours);
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(1);
-        uint256 vaultBalAfter = usdc.balanceOf(address(vault));
+        // Crystallize fees, and close/fund the current epoch if eligible so the
+        // epoch-close + fundEpoch() liquidity-pull code path gets exercised too.
+        // Unlike QueueModule.settleFeesAndProcessQueue, fundEpoch() only pulls
+        // liquidity into hot -- it doesn't pay users (that's the pull-based
+        // claimEpochAssets(), out of scope for this handler) -- so it never
+        // reduces vault balance, and there's nothing to add to
+        // ghost_totalWithdrawn here.
+        vm.warp(block.timestamp + 7 days + 1);
+        try IQueueModule(address(vault)).endEpochCrystallize() { } catch { }
 
-        // If vault balance decreased, assets were withdrawn from queue
-        if (vaultBalBefore > vaultBalAfter) {
-            ghost_totalWithdrawn += (vaultBalBefore - vaultBalAfter);
+        if (
+            IQueueModule(address(vault)).canCloseCurrentEpoch()
+                && IQueueModule(address(vault)).currentEpochClaimCount() > 0
+        ) {
+            uint256 epochId = IQueueModule(address(vault)).currentEpochId();
+            try IQueueModule(address(vault)).closeCurrentEpoch() {
+                try IQueueModule(address(vault)).fundEpoch(epochId) { } catch { }
+            } catch { }
         }
 
         calls_yield++;

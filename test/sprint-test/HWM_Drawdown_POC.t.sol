@@ -54,7 +54,7 @@ import { CoreHarness } from "../helpers/CoreHarness.sol";
 import { MockUSDC } from "../helpers/MockUSDC.sol";
 import { MockParamsProvider } from "../helpers/MockParamsProvider.sol";
 import { ERC4626Module } from "../../src/core/modules/ERC4626Module.sol";
-import { QueueModule } from "../../src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "../../src/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "../../src/core/modules/AdminModule.sol";
 
 contract HWM_Drawdown_POC is Test {
@@ -121,7 +121,7 @@ contract HWM_Drawdown_POC is Test {
     }
 
     function _crystallize() internal {
-        QueueModule(address(core)).endEpochCrystallize();
+        EpochedQueueModule(address(core)).endEpochCrystallize();
     }
 
     // =========================================================================
@@ -278,7 +278,7 @@ contract HWM_Drawdown_POC is Test {
         // Griever attempts HWM reset via the ROLE_PUBLIC endEpochCrystallize()
         address griever = makeAddr("griever");
         vm.prank(griever);
-        QueueModule(address(core)).endEpochCrystallize(); // FIX: HWM stays at 10.0
+        EpochedQueueModule(address(core)).endEpochCrystallize(); // FIX: HWM stays at 10.0
 
         // Enable 20 % perf fee for the recovery phase
         core.setPerfParamsUnsafe(PERF_RATE_20PCT, 0);
@@ -348,7 +348,7 @@ contract HWM_Drawdown_POC is Test {
         for (uint256 i = 0; i < 3; i++) {
             vm.warp(block.timestamp + 1 hours);
             vm.prank(griever);
-            QueueModule(address(core)).endEpochCrystallize();
+            EpochedQueueModule(address(core)).endEpochCrystallize();
         }
 
         (,, uint256 hwmAfterDust, uint256 lastCrystAfterDustCalls) =
@@ -419,7 +419,7 @@ contract HWM_Drawdown_POC is Test {
         for (uint256 i = 0; i < 5; i++) {
             vm.warp(block.timestamp + 1 hours);
             vm.prank(griever);
-            QueueModule(address(core)).endEpochCrystallize();
+            EpochedQueueModule(address(core)).endEpochCrystallize();
         }
 
         (,, uint256 hwmAfterGrief, uint256 lastCrystAfterGrief) =

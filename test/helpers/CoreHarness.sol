@@ -6,14 +6,12 @@ import { Vm } from "forge-std/Vm.sol";
 import { CoreVault } from "../../src/core/CoreVault.sol";
 import { CoreStorage } from "../../src/core/storage/CoreStorage.sol";
 import { FeeStorage } from "../../src/core/storage/FeeStorage.sol";
-import { QueueStorage } from "../../src/core/storage/QueueStorage.sol";
 import { IIncentives } from "../../src/interfaces/IIncentives.sol";
 import { IIncentivesEngine } from "../../src/interfaces/IIncentivesEngine.sol";
 import { IBufferManager } from "../../src/interfaces/IBufferManager.sol";
 import { IStrategyRouter } from "../../src/interfaces/IStrategyRouter.sol";
 import { IParamsProvider } from "../../src/interfaces/IParamsProvider.sol";
 import { StrategyRouter } from "../../src/core/modules/StrategyRouter.sol";
-import { QueueModule } from "../../src/core/modules/QueueModule.sol";
 import { EpochedQueueModule } from "../../src/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "../../src/core/modules/AdminModule.sol";
 import { ERC4626Module } from "../../src/core/modules/ERC4626Module.sol";
@@ -32,8 +30,7 @@ contract CoreHarness is CoreVault {
     uint16 private _opsFloorBps = 100; // 1%
 
     // Track deployed modules for selector registration
-    QueueModule public queueModule;
-    EpochedQueueModule public queueEpochModule;
+    EpochedQueueModule public queueModule;
     AdminModule public adminModule;
     ERC4626Module public erc4626Module;
     LiquidityOpsModule public liquidityOpsModule;
@@ -56,44 +53,33 @@ contract CoreHarness is CoreVault {
         )
     {
         // Deploy modules
-        queueModule = new QueueModule();
-        queueEpochModule = new EpochedQueueModule();
+        queueModule = new EpochedQueueModule();
         adminModule = new AdminModule();
         erc4626Module = new ERC4626Module();
         liquidityOpsModule = new LiquidityOpsModule();
 
-        // Wire up queue module selectors (PUBLIC)
-        _setModuleUnsafe(QueueModule.requestClaim.selector, address(queueModule), ROLE_PUBLIC);
-        _setModuleUnsafe(QueueModule.cancelClaim.selector, address(queueModule), ROLE_PUBLIC);
-        _setModuleUnsafe(
-            QueueModule.processQueuedRedemptions.selector, address(queueModule), ROLE_PUBLIC
-        );
-        _setModuleUnsafe(
-            QueueModule.settleFeesAndProcessQueue.selector, address(queueModule), ROLE_PUBLIC
-        );
-        _setModuleUnsafe(
-            QueueModule.endEpochCrystallize.selector, address(queueModule), ROLE_PUBLIC
-        );
-        _setModuleUnsafe(QueueModule.pendingShares.selector, address(queueModule), ROLE_PUBLIC);
-        _setModuleUnsafe(QueueModule.queueLength.selector, address(queueModule), ROLE_PUBLIC);
-        _setModuleUnsafe(QueueModule.nextClaimId.selector, address(queueModule), ROLE_PUBLIC);
-        _setModuleUnsafe(QueueModule.compactQueue.selector, address(queueModule), ROLE_PUBLIC);
-
-        // Wire up epoch-bucket queue module (EpochedQueueModule) selectors (PUBLIC)
-        _setModuleUnsafe(EpochedQueueModule.requestEpochWithdrawal.selector, address(queueEpochModule), ROLE_PUBLIC);
-        _setModuleUnsafe(EpochedQueueModule.cancelEpochWithdrawal.selector, address(queueEpochModule), ROLE_PUBLIC);
-        _setModuleUnsafe(EpochedQueueModule.closeCurrentEpoch.selector, address(queueEpochModule), ROLE_PUBLIC);
-        _setModuleUnsafe(EpochedQueueModule.fundEpoch.selector, address(queueEpochModule), ROLE_PUBLIC);
-        _setModuleUnsafe(EpochedQueueModule.claimEpochAssets.selector, address(queueEpochModule), ROLE_PUBLIC);
-        _setModuleUnsafe(EpochedQueueModule.batchClaimEpochAssets.selector, address(queueEpochModule), ROLE_PUBLIC);
-        _setModuleUnsafe(EpochedQueueModule.requestInstantWithdrawal.selector, address(queueEpochModule), ROLE_PUBLIC);
-        _setModuleUnsafe(EpochedQueueModule.currentEpochId.selector, address(queueEpochModule), ROLE_PUBLIC);
-        _setModuleUnsafe(EpochedQueueModule.epochData.selector, address(queueEpochModule), ROLE_PUBLIC);
-        _setModuleUnsafe(EpochedQueueModule.epochClaim.selector, address(queueEpochModule), ROLE_PUBLIC);
-        _setModuleUnsafe(EpochedQueueModule.nextClaimIdForEpoch.selector, address(queueEpochModule), ROLE_PUBLIC);
-        _setModuleUnsafe(EpochedQueueModule.totalEscrowedShares.selector, address(queueEpochModule), ROLE_PUBLIC);
-        _setModuleUnsafe(EpochedQueueModule.epochDeficit.selector, address(queueEpochModule), ROLE_PUBLIC);
-        _setModuleUnsafe(EpochedQueueModule.canCloseCurrentEpoch.selector, address(queueEpochModule), ROLE_PUBLIC);
+        // Wire up queue module (EpochedQueueModule) selectors (PUBLIC)
+        _setModuleUnsafe(EpochedQueueModule.requestEpochWithdrawal.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.cancelEpochWithdrawal.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.closeCurrentEpoch.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.fundEpoch.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.claimEpochAssets.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.batchClaimEpochAssets.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.requestInstantWithdrawal.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.endEpochCrystallize.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.syncOldestUnfundedEpoch.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.currentEpochId.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.currentEpochClaimCount.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.epochData.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.epochClaim.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.nextClaimIdForEpoch.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.totalEscrowedShares.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.outstandingClaimCount.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.oldestUnfundedEpochId.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.epochDeficit.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.canCloseCurrentEpoch.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.reservedForClaims.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.closedPendingAssets.selector, address(queueModule), ROLE_PUBLIC);
 
         // Wire up admin module owner selectors (OWNER)
         _setModuleUnsafe(AdminModule.submitFeeParams.selector, address(adminModule), ROLE_OWNER);
@@ -389,16 +375,6 @@ contract CoreHarness is CoreVault {
         return 1;
     }
 
-    // ---- Queue view helpers ----
-    function queueLength() external view returns (uint256) {
-        QueueStorage.Layout storage q = QueueStorage.layout();
-        return q.queue.length > q.head ? q.queue.length - q.head : 0;
-    }
-
-    function pendingShares() external view returns (uint256) {
-        return QueueStorage.layout().pendingShares;
-    }
-
     // ---- Legacy compatibility (for old tests expecting these) ----
     function pause() external onlyOwner {
         CoreStorage.layout().packedFlags |= CoreStorage.FLAG_PAUSED;
@@ -429,6 +405,7 @@ contract CoreHarness is CoreVault {
         CoreStorage.layout().incentivesEngine = IIncentivesEngine(engine);
     }
 
-    // Note: Queue module functions (requestClaim, cancelClaim, processQueuedRedemptions,
-    // settleFeesAndProcessQueue) are available via fallback routing to QueueModule
+    // Note: Queue module functions (requestEpochWithdrawal, cancelEpochWithdrawal,
+    // closeCurrentEpoch, fundEpoch, claimEpochAssets, requestInstantWithdrawal) are
+    // available via fallback routing to EpochedQueueModule
 }

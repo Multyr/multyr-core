@@ -4,15 +4,18 @@ pragma solidity ^0.8.28;
 import { Script } from "forge-std/Script.sol";
 import { console } from "forge-std/console.sol";
 
-import { QueueModule } from "@multyr-core/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "@multyr-core/core/modules/EpochedQueueModule.sol";
 import { SelectorLib } from "@multyr-core/core/libraries/SelectorLib.sol";
 import { CoreVault } from "@multyr-core/core/CoreVault.sol";
 
-/// @title DeployQueueModule -- QueueModule standalone redeploy (incident response)
-/// @notice Deploys a new QueueModule delegatecall target and re-wires it to an existing CoreVault.
-///         Replaces RedeployQueueModule legacy script. Idempotent: safe to redeploy and re-wire.
-///         Designed for incident response when QueueModule must be upgraded without full redeploy.
-/// @dev QueueModule is stateless -- no constructor arguments, no storage.
+/// @title DeployQueueModule -- EpochedQueueModule standalone redeploy (incident response)
+/// @notice Deploys a new EpochedQueueModule delegatecall target and re-wires it to an
+///         existing CoreVault. Idempotent: safe to redeploy and re-wire.
+///         Designed for incident response when the queue module must be upgraded
+///         without a full redeploy.
+/// @dev EpochedQueueModule is stateless -- no constructor arguments, no own storage
+///      (EIP-7201 namespaced storage lives at a fixed slot, independent of which
+///      module instance is wired to it).
 ///      Re-wiring requires vault owner (pre-seal) or timelock (post-seal routing freeze lifted).
 ///      CRITICAL: Do NOT re-wire after routing is frozen unless a timelock tx is submitted first.
 /// @custom:chain-id 42161 (Arbitrum One -- enforced at runtime)
@@ -22,12 +25,12 @@ import { CoreVault } from "@multyr-core/core/CoreVault.sol";
 /// @custom:post-deploy If REWIRE=false:
 ///                     1) Check isRoutingFrozen() on vault before proceeding
 ///                     2) vault.setModulesBatch(queueModuleSelectors, newQueueModule, ROLE_PUBLIC)
-///                     3) Verify routing: vault.moduleOf(requestClaim.selector) == newModule
+///                     3) Verify routing: vault.moduleOf(requestEpochWithdrawal.selector) == newModule
 contract DeployQueueModule is Script {
 
     uint256 constant ARBITRUM_ONE_CHAIN_ID = 42161;
 
-    function run() external returns (QueueModule queueModule) {
+    function run() external returns (EpochedQueueModule queueModule) {
         require(
             block.chainid == ARBITRUM_ONE_CHAIN_ID,
             "WRONG_CHAIN: DeployQueueModule is Arbitrum-only (chainId 42161)"
@@ -53,9 +56,9 @@ contract DeployQueueModule is Script {
 
         vm.startBroadcast(deployerPk);
 
-        // QueueModule has no constructor -- purely stateless delegatecall target
-        queueModule = new QueueModule();
-        console.log("QueueModule deployed:", address(queueModule));
+        // EpochedQueueModule has no constructor -- purely stateless delegatecall target
+        queueModule = new EpochedQueueModule();
+        console.log("EpochedQueueModule deployed:", address(queueModule));
 
         if (rewire) {
             CoreVault vault = CoreVault(coreVault);
@@ -95,7 +98,7 @@ contract DeployQueueModule is Script {
             console.log("  3. vault.setModulesBatch(queueViewSelectors,",  address(queueModule), ", ROLE_PUBLIC)");
         } else {
             console.log("Rewire complete. Verify:");
-            console.log("  vault.moduleOf(requestClaim.selector) ==", address(queueModule));
+            console.log("  vault.moduleOf(requestEpochWithdrawal.selector) ==", address(queueModule));
         }
     }
 }

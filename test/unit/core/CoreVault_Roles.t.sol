@@ -6,7 +6,7 @@ import { CoreVault } from "../../../src/core/CoreVault.sol";
 import { MockUSDC } from "../../helpers/MockUSDC.sol";
 import { MockParamsProvider } from "../../helpers/MockParamsProvider.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import { QueueModule } from "src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "src/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "src/core/modules/AdminModule.sol";
 import { IQueueModule } from "src/interfaces/IQueueModule.sol";
 import { IAdminModule } from "src/interfaces/IAdminModule.sol";
@@ -21,7 +21,7 @@ import { ModuleSetter } from "test/helpers/ModuleSetter.sol";
 contract CoreVaultRolesTest is Test {
     CoreVault public vault;
     MockUSDC public usdc;
-    QueueModule public queueModule;
+    EpochedQueueModule public queueModule;
     AdminModule public adminModule;
 
     address public owner = address(0xA11CE);
@@ -43,7 +43,7 @@ contract CoreVaultRolesTest is Test {
         );
 
         // Deploy and configure modules
-        queueModule = new QueueModule();
+        queueModule = new EpochedQueueModule();
         adminModule = new AdminModule();
 
         vm.startPrank(owner);

@@ -53,9 +53,40 @@ contract FeeCollector is ReentrancyGuard, Pausable {
     bool public allowlistEnabled;
 
     /// @notice Tracks shares queued during AUTO_HARVEST fallback (epoch cap exhausted)
-    /// @dev When requestClaim(true) falls back to queue, shares leave FeeCollector balance
-    ///      but underlying is not yet delivered. Call harvestQueued() after settlement.
+    /// @dev When requestInstantWithdrawal falls back to the epoch queue, shares leave
+    ///      FeeCollector balance but underlying is not yet delivered. Call harvestQueued()
+    ///      after settlement.
     mapping(address => uint256) public pendingHarvestShares; // shareToken => shares queued
+
+    /// @notice One queued epoch claim awaiting settlement.
+    struct PendingHarvestClaim {
+        uint128 epochId;
+        uint128 claimId;
+    }
+
+    /// @dev A LIST, not a single slot. Single-slot bookkeeping forced
+    ///      distribute() to revert on a second queued harvest for the same
+    ///      token, so one epoch that never funded blocked that token's fee
+    ///      distribution outright until governance changed its share mode.
+    ///      Accumulating without a list would be worse: the second claim would
+    ///      overwrite the first one's coordinates and strand its shares in vault
+    ///      escrow permanently.
+    mapping(address => PendingHarvestClaim[]) private _pendingHarvestClaims;
+
+    /// @dev Storage backstop, not a functional limit: reaching it defers a
+    ///      harvest, it does not revert one.
+    ///
+    ///      An entry is appended only when an instant harvest cannot settle AND
+    ///      the epoch it falls into never funds before the next distribute().
+    ///      One entry therefore costs one full epoch (a day or more) of
+    ///      simultaneous cap exhaustion and funding failure, and any single
+    ///      successful harvestQueued() drains every ready entry at once. Sixty
+    ///      four is roughly two months of that at a daily cadence, which is far
+    ///      beyond the point at which the funding failure itself -- visible via
+    ///      EpochFundingShortfall -- would have been dealt with. It exists so an
+    ///      indefinitely stalled queue cannot grow the array without bound, not
+    ///      because the workload is expected to approach it.
+    uint256 public constant MAX_PENDING_HARVEST_CLAIMS = 64;
 
     // Events
     event Distributed(
@@ -83,6 +114,15 @@ contract FeeCollector is ReentrancyGuard, Pausable {
         address indexed shareToken, address indexed underlying, uint256 sharesIn, uint256 assetsOut
     );
     event HarvestQueued(address indexed token, uint256 shares);
+    /// @notice An instant harvest settled but rounded down to zero underlying:
+    ///         the shares are gone and there is nothing to queue or distribute.
+    event HarvestDustBurned(address indexed token, uint256 shares);
+    /// @notice A queued claim could not be pulled yet (its epoch is not funded).
+    event HarvestClaimNotReady(address indexed token, uint256 epochId, uint256 claimId);
+    /// @notice The harvest could not proceed this round and the shares were left
+    ///         in place to be retried. Never a revert: fee distribution must not
+    ///         be blockable by the state of the queue.
+    event HarvestDeferred(address indexed token, uint256 shares, string reason);
     event HarvestSettled(
         address indexed token, address indexed underlying, uint256 sharesRedeemed, uint256 underlyingOut
     );
@@ -207,23 +247,77 @@ contract FeeCollector is ReentrancyGuard, Pausable {
             if (sc.mode == ShareMode.AUTO_HARVEST) {
                 require(sc.underlying != address(0), "FeeCollector: no underlying");
 
+                // Queue full: defer rather than revert. Checked BEFORE calling
+                // the vault, deliberately -- deferring afterwards would mean the
+                // claim already exists in vault escrow with nowhere to record
+                // its coordinates, which is the untracked-escrow failure the
+                // single-slot bookkeeping was originally guarding against. The
+                // cost of checking first is that a harvest which would have
+                // settled inline is also deferred; the shares simply stay here
+                // and are picked up by the next distribute() once harvestQueued
+                // has drained the list.
+                if (_pendingHarvestClaims[token].length >= MAX_PENDING_HARVEST_CLAIMS) {
+                    emit HarvestDeferred(token, bal, "pending harvest queue full");
+                    return;
+                }
+
+
                 // Snapshot underlying balance before the call
                 uint256 underBefore = IERC20(sc.underlying).balanceOf(address(this));
 
-                // requestClaim(true) settles inline if cap+liquidity OK;
-                // falls back to queue (no revert) when epoch cap is exhausted.
-                IQueueModule(token).requestClaim(true, bal);
+                // requestInstantWithdrawal settles inline if cap+liquidity OK;
+                // falls back to the epoch queue (no revert) when the cap is
+                // exhausted. FeeCollector is exempt from the queue's
+                // minClaimAmount floor precisely so this contract holds: small
+                // fee accruals queue instead of reverting the distribution.
+                // try/catch, not a bare call: the vault can legitimately refuse
+                // this exit -- the queue's minClaimAmount floor rejects fee
+                // accruals below it, and withdrawals can be paused -- and a fee
+                // distribution must never be the thing that breaks. The floor
+                // applies to every caller with no address carve-out, so the
+                // handling belongs here, on the side that cannot tolerate the
+                // revert, rather than as an exemption inside the check itself.
+                bool settledImmediately;
+                uint256 epochId;
+                uint256 claimId;
+                try IQueueModule(token).requestInstantWithdrawal(bal) returns (
+                    bool settled_, uint256 epochId_, uint256 claimId_
+                ) {
+                    settledImmediately = settled_;
+                    epochId = epochId_;
+                    claimId = claimId_;
+                } catch {
+                    // Shares stay here and accumulate; the next distribute()
+                    // retries with a larger balance.
+                    emit HarvestDeferred(token, bal, "vault refused the exit");
+                    return;
+                }
 
                 uint256 out = IERC20(sc.underlying).balanceOf(address(this)) - underBefore;
 
-                if (out > 0) {
-                    // HAPPY PATH: instant settlement delivered underlying in this tx
-                    emit Harvested(token, sc.underlying, bal, out);
-                    _distributeUnderlying(sc.underlying, out);
+                if (settledImmediately) {
+                    // Branch on the flag alone. Branching on `out > 0` as well
+                    // sent a dust-rounded instant settlement down the fallback
+                    // path, where it recorded the (0, 0) sentinel this function
+                    // returns for inline settlements as if it were a real claim
+                    // handle -- harvestQueued would then call
+                    // claimEpochAssets(0, 0), revert NotClaimOwner forever, and
+                    // leave pendingHarvestShares permanently non-zero.
+                    if (out > 0) {
+                        emit Harvested(token, sc.underlying, bal, out);
+                        _distributeUnderlying(sc.underlying, out);
+                    } else {
+                        // Shares were burned, the payout rounded to zero. There
+                        // is nothing to queue and nothing to distribute.
+                        emit HarvestDustBurned(token, bal);
+                    }
                 } else {
-                    // FALLBACK: shares moved to vault queue escrow; underlying not yet delivered.
-                    // Call harvestQueued(token) after vault processes the queue.
+                    // FALLBACK: shares moved to vault epoch escrow; underlying not yet delivered.
+                    // Call harvestQueued(token) once the epoch is FUNDED to pull the claim.
                     pendingHarvestShares[token] += bal;
+                    _pendingHarvestClaims[token].push(
+                        PendingHarvestClaim({ epochId: uint128(epochId), claimId: uint128(claimId) })
+                    );
                     emit HarvestQueued(token, bal);
                 }
                 return;
@@ -251,9 +345,12 @@ contract FeeCollector is ReentrancyGuard, Pausable {
         emit Distributed(token, bal, toTreasury, toOps, toSafetyReserve);
     }
 
-    /// @notice Process underlying delivered by a previously-queued AUTO_HARVEST fallback claim.
-    /// @dev Call after someone has settled the pending queue entry via processQueuedRedemptions().
-    ///      Anyone can call — idempotent if underlying balance is 0.
+    /// @notice Pull underlying for a previously-queued AUTO_HARVEST fallback claim.
+    /// @notice Pull underlying for every queued AUTO_HARVEST claim that is ready.
+    /// @dev Iterates the token's pending claims and settles the ones whose epoch
+    ///      has been funded, leaving the rest queued. One epoch that never funds
+    ///      therefore delays only its own claim instead of blocking the token.
+    ///      Anyone can call; reverts only if nothing at all could be settled.
     function harvestQueued(address token) external nonReentrant whenNotPaused {
         ShareConfig memory sc = shareConfigs[token];
         require(sc.isSet && sc.mode == ShareMode.AUTO_HARVEST, "FeeCollector: not AUTO_HARVEST");
@@ -262,16 +359,51 @@ contract FeeCollector is ReentrancyGuard, Pausable {
         uint256 pending = pendingHarvestShares[token];
         require(pending > 0, "FeeCollector: no pending harvest");
 
-        // Shares should be 0 (settled by vault — escrowed shares are gone)
-        require(IERC20(token).balanceOf(address(this)) == 0, "FeeCollector: shares still escrowed");
+        uint256 underBefore = IERC20(sc.underlying).balanceOf(address(this));
 
-        uint256 underBal = IERC20(sc.underlying).balanceOf(address(this));
+        PendingHarvestClaim[] storage claims = _pendingHarvestClaims[token];
+        uint256 settled;
+        uint256 i;
+        while (i < claims.length) {
+            PendingHarvestClaim memory c = claims[i];
+            try IQueueModule(token).claimEpochAssets(c.epochId, c.claimId) {
+                // Swap-and-pop, so do not advance i: a new element now sits here.
+                claims[i] = claims[claims.length - 1];
+                claims.pop();
+                unchecked { ++settled; }
+            } catch {
+                emit HarvestClaimNotReady(token, c.epochId, c.claimId);
+                unchecked { ++i; }
+            }
+        }
+
+        uint256 underBal = IERC20(sc.underlying).balanceOf(address(this)) - underBefore;
+        require(settled > 0, "FeeCollector: no claim ready");
         require(underBal > 0, "FeeCollector: no underlying received");
 
-        pendingHarvestShares[token] = 0;
+        // Only clear the share tally once every claim has been drained; a
+        // partial settlement leaves the remainder queued and retryable.
+        if (claims.length == 0) {
+            pendingHarvestShares[token] = 0;
+        }
 
         emit HarvestSettled(token, sc.underlying, pending, underBal);
         _distributeUnderlying(sc.underlying, underBal);
+    }
+
+    /// @notice Number of queued epoch claims awaiting settlement for `token`.
+    function pendingHarvestClaimCount(address token) external view returns (uint256) {
+        return _pendingHarvestClaims[token].length;
+    }
+
+    /// @notice Coordinates of the queued claim at `index` for `token`.
+    function pendingHarvestClaimAt(address token, uint256 index)
+        external
+        view
+        returns (uint256 epochId, uint256 claimId)
+    {
+        PendingHarvestClaim memory c = _pendingHarvestClaims[token][index];
+        return (c.epochId, c.claimId);
     }
 
     function _distributeUnderlying(address underlying, uint256 amount) internal {

@@ -7,7 +7,7 @@ import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/I
 
 // Core
 import { CoreVault } from "@multyr-core/core/CoreVault.sol";
-import { QueueModule } from "@multyr-core/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "@multyr-core/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "@multyr-core/core/modules/AdminModule.sol";
 import { ERC4626Module } from "@multyr-core/core/modules/ERC4626Module.sol";
 import { LiquidityOpsModule } from "@multyr-core/core/modules/LiquidityOpsModule.sol";
@@ -60,7 +60,7 @@ contract DeployFixedMaturityVault is Script {
 
     struct FMDeploymentResult {
         CoreVault              vault;
-        QueueModule            queueModule;
+        EpochedQueueModule     queueModule;
         AdminModule            adminModule;
         ERC4626Module          erc4626Module;
         LiquidityOpsModule     liquidityOpsModule;
@@ -215,13 +215,13 @@ contract DeployFixedMaturityVault is Script {
         console.log("[2.1] CoreVault:", address(result.vault));
         require(result.vault.paused(), "GATE: vault must start PAUSED");
 
-        result.queueModule         = new QueueModule();
+        result.queueModule         = new EpochedQueueModule();
         result.adminModule         = new AdminModule();
         result.erc4626Module       = new ERC4626Module();
         result.liquidityOpsModule  = new LiquidityOpsModule();
         result.fixedMaturityModule = new FixedMaturityModule();
 
-        console.log("[2.2] QueueModule:", address(result.queueModule));
+        console.log("[2.2] EpochedQueueModule:", address(result.queueModule));
         console.log("[2.3] AdminModule:", address(result.adminModule));
         console.log("[2.4] ERC4626Module:", address(result.erc4626Module));
         console.log("[2.5] LiquidityOpsModule:", address(result.liquidityOpsModule));
@@ -559,7 +559,7 @@ contract DeployFixedMaturityVault is Script {
         console.log("================================================================");
         console.log("CoreVault:               ", address(r.vault));
         console.log("FixedMaturityModule:     ", address(r.fixedMaturityModule));
-        console.log("QueueModule:             ", address(r.queueModule));
+        console.log("EpochedQueueModule:      ", address(r.queueModule));
         console.log("AdminModule:             ", address(r.adminModule));
         console.log("ERC4626Module:           ", address(r.erc4626Module));
         console.log("LiquidityOpsModule:      ", address(r.liquidityOpsModule));

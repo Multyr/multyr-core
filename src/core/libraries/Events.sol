@@ -34,7 +34,12 @@ library Events {
     event RoutedToStrategy(address indexed strategy, uint256 amount, uint256 cashAfter);
     event Realized(uint256 amount);
     event ReserveTargetRestored(uint256 cashAfter);
-    event EpochRolled(uint256 newEpochStart);
+    /// @notice The WITHDRAWAL CAP epoch rolled over. Unrelated to the
+    ///         settlement queue's epochs -- those emit EpochOpened/EpochClosed/
+    ///         EpochFunded from EpochedQueueModule. Named explicitly because the
+    ///         previous name, EpochRolled, invited indexers to merge the two
+    ///         concepts on name alone.
+    event WithdrawalCapEpochRolled(uint256 newEpochStart);
 
     // --- Param timelock (audit hardening) ---
     event FeeParamsSubmitted(
@@ -194,7 +199,7 @@ library Events {
     event RouterRevoked();
 
     // --- Warm adapter approval events ---
-    event WarmAdapterApproved(address indexed adapter);
+    event WarmAdapterApproved(address indexed adapter, uint256 cap);
     event WarmAdapterRevoked(address indexed adapter);
 
     // --- Selector Registry & System Seal events ---

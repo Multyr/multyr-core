@@ -6,6 +6,7 @@ import { CoreStorage } from "src/core/storage/CoreStorage.sol";
 import { FeeStorage } from "src/core/storage/FeeStorage.sol";
 import { QueueStorage } from "src/core/storage/QueueStorage.sol";
 import { FixedMaturityStorage } from "src/core/storage/FixedMaturityStorage.sol";
+import { EpochQueueStorage } from "src/core/modules/EpochedQueueModule.sol";
 
 /// @title EIP-7201 Compliance Test
 /// @notice Verifies that all storage library SLOT constants are computed
@@ -37,12 +38,29 @@ contract EIP7201ComplianceTest is Test {
         assertEq(FixedMaturityStorage.SLOT, expected, "FixedMaturityStorage SLOT must match EIP-7201 formula");
     }
 
+    /// @notice PR #13 review fix: EpochQueueStorage.SLOT was hand-typed, not a
+    ///         real keccak output -- didn't match the very formula its own
+    ///         comment claimed, and this suite never caught it because
+    ///         EpochQueueStorage (colocated in EpochedQueueModule.sol, not
+    ///         under src/core/storage/) was never added here.
+    function test_EpochQueueStorage_SLOT_matches_EIP7201() public {
+        bytes32 expected = _eip7201Slot("multyr.storage.EpochQueue.v1");
+        assertEq(EpochQueueStorage.SLOT, expected, "EpochQueueStorage SLOT must match EIP-7201 formula");
+    }
+
     /// @notice Sanity check: no two namespaces produce colliding storage slots.
     function test_namespace_uniqueness() public {
         bytes32 a = _eip7201Slot("dsf.core.main.storage.v1");
         bytes32 b = _eip7201Slot("dsf.core.fee.storage.v1");
         bytes32 c = _eip7201Slot("dsf.core.queue.storage.v1");
         bytes32 d = _eip7201Slot("dsf.core.fixedmaturity.storage.v1");
-        assertTrue(a != b && a != c && a != d && b != c && b != d && c != d, "namespaces must be unique");
+        bytes32 e = _eip7201Slot("multyr.storage.EpochQueue.v1");
+        assertTrue(
+            a != b && a != c && a != d && a != e &&
+            b != c && b != d && b != e &&
+            c != d && c != e &&
+            d != e,
+            "namespaces must be unique"
+        );
     }
 }

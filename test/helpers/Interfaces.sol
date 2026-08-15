@@ -9,7 +9,7 @@ interface ICoreAggregatorVaultV1 {
     function canSettle() external view returns (bool);
     function canCrystallize() external view returns (bool);
     function canRealize() external view returns (bool);
-    function queueLength() external view returns (uint256);
+    function outstandingClaimCount() external view returns (uint256);
     function epochStart() external view returns (uint64);
 
     // params (read)
@@ -17,13 +17,13 @@ interface ICoreAggregatorVaultV1 {
     function epochWithdrawn() external view returns (uint256);
 
     // ops
-    function processQueuedRedemptions(uint256 maxClaims) external;
-    function settleFeesAndProcessQueue(uint256 maxClaims) external;
     function endEpochCrystallize() external;
     function realizeForReserveAndOps(uint256 maxAmount) external;
 
     // claim path (user)
-    function requestClaim(bool isImmediate, uint256 shares) external;
+    function requestInstantWithdrawal(uint256 shares)
+        external
+        returns (bool settledImmediately, uint256 epochId, uint256 claimId);
 
     // deposit/mint
     function deposit(uint256 assets, address receiver) external returns (uint256);

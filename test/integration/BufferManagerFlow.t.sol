@@ -123,14 +123,22 @@ contract BufferManagerFlowTest is Test {
         assertApproxEqAbs(warmBal, amount - (amount / 10), 2);
 
         // Now withdraw an amount larger than current hot to trigger refill from warm.
-        // Async vault: requestClaim (hot insufficient → queues), then keeper settles
-        // with bm.refill() pulling the shortfall from warm.
+        // Async vault: requestEpochWithdrawal (hot insufficient → queues into the
+        // current epoch), then closeCurrentEpoch() + fundEpoch() (which pulls the
+        // shortfall from warm via bm.refill() internally), then the user self-claims.
         uint256 withdrawAssets = 50_000e6; // 50k USDC
         uint256 sharesToClaim = vault.previewWithdraw(withdrawAssets);
         vm.startPrank(user);
-        IQueueModule(address(vault)).requestClaim(false, sharesToClaim);
+        (uint256 epochId, uint256 claimId) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(sharesToClaim);
         vm.stopPrank();
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(1);
+
+        vm.warp(block.timestamp + 7 days + 1);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epochId);
+
+        vm.prank(user);
+        IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
 
         // User should have received 50k
         assertEq(MockUSDC(USDC_UNDERLYING).balanceOf(user), 1_000_000e6 - amount + withdrawAssets);

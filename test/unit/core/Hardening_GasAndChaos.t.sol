@@ -8,15 +8,31 @@ import { CoreHarness } from "../../helpers/CoreHarness.sol";
 import { ERC20Mock } from "../../../src/mocks/ERC20Mock.sol";
 import { MockParamsProvider } from "../../helpers/MockParamsProvider.sol";
 import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTests.sol";
+import { StrategyMock } from "../../helpers/StrategyMock.sol";
+import { MockPriceOracleMiddleware } from "../../helpers/MockPriceOracleMiddleware.sol";
+
+interface IDeploy {
+    function deployToStrategies(uint256 maxAmount) external;
+}
+import { EpochQueueStorage } from "../../../src/core/modules/EpochedQueueModule.sol";
 
 interface IQueueModule {
-    function requestClaim(bool immediate, uint256 shares) external;
-    function cancelClaim(uint256 claimId) external;
-    function settleFeesAndProcessQueue(uint256 maxClaims) external;
-    function processQueuedRedemptions(uint256 maxClaims) external;
-    function nextClaimId() external view returns (uint256);
-    function queueLength() external view returns (uint256);
-    function pendingShares() external view returns (uint256);
+    function requestInstantWithdrawal(uint256 shares)
+        external
+        returns (bool settledImmediately, uint256 epochId, uint256 claimId);
+    function requestEpochWithdrawal(uint256 shares)
+        external
+        returns (uint256 epochId, uint256 claimId);
+    function cancelEpochWithdrawal(uint256 epochId, uint256 claimId) external;
+    function closeCurrentEpoch() external;
+    function fundEpoch(uint256 epochId) external;
+    function claimEpochAssets(uint256 epochId, uint256 claimId) external returns (uint256 assets);
+    function epochData(uint256 epochId) external view returns (EpochQueueStorage.EpochData memory);
+    function currentEpochId() external view returns (uint256);
+    function canCloseCurrentEpoch() external view returns (bool);
+    function currentEpochClaimCount() external view returns (uint256);
+    function outstandingClaimCount() external view returns (uint256);
+    function totalEscrowedShares() external view returns (uint256);
     function endEpochCrystallize() external;
 }
 
@@ -80,30 +96,102 @@ contract Hardening_GasAndChaos is Test {
         // Seed vault with enough TVL
         _fundAndDeposit(owner, 100_000_000e6);
 
-        // Create N users and queue claims
+        // Create N users and queue claims into the same epoch
+        uint256 epochId;
         for (uint256 i = 0; i < queueSize; i++) {
             address user = address(uint160(0xC000 + i));
             _fundAndDeposit(user, 10_000e6);
             vm.prank(user);
-            IQueueModule(address(vault)).requestClaim(false, 5_000e6);
+            (epochId,) = IQueueModule(address(vault)).requestEpochWithdrawal(5_000e6);
         }
 
-        uint256 ql = IQueueModule(address(vault)).queueLength();
+        uint256 ql = IQueueModule(address(vault)).outstandingClaimCount();
         console2.log("Queue size:", ql);
 
-        // Measure settle gas with batch=25
+        // Measure fundEpoch() gas: unlike QueueModule's per-batch keeper scan
+        // (cost scales with min(batchSize, queueDepth)), a single fundEpoch()
+        // call pulls liquidity for the ENTIRE epoch regardless of how many
+        // claims it contains — gas here should stay roughly flat as queueSize grows.
+        vm.warp(block.timestamp + 7 days + 1);
+        IQueueModule(address(vault)).closeCurrentEpoch();
         uint256 g = gasleft();
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(25);
+        IQueueModule(address(vault)).fundEpoch(epochId);
         uint256 gasUsed = g - gasleft();
-        console2.log("settleFeesAndProcessQueue(25) gas:", gasUsed);
+        console2.log("fundEpoch() gas:", gasUsed);
 
-        uint256 remaining = IQueueModule(address(vault)).queueLength();
-        console2.log("Remaining after batch:", remaining);
+        // fundEpoch() never touches per-claim storage, so its cost must not
+        // move with queue depth. Asserted, not just logged: the flat-gas claim
+        // is one of the load-bearing reasons the epoch model replaced the
+        // per-claim keeper scan, and a characterization that only prints a
+        // number cannot catch a regression.
+        assertLt(gasUsed, FUND_EPOCH_GAS_CEILING, "fundEpoch cost must stay flat in queue depth");
+    }
 
-        // Gas report — characterization, not hard assertion
-        // Queue 100: ~3.6M, Queue 500: ~13.7M
-        // Safe operating range: queue <= 100 for batch=25 within 5M gas
-        console2.log("Gas limit check: gasUsed=", gasUsed, "limit=5000000");
+    /// @dev Comfortably above the measured ~39k for the pre-funded path and the
+    ///      strategy-redeem path below, far below anything that would scale
+    ///      with claim count.
+    uint256 internal constant FUND_EPOCH_GAS_CEILING = 400_000;
+
+    /// @notice The characterization above pre-funds the vault, so fundEpoch
+    ///         short-circuits before its liquidity waterfall ever runs. This
+    ///         exercises the branch that actually pulls: hot is short, the
+    ///         router has to redeem from a strategy, and the epoch only reaches
+    ///         FUNDED because of that pull.
+    function test_fundEpoch_executesStrategyRedeemWaterfall() public {
+        StrategyMock strat = new StrategyMock(address(usdc));
+        vault.addStrategyUnsafe(address(strat));
+
+        // StrategyRouter.executeRedeemBatch values the asset through
+        // OracleValuationLib and reverts OracleNotConfigured without a fresh
+        // oracle -- for 6dp USDC too, not just 18dp assets. fundEpoch swallows
+        // that revert, so without this the waterfall silently no-ops.
+        MockPriceOracleMiddleware oracle = new MockPriceOracleMiddleware();
+        oracle.setPrice(address(usdc), 1e18);
+        params.setOracle(address(oracle));
+
+        address user = address(0xC0FFEE);
+        _fundAndDeposit(user, 1_000_000e6);
+
+        vm.prank(user);
+        (uint256 epochId, uint256 claimId) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(500_000e6);
+
+        vm.warp(block.timestamp + 7 days + 1);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        uint256 owed = IQueueModule(address(vault)).epochData(epochId).totalNetAssets;
+
+        // Refresh the quote after the warp: the staleness window is an hour and
+        // epochs are days long, so at fund time the oracle must have been
+        // updated since the epoch closed or the redeem reverts and the epoch
+        // silently stays CLOSED.
+        oracle.setPrice(address(usdc), 1e18);
+
+        // Push hot into the strategy through the real deploy path, so the
+        // router's own accounting matches and a redeem can actually pull it
+        // back. A raw transfer would leave the router thinking the strategy
+        // holds nothing.
+        IDeploy(address(vault)).deployToStrategies(type(uint256).max);
+        assertGt(usdc.balanceOf(address(strat)), 0, "strategy is funded");
+        assertLt(usdc.balanceOf(address(vault)), owed, "hot is genuinely short before funding");
+
+        uint256 g = gasleft();
+        IQueueModule(address(vault)).fundEpoch(epochId);
+        uint256 gasUsed = g - gasleft();
+        console2.log("fundEpoch() gas with strategy redeem:", gasUsed);
+
+        assertTrue(
+            IQueueModule(address(vault)).epochData(epochId).state
+                == EpochQueueStorage.EpochState.Funded,
+            "the waterfall pulled enough to fund the epoch"
+        );
+        assertLt(gasUsed, FUND_EPOCH_GAS_CEILING, "redeem path stays within the same ceiling");
+
+        // And the claimant is actually paid out of the redeemed liquidity.
+        uint256 before = usdc.balanceOf(user);
+        vm.prank(user);
+        uint256 paid = IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
+        assertEq(usdc.balanceOf(user) - before, paid, "claim paid from redeemed assets");
+        assertGt(paid, 0, "and it was a real payout");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -125,17 +213,22 @@ contract Hardening_GasAndChaos is Test {
         // Instant claim — small amount
         uint256 usdcBefore = usdc.balanceOf(user1);
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(true, 100e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(100e6);
         uint256 received = usdc.balanceOf(user1) - usdcBefore;
         assertGt(received, 0, "received USDC on tiny TVL");
         console2.log("Instant claim 100 shares, received:", received);
 
-        // Queued claim + settle
+        // Queued claim + settle (close + fund the epoch, then user2 self-claims)
         vm.prank(user2);
-        IQueueModule(address(vault)).requestClaim(false, 100e6);
+        (uint256 epochId, uint256 claimId) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(100e6);
 
         uint256 usdcBefore2 = usdc.balanceOf(user2);
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(10);
+        vm.warp(block.timestamp + 7 days + 1);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epochId);
+        vm.prank(user2);
+        IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
         uint256 received2 = usdc.balanceOf(user2) - usdcBefore2;
         assertGt(received2, 0, "settled on tiny TVL");
         console2.log("Queued settle 100 shares, received:", received2);
@@ -172,26 +265,31 @@ contract Hardening_GasAndChaos is Test {
         }
         console2.log("TVL after deposits:", vault.totalAssets() / 1e6, "M");
 
-        // Wave 1: mix of instant + queued claims
+        // Wave 1: mix of instant + queued claims (even i = instant, odd i = queued)
+        uint256 epochId;
+        bool hasQueuedClaims;
         for (uint256 i = 0; i < 10; i++) {
             vm.prank(users[i]);
-            IQueueModule(address(vault)).requestClaim(i % 2 == 0, 200_000e6);
+            if (i % 2 == 0) {
+                IQueueModule(address(vault)).requestInstantWithdrawal(200_000e6);
+            } else {
+                (epochId,) = IQueueModule(address(vault)).requestEpochWithdrawal(200_000e6);
+                hasQueuedClaims = true;
+            }
         }
 
-        // Wave 2: some cancels + new claims
-        for (uint256 i = 0; i < 5; i++) {
-            uint256 claimId = i * 2 + 2; // even claims (queued ones)
-            // Only cancel if it was queued (i%2==1 → queued)
+        // Settle batch: close + fund the epoch the queued (odd-i) claims landed in
+        if (hasQueuedClaims) {
+            vm.warp(block.timestamp + 7 days + 1);
+            IQueueModule(address(vault)).closeCurrentEpoch();
+            IQueueModule(address(vault)).fundEpoch(epochId);
         }
-
-        // Settle batch
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(50);
 
         // Wave 3: epoch rollover + fresh claims
         vm.warp(block.timestamp + 7 days + 1);
         for (uint256 i = 10; i < 15; i++) {
             vm.prank(users[i]);
-            IQueueModule(address(vault)).requestClaim(true, 100_000e6);
+            IQueueModule(address(vault)).requestInstantWithdrawal(100_000e6);
         }
 
         // Wave 4: force exits
@@ -201,8 +299,16 @@ contract Hardening_GasAndChaos is Test {
             assertEq(vault.balanceOf(users[i]), 0, "force exit complete");
         }
 
-        // Final settle
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(50);
+        // Final settle: close + fund whatever landed in the queue during Wave 3
+        // (instant claims that fell back to the queue due to cap exhaustion)
+        if (
+            IQueueModule(address(vault)).canCloseCurrentEpoch()
+                && IQueueModule(address(vault)).currentEpochClaimCount() > 0
+        ) {
+            uint256 curEpochId = IQueueModule(address(vault)).currentEpochId();
+            IQueueModule(address(vault)).closeCurrentEpoch();
+            IQueueModule(address(vault)).fundEpoch(curEpochId);
+        }
 
         // Crystallize
         usdc._mint(address(vault), 100_000e6);
@@ -218,7 +324,7 @@ contract Hardening_GasAndChaos is Test {
         console2.log("Final TVL:", finalAssets / 1e6, "M");
         console2.log("Final supply:", finalSupply / 1e6, "M");
         console2.log("Fee shares:", feeShares);
-        console2.log("Queue:", IQueueModule(address(vault)).queueLength());
+        console2.log("Outstanding claims:", IQueueModule(address(vault)).outstandingClaimCount());
 
         assertGt(feeShares, 0, "fees collected");
         assertLt(finalSupply, 20_000_000e6, "supply < initial");
@@ -240,17 +346,17 @@ contract Hardening_GasAndChaos is Test {
         // 50 cycles of queue → cancel → re-queue
         for (uint256 i = 0; i < 50; i++) {
             vm.prank(user);
-            IQueueModule(address(vault)).requestClaim(false, 100_000e6);
-            uint256 claimId = IQueueModule(address(vault)).nextClaimId();
+            (uint256 epochId, uint256 claimId) =
+                IQueueModule(address(vault)).requestEpochWithdrawal(100_000e6);
 
             vm.prank(user);
-            IQueueModule(address(vault)).cancelClaim(claimId);
+            IQueueModule(address(vault)).cancelEpochWithdrawal(epochId, claimId);
         }
 
         // No leak
         assertEq(vault.balanceOf(user), initialShares, "no share leak after 50 cancel cycles");
         assertEq(vault.totalSupply(), initialSupply, "no supply leak");
-        assertEq(IQueueModule(address(vault)).pendingShares(), 0, "no pending leak");
+        assertEq(IQueueModule(address(vault)).totalEscrowedShares(), 0, "no pending leak");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -267,13 +373,13 @@ contract Hardening_GasAndChaos is Test {
 
         // This should settle (within cap)
         vm.prank(user);
-        IQueueModule(address(vault)).requestClaim(true, 999_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(999_000e6);
 
         // This should queue (over cap ~1.5M)
-        uint256 pendingBefore = IQueueModule(address(vault)).pendingShares();
+        uint256 pendingBefore = IQueueModule(address(vault)).totalEscrowedShares();
         vm.prank(user);
-        IQueueModule(address(vault)).requestClaim(true, 600_000e6);
-        uint256 pendingAfter = IQueueModule(address(vault)).pendingShares();
+        IQueueModule(address(vault)).requestInstantWithdrawal(600_000e6);
+        uint256 pendingAfter = IQueueModule(address(vault)).totalEscrowedShares();
 
         assertGt(pendingAfter, pendingBefore, "second claim queued at cap boundary");
     }

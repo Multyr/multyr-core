@@ -9,7 +9,7 @@ import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { ERC20Mock } from "../../src/mocks/ERC20Mock.sol";
 import { MockParamsProvider } from "../helpers/MockParamsProvider.sol";
-import { QueueModule } from "../../src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "../../src/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "../../src/core/modules/AdminModule.sol";
 import { IQueueModule } from "../../src/interfaces/IQueueModule.sol";
 
@@ -33,7 +33,7 @@ contract CoreVault_System_Invariants is StdInvariant, Test {
     MockParamsProvider public params;
     ERC20Mock public usdc;
     VaultHandler public handler;
-    QueueModule public queueModule;
+    EpochedQueueModule public queueModule;
     AdminModule public adminModule;
 
     /* ========== ADDRESSES ========== */
@@ -63,7 +63,7 @@ contract CoreVault_System_Invariants is StdInvariant, Test {
         );
 
         // Deploy modules
-        queueModule = new QueueModule();
+        queueModule = new EpochedQueueModule();
         adminModule = new AdminModule();
 
         // Deploy CoreVault with 6-param constructor
@@ -102,23 +102,31 @@ contract CoreVault_System_Invariants is StdInvariant, Test {
     }
 
     function _wireModules() internal {
-        // QueueModule selectors (PUBLIC)
+        // EpochedQueueModule selectors (PUBLIC)
         vault.setModule(
-            QueueModule.requestClaim.selector, address(queueModule), vault.ROLE_PUBLIC()
+            EpochedQueueModule.requestEpochWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
-        vault.setModule(QueueModule.cancelClaim.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.cancelEpochWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.closeCurrentEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.fundEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.claimEpochAssets.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.batchClaimEpochAssets.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(
-            QueueModule.processQueuedRedemptions.selector, address(queueModule), vault.ROLE_PUBLIC()
+            EpochedQueueModule.requestInstantWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
         vault.setModule(
-            QueueModule.settleFeesAndProcessQueue.selector,
-            address(queueModule),
-            vault.ROLE_PUBLIC()
+            EpochedQueueModule.endEpochCrystallize.selector, address(queueModule), vault.ROLE_PUBLIC()
+        );
+        vault.setModule(EpochedQueueModule.currentEpochId.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(
+            EpochedQueueModule.totalEscrowedShares.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
         vault.setModule(
-            QueueModule.pendingShares.selector, address(queueModule), vault.ROLE_PUBLIC()
+            EpochedQueueModule.reservedForClaims.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
-        vault.setModule(QueueModule.queueLength.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.outstandingClaimCount.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.canCloseCurrentEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.currentEpochClaimCount.selector, address(queueModule), vault.ROLE_PUBLIC());
 
         // AdminModule selectors (OWNER)
         vault.setModule(
@@ -277,13 +285,31 @@ contract CoreVault_System_Invariants is StdInvariant, Test {
      * @notice Queue state must be consistent
      * @dev O(1) - reads pendingShares and vault balance
      */
+    /**
+     * @notice The reservation must always be backed. Every consumer of the hot
+     *         balance is supposed to treat `hot - reservedForClaims` as the only
+     *         spendable amount, so the vault can never hold less than it has
+     *         already promised to FUNDED-but-unclaimed claimants. This is the
+     *         property the split close/fund/claim handlers exist to stress: it
+     *         is only interesting once the fuzzer can reach a backlog.
+     */
+    function invariant_reservationIsAlwaysBacked() public view {
+        uint256 reserved = IQueueModule(address(vault)).reservedForClaims();
+        if (reserved == 0) return;
+        assertGe(
+            usdc.balanceOf(address(vault)),
+            reserved,
+            "RESERVE: hot balance must cover every funded-but-unclaimed claim"
+        );
+    }
+
     function invariant_queue_integrity() public view {
-        uint256 pendingShares = IQueueModule(address(vault)).pendingShares();
+        uint256 pendingShares = IQueueModule(address(vault)).totalEscrowedShares();
 
         if (pendingShares > 0) {
             uint256 vaultOwnShares = vault.balanceOf(address(vault));
             assertEq(
-                vaultOwnShares, pendingShares, "QUEUE: Escrowed shares must equal pendingShares"
+                vaultOwnShares, pendingShares, "QUEUE: Escrowed shares must equal totalEscrowedShares"
             );
         }
     }
@@ -394,6 +420,14 @@ contract VaultHandler is Test {
     /* ========== ACTOR TRACKING - FIXED POOL ========== */
     address[10] public actors;
     mapping(address => uint256) public actorClaimCount;
+
+    /* ========== EPOCH CLAIM TRACKING ========== */
+    struct PendingClaim {
+        address actor;
+        uint256 epochId;
+        uint256 claimId;
+    }
+    PendingClaim[] public pendingClaims;
 
     modifier useActor(uint256 seed) {
         address actor = actors[seed % MAX_ACTORS];
@@ -545,7 +579,7 @@ contract VaultHandler is Test {
         }
 
         // STEP 4: Cap queue size
-        uint256 queueLen = IQueueModule(address(vault)).queueLength();
+        uint256 queueLen = IQueueModule(address(vault)).outstandingClaimCount();
         if (queueLen >= MAX_QUEUE_SIZE) {
             reverts_requestClaim++;
             return;
@@ -558,37 +592,68 @@ contract VaultHandler is Test {
         uint256 grossAssets = vault.convertToAssets(shares);
         uint256 balBefore = usdc.balanceOf(actor);
 
-        try IQueueModule(address(vault)).requestClaim(immediate, shares) {
-            uint256 balAfter = usdc.balanceOf(actor);
+        if (immediate) {
+            try IQueueModule(address(vault)).requestInstantWithdrawal(shares) returns (
+                bool settledImmediately, uint256 epochId, uint256 claimId
+            ) {
+                uint256 balAfter = usdc.balanceOf(actor);
 
-            if (balAfter > balBefore) {
-                ghost_totalWithdrawn += grossAssets;
-            } else {
+                if (settledImmediately && balAfter > balBefore) {
+                    ghost_totalWithdrawn += grossAssets;
+                } else {
+                    pendingClaims.push(PendingClaim(actor, epochId, claimId));
+                    ghost_pendingClaims++;
+                    actorClaimCount[actor]++;
+                }
+                calls_requestClaim++;
+            } catch {
+                reverts_requestClaim++;
+            }
+        } else {
+            try IQueueModule(address(vault)).requestEpochWithdrawal(shares) returns (
+                uint256 epochId, uint256 claimId
+            ) {
+                pendingClaims.push(PendingClaim(actor, epochId, claimId));
                 ghost_pendingClaims++;
                 actorClaimCount[actor]++;
+                calls_requestClaim++;
+            } catch {
+                reverts_requestClaim++;
             }
-            calls_requestClaim++;
-        } catch {
-            reverts_requestClaim++;
         }
     }
 
     /* ========== HANDLER: CANCEL_CLAIM ========== */
 
-    function cancelClaim(uint256 actorSeed, uint256 claimId) public useActor(actorSeed) {
+    function cancelClaim(uint256 actorSeed, uint256 claimIdx) public useActor(actorSeed) {
         address actor = actors[actorSeed % MAX_ACTORS];
 
         // STEP 3: Guard clause - only cancel if actor has claims
-        if (actorClaimCount[actor] == 0) {
+        if (actorClaimCount[actor] == 0 || pendingClaims.length == 0) {
             reverts_cancelClaim++;
             return;
         }
 
-        claimId = bound(claimId, 0, 100);
+        // Find one of this actor's pending claims (fuzzed index selects among them)
+        uint256 found = type(uint256).max;
+        uint256 startIdx = bound(claimIdx, 0, pendingClaims.length - 1);
+        for (uint256 i = 0; i < pendingClaims.length; i++) {
+            uint256 idx = (startIdx + i) % pendingClaims.length;
+            if (pendingClaims[idx].actor == actor) {
+                found = idx;
+                break;
+            }
+        }
+        if (found == type(uint256).max) {
+            reverts_cancelClaim++;
+            return;
+        }
 
-        try IQueueModule(address(vault)).cancelClaim(claimId) {
+        PendingClaim memory pc = pendingClaims[found];
+        try IQueueModule(address(vault)).cancelEpochWithdrawal(pc.epochId, pc.claimId) {
             if (ghost_pendingClaims > 0) ghost_pendingClaims--;
             if (actorClaimCount[actor] > 0) actorClaimCount[actor]--;
+            _removePendingClaim(found);
             calls_cancelClaim++;
         } catch {
             reverts_cancelClaim++;
@@ -597,9 +662,77 @@ contract VaultHandler is Test {
 
     /* ========== HANDLER: SETTLE_QUEUE ========== */
 
+    // Close, fund and claim are SEPARATE handler actions on purpose. Fusing
+    // them into one settleQueue call meant the fuzzer never reached a state
+    // with an epoch closed-but-unfunded while a later epoch also closed, which
+    // is the state space the reservation bugs lived in.
+
+    /// @notice Close the open epoch and stop there.
+    function closeEpoch() public {
+        vm.warp(block.timestamp + 7 days);
+        if (
+            !IQueueModule(address(vault)).canCloseCurrentEpoch()
+                || IQueueModule(address(vault)).currentEpochClaimCount() == 0
+        ) {
+            reverts_settle++;
+            return;
+        }
+        try IQueueModule(address(vault)).closeCurrentEpoch() {
+            calls_settle++;
+        } catch {
+            reverts_settle++;
+        }
+    }
+
+    /// @notice Attempt to fund an arbitrary epoch, so out-of-order funding and
+    ///         repeated failed attempts are both reachable.
+    function fundSomeEpoch(uint256 epochSeed) public {
+        uint256 current = IQueueModule(address(vault)).currentEpochId();
+        if (current == 0) {
+            reverts_settle++;
+            return;
+        }
+        uint256 target = bound(epochSeed, 0, current - 1);
+        try IQueueModule(address(vault)).fundEpoch(target) {
+            calls_settle++;
+        } catch {
+            reverts_settle++;
+        }
+    }
+
+    /// @notice Settle up to `maxClaims` tracked claims that are claimable, in
+    ///         any epoch, rather than only the one just closed.
+    function claimReady(uint256 maxClaims) public {
+        maxClaims = bound(maxClaims, 1, 20);
+
+        uint256 processed = 0;
+        uint256 i = 0;
+        while (i < pendingClaims.length && processed < maxClaims) {
+            PendingClaim memory pc = pendingClaims[i];
+            vm.prank(pc.actor);
+            try IQueueModule(address(vault)).claimEpochAssets(pc.epochId, pc.claimId) {
+                processed++;
+                if (ghost_pendingClaims > 0) ghost_pendingClaims--;
+                if (actorClaimCount[pc.actor] > 0) actorClaimCount[pc.actor]--;
+                _removePendingClaim(i);
+                continue; // don't advance i -- swap-removed a new element into place
+            } catch { }
+            i++;
+        }
+        ghost_processedClaims += processed;
+        if (processed > 0) calls_settle++;
+    }
+
+    function _removePendingClaim(uint256 idx) internal {
+        pendingClaims[idx] = pendingClaims[pendingClaims.length - 1];
+        pendingClaims.pop();
+    }
+
+    /* ========== HANDLER: SETTLE_QUEUE ========== */
+
     function settleQueue(uint256 maxClaims) public {
         // STEP 3: Guard clause - skip if queue empty
-        uint256 queueLen = IQueueModule(address(vault)).queueLength();
+        uint256 queueLen = IQueueModule(address(vault)).outstandingClaimCount();
         if (queueLen == 0) {
             reverts_settle++;
             return;
@@ -610,15 +743,38 @@ contract VaultHandler is Test {
 
         vm.warp(block.timestamp + 7 days);
 
-        uint256 queueLenBefore = queueLen;
+        // Close + fund whatever epoch is currently eligible, then self-claim
+        // (pull-based) up to maxClaims of the tracked pending claims that now
+        // belong to a FUNDED epoch.
+        if (
+            !IQueueModule(address(vault)).canCloseCurrentEpoch()
+                || IQueueModule(address(vault)).currentEpochClaimCount() == 0
+        ) {
+            reverts_settle++;
+            return;
+        }
 
-        try IQueueModule(address(vault)).settleFeesAndProcessQueue(maxClaims) {
-            uint256 queueLenAfter = IQueueModule(address(vault)).queueLength();
-            uint256 processed = queueLenBefore > queueLenAfter ? queueLenBefore - queueLenAfter : 0;
-            ghost_processedClaims += processed;
-            if (ghost_pendingClaims >= processed) {
-                ghost_pendingClaims -= processed;
+        uint256 epochId = IQueueModule(address(vault)).currentEpochId();
+        try IQueueModule(address(vault)).closeCurrentEpoch() {
+            try IQueueModule(address(vault)).fundEpoch(epochId) { } catch { }
+
+            uint256 processed = 0;
+            uint256 i = 0;
+            while (i < pendingClaims.length && processed < maxClaims) {
+                if (pendingClaims[i].epochId == epochId) {
+                    PendingClaim memory pc = pendingClaims[i];
+                    vm.prank(pc.actor);
+                    try IQueueModule(address(vault)).claimEpochAssets(pc.epochId, pc.claimId) {
+                        processed++;
+                        if (ghost_pendingClaims > 0) ghost_pendingClaims--;
+                        if (actorClaimCount[pc.actor] > 0) actorClaimCount[pc.actor]--;
+                        _removePendingClaim(i);
+                        continue; // don't advance i -- swap-removed a new element into place
+                    } catch { }
+                }
+                i++;
             }
+            ghost_processedClaims += processed;
             calls_settle++;
         } catch {
             reverts_settle++;
@@ -778,9 +934,10 @@ contract VaultHandler is Test {
 
         vm.warp(block.timestamp + 2 hours);
 
-        uint256 queueLenBefore = IQueueModule(address(vault)).queueLength();
-
-        try IQueueModule(address(vault)).settleFeesAndProcessQueue(1) {
+        // Crystallization is independent of queue settlement in the epoch model
+        // (see EpochedQueueModule.endEpochCrystallize) -- no queue-length delta
+        // to track here anymore.
+        try IQueueModule(address(vault)).endEpochCrystallize() {
             uint256 fcSharesAfter = vault.balanceOf(address(feeCollector));
             uint256 perfFeeSharesMinted =
                 fcSharesAfter > fcSharesBefore ? fcSharesAfter - fcSharesBefore : 0;
@@ -790,17 +947,6 @@ contract VaultHandler is Test {
                 ghost_totalPerfFees += perfFeeAssets;
                 ghost_totalFees += perfFeeAssets;
                 ghost_feesCollected += perfFeeAssets;
-            }
-
-            uint256 queueLenAfter = IQueueModule(address(vault)).queueLength();
-            uint256 processed = queueLenBefore > queueLenAfter ? queueLenBefore - queueLenAfter : 0;
-            if (processed > 0) {
-                ghost_processedClaims += processed;
-                if (ghost_pendingClaims >= processed) {
-                    ghost_pendingClaims -= processed;
-                } else {
-                    ghost_pendingClaims = 0;
-                }
             }
         } catch { }
     }

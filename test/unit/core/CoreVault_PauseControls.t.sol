@@ -8,13 +8,15 @@ import { ERC20Mock } from "../../../src/mocks/ERC20Mock.sol";
 import { MockParamsProvider } from "../../helpers/MockParamsProvider.sol";
 import { CoreHarness } from "../../helpers/CoreHarness.sol";
 import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTests.sol";
-import { QueueModule } from "../../../src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "../../../src/core/modules/EpochedQueueModule.sol";
 import { SelectorLib } from "../../../src/core/libraries/SelectorLib.sol";
 import { ModuleSetter } from "../../helpers/ModuleSetter.sol";
 import { ExitEngineLib } from "../../../src/core/libraries/ExitEngineLib.sol";
 
 interface IQueueModule {
-    function requestClaim(bool immediate, uint256 shares) external;
+    function requestInstantWithdrawal(uint256 shares)
+        external
+        returns (bool settledImmediately, uint256 epochId, uint256 claimId);
 }
 
 /**
@@ -59,8 +61,8 @@ contract CoreVault_PauseControls is Test {
         _harness.setBufferManagerUnsafe(address(mockBM));
         vault = _harness;
 
-        // Wire QueueModule for requestClaim tests
-        QueueModule queueModule = new QueueModule();
+        // Wire EpochedQueueModule for requestInstantWithdrawal tests
+        EpochedQueueModule queueModule = new EpochedQueueModule();
         bytes4[] memory queueSels = SelectorLib.getQueueModuleSelectors();
         vm.startPrank(owner);
         ModuleSetter.setModulesSame(address(vault), queueSels, address(queueModule), 0);
@@ -176,11 +178,11 @@ contract CoreVault_PauseControls is Test {
         vault.pauseDepositsOnly(true);
 
         // withdraw() always reverts with AsyncWithdrawalRequired now;
-        // verify requestClaim(true) still works when only deposits are paused
+        // verify requestInstantWithdrawal() still works when only deposits are paused
         vm.startPrank(user);
         uint256 userShares = vault.balanceOf(user);
         require(userShares > 0, "user should have shares");
-        IQueueModule(address(vault)).requestClaim(true, userShares / 10);
+        IQueueModule(address(vault)).requestInstantWithdrawal(userShares / 10);
         // Just verify it doesn't revert
         vm.stopPrank();
     }
@@ -190,13 +192,13 @@ contract CoreVault_PauseControls is Test {
         vault.pauseDepositsOnly(true);
 
         // redeem() always reverts with AsyncWithdrawalRequired now;
-        // verify requestClaim(true) still works when only deposits are paused
+        // verify requestInstantWithdrawal() still works when only deposits are paused
         vm.startPrank(user);
         uint256 userShares = vault.balanceOf(user);
         require(userShares > 0, "user should have shares");
 
         uint256 sharesToRedeem = userShares / 10; // Redeem 10% of shares
-        IQueueModule(address(vault)).requestClaim(true, sharesToRedeem);
+        IQueueModule(address(vault)).requestInstantWithdrawal(sharesToRedeem);
         // Just verify it doesn't revert
         vm.stopPrank();
     }

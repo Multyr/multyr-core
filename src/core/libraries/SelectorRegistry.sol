@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 import { AdminModule } from "../modules/AdminModule.sol";
-import { QueueModule } from "../modules/QueueModule.sol";
+import { EpochedQueueModule } from "../modules/EpochedQueueModule.sol";
 import { LiquidityOpsModule } from "../modules/LiquidityOpsModule.sol";
 import { FixedMaturityModule } from "../modules/FixedMaturityModule.sol";
 
@@ -129,21 +129,33 @@ contract SelectorRegistry {
         if (selector == AdminModule.isPerfInitialized.selector) return ROLE_PUBLIC;
 
         // ─────────────────────────────────────────────────────────────────────────
-        // QUEUEMODULE WRITE SELECTORS (5 total) - MUST BE ROLE_PUBLIC
+        // EPOCHEDQUEUEMODULE WRITE SELECTORS (9 total) - MUST BE ROLE_PUBLIC
         // ─────────────────────────────────────────────────────────────────────────
-        if (selector == QueueModule.requestClaim.selector) return ROLE_PUBLIC;
-        if (selector == QueueModule.cancelClaim.selector) return ROLE_PUBLIC;
-        if (selector == QueueModule.processQueuedRedemptions.selector) return ROLE_PUBLIC;
-        if (selector == QueueModule.settleFeesAndProcessQueue.selector) return ROLE_PUBLIC;
-        if (selector == QueueModule.endEpochCrystallize.selector) return ROLE_PUBLIC;
-        if (selector == QueueModule.compactQueue.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.requestEpochWithdrawal.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.cancelEpochWithdrawal.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.closeCurrentEpoch.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.fundEpoch.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.claimEpochAssets.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.batchClaimEpochAssets.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.requestInstantWithdrawal.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.endEpochCrystallize.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.syncOldestUnfundedEpoch.selector) return ROLE_PUBLIC;
 
         // ─────────────────────────────────────────────────────────────────────────
-        // QUEUEMODULE VIEW SELECTORS (3 total) - MUST BE ROLE_PUBLIC
+        // EPOCHEDQUEUEMODULE VIEW SELECTORS (10 total) - MUST BE ROLE_PUBLIC
         // ─────────────────────────────────────────────────────────────────────────
-        if (selector == QueueModule.nextClaimId.selector) return ROLE_PUBLIC;
-        if (selector == QueueModule.queueLength.selector) return ROLE_PUBLIC;
-        if (selector == QueueModule.pendingShares.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.currentEpochId.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.epochData.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.epochClaim.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.nextClaimIdForEpoch.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.totalEscrowedShares.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.outstandingClaimCount.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.oldestUnfundedEpochId.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.canCloseCurrentEpoch.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.currentEpochClaimCount.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.epochDeficit.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.reservedForClaims.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.closedPendingAssets.selector) return ROLE_PUBLIC;
 
         // ─────────────────────────────────────────────────────────────────────────
         // ERC4626MODULE SELECTORS (10 total) - MUST BE ROLE_PUBLIC
@@ -181,10 +193,6 @@ contract SelectorRegistry {
         if (selector == LiquidityOpsModule.realizeForReserveAndOps.selector) return ROLE_PUBLIC;
         if (selector == LiquidityOpsModule.canRebalanceStrategies.selector) return ROLE_PUBLIC;
         if (selector == LiquidityOpsModule.rebalanceStrategies.selector) return ROLE_PUBLIC;
-
-        // Queue module views
-        if (selector == QueueModule.requiredHotForBatch.selector) return ROLE_PUBLIC;
-        if (selector == QueueModule.settlePreview.selector) return ROLE_PUBLIC;
 
         // ─────────────────────────────────────────────────────────────────────────
         // FIXEDMATURITYMODULE GOVERNANCE SELECTORS - MUST BE ROLE_OWNER

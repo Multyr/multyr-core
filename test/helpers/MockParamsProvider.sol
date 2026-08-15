@@ -259,18 +259,32 @@ contract MockParamsProvider is IParamsProvider {
         return address(0);
     }
 
+    /// @dev Oracle wiring, off by default so existing suites keep their old
+    ///      behaviour. Set it when the code under test reaches a path that
+    ///      values the asset -- StrategyRouter.executeRedeemBatch does, and
+    ///      reverts OracleNotConfigured without it.
+    address private _oracle;
+    uint256 private _oracleStaleness = 3600;
+
+    function setOracle(address oracle_) external {
+        _oracle = oracle_;
+    }
+
+    function setOracleStaleness(uint256 staleness_) external {
+        _oracleStaleness = staleness_;
+    }
+
     /// @notice Get oracle + staleness config for (asset, vault)
-    /// @dev Returns default values (no oracle configured)
     function oracleConfigFor(
         address,
         /* asset */
         address /* vault */
     )
         external
-        pure
+        view
         returns (address oracle, uint256 maxStaleness_)
     {
-        return (address(0), 3600);
+        return (_oracle, _oracleStaleness);
     }
 
     /// @notice Returns permissive max actions (100)

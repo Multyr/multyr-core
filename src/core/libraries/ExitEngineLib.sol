@@ -2,7 +2,6 @@
 pragma solidity ^0.8.28;
 
 import { CoreStorage } from "../storage/CoreStorage.sol";
-import { QueueStorage } from "../storage/QueueStorage.sol";
 import { FeeStorage } from "../storage/FeeStorage.sol";
 import { ExitFeeLib } from "./ExitFeeLib.sol";
 import { WithdrawalCapLib } from "./WithdrawalCapLib.sol";
@@ -94,47 +93,6 @@ library ExitEngineLib {
     // ═══════════════════════════════════════════════════════════════════════════════
     // CAP CALCULATION
     // ═══════════════════════════════════════════════════════════════════════════════
-
-    /// @notice Calculate remaining immediate withdrawal capacity for current epoch
-    /// @dev Uses LIVE totalAssets (no snapshot) per CTO directive.
-    ///      Incorporates dynamic cap from WithdrawalCapLib if enabled.
-    /// @param core CoreStorage layout
-    /// @param q QueueStorage layout
-    /// @param totalAssets Current live totalAssets()
-    /// @param vault Address of the vault (for ParamsProvider calls)
-    /// @return remaining Remaining capacity in asset units
-    function calculateCapRemaining(
-        CoreStorage.Layout storage core,
-        QueueStorage.Layout storage q,
-        uint256 totalAssets,
-        address vault
-    ) internal view returns (uint256 remaining) {
-        IParamsProvider.WithdrawalParams memory wp =
-            core.params.getWithdrawalParams(vault);
-        IParamsProvider.DynamicCapParams memory dcp =
-            core.params.getDynamicCapParams(vault);
-
-        uint16 cap;
-        if (dcp.enabled) {
-            if (dcp.minBps == 0 || dcp.maxBps == 0) {
-                cap = wp.capPerEpochBps;
-            } else {
-                uint256 queueLen =
-                    q.queue.length > q.head ? q.queue.length - q.head : 0;
-                cap = WithdrawalCapLib.calculateDynamicCapBps(
-                    dcp.minBps, dcp.maxBps, dcp.queueStressThreshold, queueLen
-                );
-            }
-        } else {
-            cap = wp.capPerEpochBps == 0 ? type(uint16).max : wp.capPerEpochBps;
-        }
-
-        if (cap == type(uint16).max) return type(uint256).max;
-
-        return WithdrawalCapLib.calculateCapRemaining(
-            totalAssets, cap, core.epochWithdrawn
-        );
-    }
 
     // ═══════════════════════════════════════════════════════════════════════════════
     // FEE COMPUTATION

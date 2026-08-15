@@ -8,7 +8,7 @@ import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/I
 
 // Core
 import { CoreVault } from "@multyr-core/core/CoreVault.sol";
-import { QueueModule } from "@multyr-core/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "@multyr-core/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "@multyr-core/core/modules/AdminModule.sol";
 import { ERC4626Module } from "@multyr-core/core/modules/ERC4626Module.sol";
 import { LiquidityOpsModule } from "@multyr-core/core/modules/LiquidityOpsModule.sol";
@@ -88,7 +88,7 @@ contract DeployCoreSystem is Script {
 
         // Phase 3: Core + Modules
         CoreVault vault;
-        QueueModule queueModule;
+        EpochedQueueModule queueModule;
         AdminModule adminModule;
         ERC4626Module erc4626Module;
         LiquidityOpsModule liquidityOpsModule;
@@ -327,9 +327,9 @@ contract DeployCoreSystem is Script {
             console.log("[3.1b] Vault registered in factory (subgraph template active)");
         }
 
-        // 3.2 QueueModule (stateless - no constructor)
-        result.queueModule = new QueueModule();
-        console.log("[3.2] QueueModule:", address(result.queueModule));
+        // 3.2 EpochedQueueModule (stateless - no constructor)
+        result.queueModule = new EpochedQueueModule();
+        console.log("[3.2] EpochedQueueModule:", address(result.queueModule));
 
         // 3.3 AdminModule (stateless)
         result.adminModule = new AdminModule();
@@ -427,8 +427,6 @@ contract DeployCoreSystem is Script {
                 address(result.bufferManager),
                 address(result.strategyRouter),
                 address(result.globalConfig),
-                25, // defaultMaxClaims
-                100, // hardMaxClaims
                 1000000e6, // defaultMaxRealize (1M USDC)
                 1000000e6, // defaultMaxDeploy (1M USDC)
                 10, // minRealizeGapBps (0.1%)
@@ -486,7 +484,13 @@ contract DeployCoreSystem is Script {
             address[] memory warmAdapters = new address[](2);
             warmAdapters[0] = address(result.aaveWarmAdapter);
             warmAdapters[1] = address(result.morphoWarmAdapter);
-            result.vault.approveWarmAdapters(warmAdapters);
+            // Bounded, not unlimited: each adapter may pull at most this much in
+            // total before governance has to top it up. Sized off the vault
+            // deposit cap; see docs/deployment.md for the post-deploy tuning
+            // this and the other manual parameters need.
+            uint256 warmAdapterCap = vm.envOr("WARM_ADAPTER_ALLOWANCE_CAP", uint256(1_000_000e6));
+            result.vault.approveWarmAdapters(warmAdapters, warmAdapterCap);
+            console.log("  Warm adapter allowance cap:", warmAdapterCap);
         }
 
         // 5.5 HealthRegistry
@@ -593,11 +597,11 @@ contract DeployCoreSystem is Script {
     function _configureModuleRouting(CoreDeploymentResult memory result) internal {
         bytes4[] memory queueSels = SelectorLib.getQueueModuleSelectors();
         _setModulesBatch(result.vault, queueSels, address(result.queueModule), SelectorLib.ROLE_PUBLIC);
-        console.log("  QueueModule write selectors:", queueSels.length);
+        console.log("  EpochedQueueModule write selectors:", queueSels.length);
 
         bytes4[] memory queueViewSels = SelectorLib.getQueueModuleViewSelectors();
         _setModulesBatch(result.vault, queueViewSels, address(result.queueModule), SelectorLib.ROLE_PUBLIC);
-        console.log("  QueueModule view selectors:", queueViewSels.length);
+        console.log("  EpochedQueueModule view selectors:", queueViewSels.length);
 
         bytes4[] memory adminOwnerSels = SelectorLib.getAdminModuleOwnerSelectors();
         _setModulesBatch(result.vault, adminOwnerSels, address(result.adminModule), SelectorLib.ROLE_OWNER);
@@ -620,8 +624,8 @@ contract DeployCoreSystem is Script {
 
         require(result.vault.moduleOf(bytes4(keccak256("withdraw(uint256,address,address)"))) == address(result.erc4626Module), "GATE: withdraw routing");
         require(result.vault.moduleOf(bytes4(keccak256("redeem(uint256,address,address)"))) == address(result.erc4626Module), "GATE: redeem routing");
-        require(result.vault.moduleOf(IQueueModule.requestClaim.selector) == address(result.queueModule), "GATE: requestClaim routing");
-        require(result.vault.moduleOf(IQueueModule.settleFeesAndProcessQueue.selector) == address(result.queueModule), "GATE: settle routing");
+        require(result.vault.moduleOf(IQueueModule.requestEpochWithdrawal.selector) == address(result.queueModule), "GATE: requestEpochWithdrawal routing");
+        require(result.vault.moduleOf(IQueueModule.closeCurrentEpoch.selector) == address(result.queueModule), "GATE: closeCurrentEpoch routing");
         console.log("  [OK] Critical selector routing verified");
     }
 
@@ -756,7 +760,7 @@ contract DeployCoreSystem is Script {
         console.log("  SystemSealer:        ", address(result.systemSealer));
         console.log("Core:");
         console.log("  CoreVault:           ", address(result.vault));
-        console.log("  QueueModule:         ", address(result.queueModule));
+        console.log("  EpochedQueueModule:  ", address(result.queueModule));
         console.log("  AdminModule:         ", address(result.adminModule));
         console.log("  ERC4626Module:       ", address(result.erc4626Module));
         console.log("  LiquidityOpsModule:  ", address(result.liquidityOpsModule));

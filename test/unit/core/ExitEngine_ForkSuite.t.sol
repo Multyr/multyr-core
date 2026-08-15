@@ -11,13 +11,21 @@ import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTes
 import { ExitEngineLib } from "../../../src/core/libraries/ExitEngineLib.sol";
 
 interface IQueueModule {
-    function requestClaim(bool immediate, uint256 shares) external;
-    function cancelClaim(uint256 claimId) external;
-    function processQueuedRedemptions(uint256 maxClaims) external;
-    function settleFeesAndProcessQueue(uint256 maxClaims) external;
-    function nextClaimId() external view returns (uint256);
-    function queueLength() external view returns (uint256);
-    function pendingShares() external view returns (uint256);
+    function requestInstantWithdrawal(uint256 shares)
+        external
+        returns (bool settledImmediately, uint256 epochId, uint256 claimId);
+    function requestEpochWithdrawal(uint256 shares)
+        external
+        returns (uint256 epochId, uint256 claimId);
+    function cancelEpochWithdrawal(uint256 epochId, uint256 claimId) external;
+    function closeCurrentEpoch() external;
+    function fundEpoch(uint256 epochId) external;
+    function claimEpochAssets(uint256 epochId, uint256 claimId) external returns (uint256 assets);
+    function currentEpochId() external view returns (uint256);
+    function canCloseCurrentEpoch() external view returns (bool);
+    function currentEpochClaimCount() external view returns (uint256);
+    function outstandingClaimCount() external view returns (uint256);
+    function totalEscrowedShares() external view returns (uint256);
 }
 
 interface IForceWithdrawAll {
@@ -30,7 +38,7 @@ interface IForceWithdrawAll {
 ///
 /// INVARIANTS UNDER TEST:
 ///   1. withdraw()/redeem() CANNOT ever transfer assets - always revert
-///   2. requestClaim(true) CANNOT exceed epoch cap
+///   2. requestInstantWithdrawal() CANNOT exceed epoch cap
 ///   3. Epoch rollover auto-rolls on any interaction, no keeper needed
 ///   4. totalSupply NEVER increases on exit - no _mint in exit paths
 ///   5. feeShares NEVER minted - always transferred from owner/escrow
@@ -106,7 +114,7 @@ contract ExitEngine_ForkSuite is Test {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
-    // TEST 1: withdraw() always reverts, requestClaim(true) settles instantly
+    // TEST 1: withdraw() always reverts, requestInstantWithdrawal() settles instantly
     // ═══════════════════════════════════════════════════════════════════════════════
 
     function test_fork1_withdrawReverts_requestClaimInstant() public {
@@ -120,12 +128,12 @@ contract ExitEngine_ForkSuite is Test {
         vm.expectRevert(ExitEngineLib.AsyncWithdrawalRequired.selector);
         vault.redeem(100e6, user1, user1);
 
-        // requestClaim(true) settles instantly
+        // requestInstantWithdrawal settles instantly
         uint256 usdcBefore = usdc.balanceOf(user1);
         uint256 sharesBefore = vault.balanceOf(user1);
 
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(true, 100_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(100_000e6);
 
         uint256 sharesAfter = vault.balanceOf(user1);
         uint256 usdcAfter = usdc.balanceOf(user1);
@@ -139,7 +147,7 @@ contract ExitEngine_ForkSuite is Test {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
-    // TEST 2: requestClaim(false) → keeper settles → fee via transfer
+    // TEST 2: requestEpochWithdrawal() → keeper settles → fee via transfer
     // ═══════════════════════════════════════════════════════════════════════════════
 
     function test_fork2_queuedClaim_keeperSettles_feeTransfer() public {
@@ -147,19 +155,24 @@ contract ExitEngine_ForkSuite is Test {
 
         // User queues a claim (not immediate)
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(false, 200_000e6);
+        (uint256 epochId, uint256 claimId) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(200_000e6);
 
         // Shares moved to escrow
-        assertEq(IQueueModule(address(vault)).pendingShares(), 200_000e6, "pending shares");
-        assertEq(IQueueModule(address(vault)).queueLength(), 1, "queue has 1 claim");
+        assertEq(IQueueModule(address(vault)).totalEscrowedShares(), 200_000e6, "pending shares");
+        assertEq(IQueueModule(address(vault)).outstandingClaimCount(), 1, "queue has 1 claim");
 
         // Supply unchanged (shares in escrow, not burned yet)
         assertEq(vault.totalSupply(), supplyBefore, "supply unchanged during queue");
 
         uint256 feeCollectorSharesBefore = vault.balanceOf(feeCollector);
 
-        // Keeper settles
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(10);
+        // Keeper settles: close + fund the epoch, then the user self-claims
+        vm.warp(block.timestamp + 7 days + 1);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epochId);
+        vm.prank(user1);
+        IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
 
         uint256 supplyAfter = vault.totalSupply();
         uint256 feeCollectorSharesAfter = vault.balanceOf(feeCollector);
@@ -175,7 +188,7 @@ contract ExitEngine_ForkSuite is Test {
         assertLe(supplyDrop, 200_000e6, "supply drop <= claimed shares");
 
         // Queue cleared
-        assertEq(IQueueModule(address(vault)).pendingShares(), 0, "queue empty");
+        assertEq(IQueueModule(address(vault)).totalEscrowedShares(), 0, "queue empty");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -186,13 +199,13 @@ contract ExitEngine_ForkSuite is Test {
         // Cap = 10% of 2M = 200K per epoch
         // Claim 150K (under cap) - succeeds
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(true, 150_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(150_000e6);
 
         // Claim another 100K - should queue (total 250K > 200K cap)
-        uint256 pendingBefore = IQueueModule(address(vault)).pendingShares();
+        uint256 pendingBefore = IQueueModule(address(vault)).totalEscrowedShares();
         vm.prank(user2);
-        IQueueModule(address(vault)).requestClaim(true, 100_000e6);
-        uint256 pendingAfter = IQueueModule(address(vault)).pendingShares();
+        IQueueModule(address(vault)).requestInstantWithdrawal(100_000e6);
+        uint256 pendingAfter = IQueueModule(address(vault)).totalEscrowedShares();
 
         // Should have been queued (cap exhausted)
         assertGt(pendingAfter, pendingBefore, "second claim queued due to cap");
@@ -203,30 +216,30 @@ contract ExitEngine_ForkSuite is Test {
         // New claim should succeed (epoch rolled, cap reset)
         uint256 usdcBefore = usdc.balanceOf(user2);
         vm.prank(user2);
-        IQueueModule(address(vault)).requestClaim(true, 50_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(50_000e6);
         uint256 usdcAfter = usdc.balanceOf(user2);
 
         assertGt(usdcAfter, usdcBefore, "claim succeeded after epoch rollover");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
-    // TEST 4: cap exhaustion → requestClaim(true) queues instead of settling
+    // TEST 4: cap exhaustion → requestInstantWithdrawal() queues instead of settling
     // ═══════════════════════════════════════════════════════════════════════════════
 
     function test_fork4_capExhaustion_instantQueues() public {
         // Cap = 10% of 2M = 200K per epoch
         // Use up the cap
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(true, 199_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(199_000e6);
 
         // Next instant claim should queue (cap nearly exhausted)
         uint256 sharesBefore = vault.balanceOf(user2);
-        uint256 pendingBefore = IQueueModule(address(vault)).pendingShares();
+        uint256 pendingBefore = IQueueModule(address(vault)).totalEscrowedShares();
 
         vm.prank(user2);
-        IQueueModule(address(vault)).requestClaim(true, 50_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(50_000e6);
 
-        uint256 pendingAfter = IQueueModule(address(vault)).pendingShares();
+        uint256 pendingAfter = IQueueModule(address(vault)).totalEscrowedShares();
 
         // Shares moved to escrow (queued, not settled)
         assertGt(pendingAfter, pendingBefore, "claim queued when cap exhausted");
@@ -243,13 +256,13 @@ contract ExitEngine_ForkSuite is Test {
     function test_fork5_forceExitBypassesCap() public {
         // Exhaust cap completely
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(true, 199_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(199_000e6);
 
         // Verify cap is nearly exhausted by trying another instant claim
         vm.prank(user2);
-        IQueueModule(address(vault)).requestClaim(true, 50_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(50_000e6);
         // If this queued, cap is exhausted - verify:
-        assertGt(IQueueModule(address(vault)).pendingShares(), 0, "cap exhausted, claims queuing");
+        assertGt(IQueueModule(address(vault)).totalEscrowedShares(), 0, "cap exhausted, claims queuing");
 
         // forceWithdrawAll should still work (bypasses cap)
         uint256 user3SharesBefore = vault.balanceOf(user3);
@@ -275,17 +288,17 @@ contract ExitEngine_ForkSuite is Test {
         // Cap = 10% of 2M = 200K
         // User1 claims 80K (instant, under cap)
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(true, 80_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(80_000e6);
 
         // User2 claims 80K (instant, under cap - cumulative 160K < 200K)
         vm.prank(user2);
-        IQueueModule(address(vault)).requestClaim(true, 80_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(80_000e6);
 
         // User3 claims 80K - should queue (cumulative 240K > 200K cap)
-        uint256 pendingBefore = IQueueModule(address(vault)).pendingShares();
+        uint256 pendingBefore = IQueueModule(address(vault)).totalEscrowedShares();
         vm.prank(user3);
-        IQueueModule(address(vault)).requestClaim(true, 80_000e6);
-        uint256 pendingAfter = IQueueModule(address(vault)).pendingShares();
+        IQueueModule(address(vault)).requestInstantWithdrawal(80_000e6);
+        uint256 pendingAfter = IQueueModule(address(vault)).totalEscrowedShares();
 
         assertGt(pendingAfter, pendingBefore, "user3 claim queued - cap exhausted by multi-user");
     }
@@ -299,21 +312,26 @@ contract ExitEngine_ForkSuite is Test {
 
         // Instant claim - supply must decrease
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(true, 50_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(50_000e6);
 
         uint256 supplyAfterInstant = vault.totalSupply();
         assertLt(supplyAfterInstant, supplyStart, "supply decreased after instant claim");
 
         // Queued claim + settle - supply must decrease further
         vm.prank(user2);
-        IQueueModule(address(vault)).requestClaim(false, 30_000e6);
+        (uint256 epochId, uint256 claimId) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(30_000e6);
 
         uint256 supplyAfterQueue = vault.totalSupply();
         // During queue, shares are in escrow (still counted in supply)
         assertEq(supplyAfterQueue, supplyAfterInstant, "supply unchanged during queue escrow");
 
-        // Settle
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(10);
+        // Settle: close + fund + self-claim
+        vm.warp(block.timestamp + 7 days + 1);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epochId);
+        vm.prank(user2);
+        IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
         uint256 supplyAfterSettle = vault.totalSupply();
         assertLt(supplyAfterSettle, supplyAfterQueue, "supply decreased after settlement");
 
@@ -340,14 +358,14 @@ contract ExitEngine_ForkSuite is Test {
 
         // Claim near cap
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(true, 150_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(150_000e6);
 
         // After 1 day, epoch should roll and cap reset
         vm.warp(block.timestamp + 1 days + 1);
 
         uint256 usdcBefore = usdc.balanceOf(user1);
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(true, 50_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(50_000e6);
         uint256 usdcAfter = usdc.balanceOf(user1);
         assertGt(usdcAfter, usdcBefore, "claim succeeded after 1-day epoch");
 
@@ -358,20 +376,20 @@ contract ExitEngine_ForkSuite is Test {
         vm.warp(block.timestamp + 30 days + 1);
         // Trigger epoch roll with a small claim
         vm.prank(user2);
-        IQueueModule(address(vault)).requestClaim(true, 1_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(1_000e6);
 
         // Now exhaust the fresh cap in this 30-day epoch
         vm.prank(user2);
-        IQueueModule(address(vault)).requestClaim(true, 150_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(150_000e6);
 
         // After 7 days - epoch should NOT roll (30-day epoch, only 7 days passed)
         vm.warp(block.timestamp + 7 days);
 
         // Large claim should exceed remaining cap and queue
-        uint256 pendingBefore = IQueueModule(address(vault)).pendingShares();
+        uint256 pendingBefore = IQueueModule(address(vault)).totalEscrowedShares();
         vm.prank(user3);
-        IQueueModule(address(vault)).requestClaim(true, 100_000e6);
-        uint256 pendingAfter = IQueueModule(address(vault)).pendingShares();
+        IQueueModule(address(vault)).requestInstantWithdrawal(100_000e6);
+        uint256 pendingAfter = IQueueModule(address(vault)).totalEscrowedShares();
         assertGt(pendingAfter, pendingBefore, "claim queued - 30-day epoch not yet rolled");
 
         // After remaining 23+ days - epoch rolls
@@ -379,7 +397,7 @@ contract ExitEngine_ForkSuite is Test {
 
         usdcBefore = usdc.balanceOf(user3);
         vm.prank(user3);
-        IQueueModule(address(vault)).requestClaim(true, 10_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(10_000e6);
         usdcAfter = usdc.balanceOf(user3);
         assertGt(usdcAfter, usdcBefore, "claim succeeded after 30-day epoch roll");
     }
@@ -394,13 +412,14 @@ contract ExitEngine_ForkSuite is Test {
         // Mode 1: INSTANT claim
         uint256 user1UsdcBefore = usdc.balanceOf(user1);
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(true, 50_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(50_000e6);
         assertGt(usdc.balanceOf(user1), user1UsdcBefore, "instant: received USDC");
 
         // Mode 2: QUEUED claim (same epoch)
         vm.prank(user2);
-        IQueueModule(address(vault)).requestClaim(false, 30_000e6);
-        assertEq(IQueueModule(address(vault)).queueLength(), 1, "queued: 1 in queue");
+        (uint256 epochId, uint256 claimId) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(30_000e6);
+        assertEq(IQueueModule(address(vault)).outstandingClaimCount(), 1, "queued: 1 in queue");
 
         // Mode 3: FORCE withdrawal (same epoch)
         uint256 user3UsdcBefore = usdc.balanceOf(user3);
@@ -409,9 +428,13 @@ contract ExitEngine_ForkSuite is Test {
         assertGt(usdc.balanceOf(user3), user3UsdcBefore, "force: received USDC");
         assertEq(vault.balanceOf(user3), 0, "force: user3 fully exited");
 
-        // Settle the queued claim
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(10);
-        assertEq(IQueueModule(address(vault)).queueLength(), 0, "queue settled");
+        // Settle the queued claim: close + fund + self-claim
+        vm.warp(block.timestamp + 7 days + 1);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epochId);
+        vm.prank(user2);
+        IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
+        assertEq(IQueueModule(address(vault)).outstandingClaimCount(), 0, "queue settled");
 
         // INVARIANT: supply only decreased
         assertLt(vault.totalSupply(), supplyStart, "supply decreased from mixed exits");
@@ -425,12 +448,12 @@ contract ExitEngine_ForkSuite is Test {
         // Set NAV to stale (warp past 15min)
         vm.warp(block.timestamp + 20 minutes);
 
-        // requestClaim(true) should still work (soft refresh, W2 = never block)
+        // requestInstantWithdrawal should still work (soft refresh, W2 = never block)
         uint256 usdcBefore = usdc.balanceOf(user1);
         uint256 sharesBefore = vault.balanceOf(user1);
 
         vm.prank(user1);
-        IQueueModule(address(vault)).requestClaim(true, 50_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(50_000e6);
 
         uint256 usdcAfter = usdc.balanceOf(user1);
         uint256 sharesAfter = vault.balanceOf(user1);
@@ -442,12 +465,17 @@ contract ExitEngine_ForkSuite is Test {
         vm.warp(block.timestamp + 20 minutes);
 
         vm.prank(user2);
-        IQueueModule(address(vault)).requestClaim(false, 30_000e6);
+        (uint256 epochId, uint256 claimId) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(30_000e6);
 
-        vm.warp(block.timestamp + 20 minutes);
+        // Warp well past the min epoch duration (also keeps NAV stale)
+        vm.warp(block.timestamp + 7 days + 1);
 
         uint256 user2UsdcBefore = usdc.balanceOf(user2);
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(10);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epochId);
+        vm.prank(user2);
+        IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
         uint256 user2UsdcAfter = usdc.balanceOf(user2);
 
         assertGt(user2UsdcAfter, user2UsdcBefore, "settlement works with stale NAV");

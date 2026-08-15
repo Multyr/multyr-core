@@ -7,7 +7,7 @@ import { AccessControl } from "@openzeppelin/contracts/access/AccessControl.sol"
 
 // Core
 import { CoreVault } from "../../src/core/CoreVault.sol";
-import { QueueModule } from "../../src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "../../src/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "../../src/core/modules/AdminModule.sol";
 import { BufferManager } from "../../src/core/modules/BufferManager.sol";
 import { StrategyRouter } from "../../src/core/modules/StrategyRouter.sol";
@@ -76,7 +76,7 @@ contract DeploymentEquivalence_Test is Test {
 
     struct FullDeployResult {
         CoreVault vault;
-        QueueModule queueModule;
+        EpochedQueueModule queueModule;
         AdminModule adminModule;
         BufferManager bufferManager;
         StrategyRouter strategyRouter;
@@ -156,7 +156,7 @@ contract DeploymentEquivalence_Test is Test {
         // Set SelectorRegistry BEFORE any routing
         result.vault.setSelectorRegistry(address(result.selectorRegistry));
 
-        result.queueModule = new QueueModule();
+        result.queueModule = new EpochedQueueModule();
         result.adminModule = new AdminModule();
 
         // Phase 4: Ecosystem
@@ -296,7 +296,7 @@ contract DeploymentEquivalence_Test is Test {
         // Set SelectorRegistry BEFORE any routing
         result.vault.setSelectorRegistry(address(result.selectorRegistry));
 
-        result.queueModule = new QueueModule();
+        result.queueModule = new EpochedQueueModule();
         result.adminModule = new AdminModule();
 
         // === DeployCoreSystem Phase 4: Ecosystem Base ===

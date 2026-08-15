@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { CoreVault } from "../core/CoreVault.sol";
-import { QueueModule } from "../core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "../core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "../core/modules/AdminModule.sol";
 import { ERC4626Module } from "../core/modules/ERC4626Module.sol";
 import { LiquidityOpsModule } from "../core/modules/LiquidityOpsModule.sol";
@@ -32,7 +32,7 @@ library DeployTypes {
 
     struct DeployResult {
         CoreVault vault;
-        QueueModule queueModule;
+        EpochedQueueModule queueModule;
         AdminModule adminModule;
         ERC4626Module erc4626Module;
         LiquidityOpsModule liquidityOpsModule;

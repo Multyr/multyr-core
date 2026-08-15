@@ -24,7 +24,7 @@ import { Test } from "forge-std/Test.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 import { CoreVault } from "../../src/core/CoreVault.sol";
-import { QueueModule } from "../../src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "../../src/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "../../src/core/modules/AdminModule.sol";
 import { ERC4626Module } from "../../src/core/modules/ERC4626Module.sol";
 import { LiquidityOpsModule } from "../../src/core/modules/LiquidityOpsModule.sol";
@@ -316,7 +316,7 @@ contract SystemSealer_DecimalsGuard_Test is Test {
     function _wireModules(address selectorRegistry) internal {
         vault.setSelectorRegistry(selectorRegistry);
 
-        QueueModule qm        = new QueueModule();
+        EpochedQueueModule qm = new EpochedQueueModule();
         AdminModule am        = new AdminModule();
         ERC4626Module e4626   = new ERC4626Module();
         LiquidityOpsModule lo = new LiquidityOpsModule();

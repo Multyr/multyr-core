@@ -12,13 +12,21 @@ import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTes
 import { ExitEngineLib } from "../../../src/core/libraries/ExitEngineLib.sol";
 
 interface IQueueModule {
-    function requestClaim(bool immediate, uint256 shares) external;
-    function cancelClaim(uint256 claimId) external;
-    function processQueuedRedemptions(uint256 maxClaims) external;
-    function settleFeesAndProcessQueue(uint256 maxClaims) external;
-    function nextClaimId() external view returns (uint256);
-    function queueLength() external view returns (uint256);
-    function pendingShares() external view returns (uint256);
+    function requestInstantWithdrawal(uint256 shares)
+        external
+        returns (bool settledImmediately, uint256 epochId, uint256 claimId);
+    function requestEpochWithdrawal(uint256 shares)
+        external
+        returns (uint256 epochId, uint256 claimId);
+    function cancelEpochWithdrawal(uint256 epochId, uint256 claimId) external;
+    function closeCurrentEpoch() external;
+    function fundEpoch(uint256 epochId) external;
+    function claimEpochAssets(uint256 epochId, uint256 claimId) external returns (uint256 assets);
+    function currentEpochId() external view returns (uint256);
+    function canCloseCurrentEpoch() external view returns (bool);
+    function currentEpochClaimCount() external view returns (uint256);
+    function outstandingClaimCount() external view returns (uint256);
+    function totalEscrowedShares() external view returns (uint256);
     function endEpochCrystallize() external;
 }
 
@@ -33,8 +41,8 @@ interface IDepositFor {
 /// @title ExitEngine Stress Test - Multi-User 300M TVL
 /// @notice Tests ALL protocol paths under high TVL with multiple users:
 ///   - Direct deposit + DepositRouter-style depositFor
-///   - requestClaim(true) instant exit
-///   - requestClaim(false) queued exit + keeper settlement
+///   - requestInstantWithdrawal() instant exit
+///   - requestEpochWithdrawal() queued exit + keeper settlement
 ///   - forceWithdrawAll
 ///   - Queue cleanup
 ///   - Cap exhaustion + epoch rollover
@@ -172,7 +180,7 @@ contract ExitEngine_StressTest is Test {
         vm.stopPrank();
 
         // ═══════════════════════════════════════════════════════════════════════
-        // PHASE 3: Instant claims (requestClaim(true)) + cap tracking
+        // PHASE 3: Instant claims (requestInstantWithdrawal()) + cap tracking
         // ═══════════════════════════════════════════════════════════════════════
 
         console2.log("=== PHASE 3: Instant claims + cap ===");
@@ -183,18 +191,18 @@ contract ExitEngine_StressTest is Test {
         // User0 claims 10M instant
         uint256 gasStart = gasleft();
         vm.prank(users[0]);
-        IQueueModule(address(vault)).requestClaim(true, 10_000_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(10_000_000e6);
         uint256 gasUsed = gasStart - gasleft();
-        console2.log("requestClaim(true, 10M) gas:", gasUsed);
+        console2.log("requestInstantWithdrawal(10M) gas:", gasUsed);
         assertLt(gasUsed, GAS_LIMIT, "instant claim gas < 5M");
 
         // User1 claims 10M instant
         vm.prank(users[1]);
-        IQueueModule(address(vault)).requestClaim(true, 10_000_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(10_000_000e6);
 
         // User2 claims 10M instant — should be near cap
         vm.prank(users[2]);
-        IQueueModule(address(vault)).requestClaim(true, 10_000_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(10_000_000e6);
 
         uint256 supplyAfterInstant = vault.totalSupply();
         assertLt(supplyAfterInstant, supplyBefore, "supply decreased from instant claims");
@@ -206,13 +214,13 @@ contract ExitEngine_StressTest is Test {
 
         console2.log("=== PHASE 4: Cap exhaustion ===");
 
-        uint256 pendingBefore = IQueueModule(address(vault)).pendingShares();
+        uint256 pendingBefore = IQueueModule(address(vault)).totalEscrowedShares();
 
         // User3 tries instant 5M — should queue (cap nearly exhausted)
         vm.prank(users[3]);
-        IQueueModule(address(vault)).requestClaim(true, 5_000_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(5_000_000e6);
 
-        uint256 pendingAfter = IQueueModule(address(vault)).pendingShares();
+        uint256 pendingAfter = IQueueModule(address(vault)).totalEscrowedShares();
         // If cap was exhausted, claim was queued
         if (pendingAfter > pendingBefore) {
             console2.log("Cap exhausted - claim queued. Pending:", pendingAfter / 1e6);
@@ -221,19 +229,22 @@ contract ExitEngine_StressTest is Test {
         }
 
         // ═══════════════════════════════════════════════════════════════════════
-        // PHASE 5: Queued claims (requestClaim(false)) — multiple users
+        // PHASE 5: Queued claims (requestEpochWithdrawal()) — multiple users
         // ═══════════════════════════════════════════════════════════════════════
 
         console2.log("=== PHASE 5: Queued claims ===");
 
-        // Users 4-7 queue 5M each
+        // Users 4-7 queue 5M each into the same epoch
+        uint256[4] memory queuedClaimIds;
+        uint256 queuedEpochId;
         for (uint256 i = 4; i <= 7; i++) {
             vm.prank(users[i]);
-            IQueueModule(address(vault)).requestClaim(false, 5_000_000e6);
+            (queuedEpochId, queuedClaimIds[i - 4]) =
+                IQueueModule(address(vault)).requestEpochWithdrawal(5_000_000e6);
         }
 
-        uint256 queueLen = IQueueModule(address(vault)).queueLength();
-        uint256 pendingTotal = IQueueModule(address(vault)).pendingShares();
+        uint256 queueLen = IQueueModule(address(vault)).outstandingClaimCount();
+        uint256 pendingTotal = IQueueModule(address(vault)).totalEscrowedShares();
         console2.log("Queue length:", queueLen);
         console2.log("Pending shares:", pendingTotal / 1e6, "M");
         assertGt(queueLen, 0, "queue has claims");
@@ -247,11 +258,19 @@ contract ExitEngine_StressTest is Test {
         uint256 feeCollectorBefore = vault.balanceOf(feeCollector);
         uint256 supplyBeforeSettle = vault.totalSupply();
 
+        vm.warp(block.timestamp + 7 days + 1);
         gasStart = gasleft();
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(25);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(queuedEpochId);
         gasUsed = gasStart - gasleft();
-        console2.log("settleFeesAndProcessQueue(25) gas:", gasUsed);
+        console2.log("closeCurrentEpoch + fundEpoch gas:", gasUsed);
         assertLt(gasUsed, GAS_LIMIT, "settle gas < 5M");
+
+        // Each user self-claims (pull-based)
+        for (uint256 i = 4; i <= 7; i++) {
+            vm.prank(users[i]);
+            IQueueModule(address(vault)).claimEpochAssets(queuedEpochId, queuedClaimIds[i - 4]);
+        }
 
         uint256 feeCollectorAfter = vault.balanceOf(feeCollector);
         uint256 supplyAfterSettle = vault.totalSupply();
@@ -263,14 +282,9 @@ contract ExitEngine_StressTest is Test {
         assertGe(feeCollectorAfter, feeCollectorBefore, "feeCollector got fee shares");
         console2.log("FeeCollector shares:", feeCollectorAfter / 1e6);
 
-        // Settle remaining if any
-        uint256 remaining = IQueueModule(address(vault)).queueLength();
-        if (remaining > 0) {
-            console2.log("Remaining in queue:", remaining);
-            IQueueModule(address(vault)).settleFeesAndProcessQueue(50);
-            remaining = IQueueModule(address(vault)).queueLength();
-            console2.log("After second settle:", remaining);
-        }
+        // All 4 queued claims settled -- verify no zombies
+        uint256 remaining = IQueueModule(address(vault)).outstandingClaimCount();
+        console2.log("Remaining in queue:", remaining);
 
         // ═══════════════════════════════════════════════════════════════════════
         // PHASE 7: Epoch rollover + fresh claims
@@ -283,7 +297,7 @@ contract ExitEngine_StressTest is Test {
         // After epoch roll, fresh cap available
         uint256 user8UsdcBefore = usdc.balanceOf(users[8]);
         vm.prank(users[8]);
-        IQueueModule(address(vault)).requestClaim(true, 5_000_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(5_000_000e6);
         uint256 user8UsdcAfter = usdc.balanceOf(users[8]);
         assertGt(user8UsdcAfter, user8UsdcBefore, "instant claim succeeded after epoch roll");
         console2.log("User8 received:", (user8UsdcAfter - user8UsdcBefore) / 1e6, "USDC");
@@ -339,8 +353,8 @@ contract ExitEngine_StressTest is Test {
         console2.log("Final assets:", finalAssets / 1e6, "USDC");
         console2.log("Final supply:", finalSupply / 1e6, "shares");
         console2.log("FeeCollector shares:", finalFeeShares / 1e6);
-        console2.log("Queue length:", IQueueModule(address(vault)).queueLength());
-        console2.log("Pending shares:", IQueueModule(address(vault)).pendingShares() / 1e6);
+        console2.log("Queue length:", IQueueModule(address(vault)).outstandingClaimCount());
+        console2.log("Pending shares:", IQueueModule(address(vault)).totalEscrowedShares() / 1e6);
 
         // INVARIANT: supply < initial (exits happened)
         assertLt(finalSupply, 300_001_000e6, "supply decreased from exits");
@@ -368,57 +382,69 @@ contract ExitEngine_StressTest is Test {
         console2.log("=== Keeper Gas at 300M TVL ===");
         console2.log("Total assets:", vault.totalAssets() / 1e6, "USDC");
 
-        // --- requestClaim(true) gas ---
+        // --- requestInstantWithdrawal gas ---
         uint256 g;
         g = gasleft();
         vm.prank(users[0]);
-        IQueueModule(address(vault)).requestClaim(true, 1_000_000e6);
-        console2.log("requestClaim(true, 1M):", g - gasleft());
+        IQueueModule(address(vault)).requestInstantWithdrawal(1_000_000e6);
+        console2.log("requestInstantWithdrawal(1M):", g - gasleft());
         assertLt(g - gasleft(), GAS_LIMIT, "instant claim < 5M");
 
-        // --- requestClaim(false) gas ---
+        // --- requestEpochWithdrawal gas ---
         g = gasleft();
         vm.prank(users[1]);
-        IQueueModule(address(vault)).requestClaim(false, 1_000_000e6);
-        console2.log("requestClaim(false, 1M):", g - gasleft());
+        (uint256 epochId1, uint256 claimId1) =
+            IQueueModule(address(vault)).requestEpochWithdrawal(1_000_000e6);
+        console2.log("requestEpochWithdrawal(1M):", g - gasleft());
         assertLt(g - gasleft(), GAS_LIMIT, "queued claim < 5M");
 
-        // --- settleFeesAndProcessQueue gas (1 claim) ---
+        // --- closeCurrentEpoch + fundEpoch gas (1 claim) ---
+        // NOTE: track elapsed time via a local `t` instead of repeated
+        // `block.timestamp + X` re-reads -- this codebase's test suite has a
+        // known Foundry quirk where a second vm.warp() computed from
+        // block.timestamp mid-test can behave as if time had reset.
+        uint256 t = block.timestamp;
+        t += 7 days + 1;
+        vm.warp(t);
         g = gasleft();
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(10);
-        console2.log("settleFeesAndProcessQueue(10):", g - gasleft());
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epochId1);
+        console2.log("closeCurrentEpoch+fundEpoch (1 claim):", g - gasleft());
         assertLt(g - gasleft(), GAS_LIMIT, "settle < 5M");
 
-        // --- Queue 20 claims then settle batch ---
+        // --- claimEpochAssets gas (per-user self-claim, pull-based) ---
+        g = gasleft();
+        vm.prank(users[1]);
+        IQueueModule(address(vault)).claimEpochAssets(epochId1, claimId1);
+        console2.log("claimEpochAssets:", g - gasleft());
+        assertLt(g - gasleft(), GAS_LIMIT, "claim < 5M");
+
+        // --- Queue 9 claims into a new epoch then close+fund (O(1) regardless of depth) ---
         for (uint256 i = 2; i < 8; i++) {
             vm.prank(users[i]);
-            IQueueModule(address(vault)).requestClaim(false, 500_000e6);
+            IQueueModule(address(vault)).requestEpochWithdrawal(500_000e6);
         }
         // 3 more from same users
+        uint256 epochId2;
         for (uint256 i = 2; i < 5; i++) {
             vm.prank(users[i]);
-            IQueueModule(address(vault)).requestClaim(false, 500_000e6);
+            (epochId2,) = IQueueModule(address(vault)).requestEpochWithdrawal(500_000e6);
         }
 
+        t += 7 days + 1;
+        vm.warp(t);
         g = gasleft();
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(25);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epochId2);
         uint256 settleGas = g - gasleft();
-        console2.log("settleFeesAndProcessQueue(25) batch:", settleGas);
+        console2.log("closeCurrentEpoch+fundEpoch (9 claims):", settleGas);
         assertLt(settleGas, GAS_LIMIT, "batch settle < 5M");
-
-        // --- processQueuedRedemptions gas (no cap) ---
-        vm.prank(users[8]);
-        IQueueModule(address(vault)).requestClaim(false, 1_000_000e6);
-
-        g = gasleft();
-        IQueueModule(address(vault)).processQueuedRedemptions(10);
-        console2.log("processQueuedRedemptions(10):", g - gasleft());
-        assertLt(g - gasleft(), GAS_LIMIT, "processQueued < 5M");
 
         // --- endEpochCrystallize gas ---
         vault.setPerfParamsUnsafe(10e16, 3600);
         usdc._mint(address(vault), 1_000_000e6); // simulate profit
-        vm.warp(block.timestamp + 1 days);
+        t += 1 days;
+        vm.warp(t);
 
         g = gasleft();
         IQueueModule(address(vault)).endEpochCrystallize();
@@ -465,8 +491,29 @@ contract ExitEngine_StressTest is Test {
     // TEST: Multi-day simulation with deposits/claims/settlements
     // ═══════════════════════════════════════════════════════════════════════════
 
+    /// @dev Tracks a queued claim across the multi-day lifecycle so it can be
+    ///      self-claimed once its epoch is closed + funded. In the epoch model,
+    ///      settlement is gated on the epoch's minimum duration (7 days by
+    ///      default), not on-demand per keeper call like QueueModule -- so
+    ///      claims queued across "Day 1" through "Day 4" all land in the SAME
+    ///      open epoch and are settled together once, on "Day 8" (7+ cumulative
+    ///      days later), rather than after each day.
+    struct DayClaim {
+        address user;
+        uint256 epochId;
+        uint256 claimId;
+    }
+
     function test_stress_multiDay_lifecycle() public {
         console2.log("=== Multi-Day Lifecycle ===");
+
+        DayClaim[] memory dayClaims = new DayClaim[](5);
+        uint256 nClaims;
+        // NOTE: track elapsed time via a local `t` instead of repeated
+        // `block.timestamp + X` re-reads -- this codebase's test suite has a
+        // known Foundry quirk where a second vm.warp() computed from
+        // block.timestamp mid-test can behave as if time had reset.
+        uint256 t = block.timestamp;
 
         // DAY 1: Initial deposits to 100M
         for (uint256 i = 0; i < 10; i++) {
@@ -476,17 +523,19 @@ contract ExitEngine_StressTest is Test {
 
         // DAY 1: Mix of instant + queued claims
         vm.prank(users[0]);
-        IQueueModule(address(vault)).requestClaim(true, 2_000_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(2_000_000e6);
         vm.prank(users[1]);
-        IQueueModule(address(vault)).requestClaim(false, 3_000_000e6);
+        {
+            (uint256 epochId, uint256 claimId) =
+                IQueueModule(address(vault)).requestEpochWithdrawal(3_000_000e6);
+            dayClaims[nClaims++] = DayClaim(users[1], epochId, claimId);
+        }
         vm.prank(users[2]);
-        IQueueModule(address(vault)).requestClaim(true, 1_000_000e6);
-
-        // Keeper settles queue
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(25);
+        IQueueModule(address(vault)).requestInstantWithdrawal(1_000_000e6);
 
         // DAY 2: More deposits + withdrawals
-        vm.warp(block.timestamp + 1 days);
+        t += 1 days;
+        vm.warp(t);
 
         // New deposits via depositFor (router pattern)
         _depositFor(router, users[0], 5_000_000e6);
@@ -494,40 +543,43 @@ contract ExitEngine_StressTest is Test {
 
         // More claims
         vm.prank(users[3]);
-        IQueueModule(address(vault)).requestClaim(true, 500_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(500_000e6);
         vm.prank(users[4]);
-        IQueueModule(address(vault)).requestClaim(false, 2_000_000e6);
-
-        // Keeper settles
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(25);
+        {
+            (uint256 epochId, uint256 claimId) =
+                IQueueModule(address(vault)).requestEpochWithdrawal(2_000_000e6);
+            dayClaims[nClaims++] = DayClaim(users[4], epochId, claimId);
+        }
 
         // DAY 3: Ramp up to 200M
-        vm.warp(block.timestamp + 1 days);
+        t += 1 days;
+        vm.warp(t);
         for (uint256 i = 0; i < 10; i++) {
             _deposit(users[i], 10_000_000e6);
         }
         console2.log("Day 3 TVL:", vault.totalAssets() / 1e6);
 
         // DAY 4: Heavy exit pressure
-        vm.warp(block.timestamp + 1 days);
+        t += 1 days;
+        vm.warp(t);
 
         // 5 users instant claim 5M each
         for (uint256 i = 0; i < 5; i++) {
             vm.prank(users[i]);
-            IQueueModule(address(vault)).requestClaim(true, 5_000_000e6);
+            IQueueModule(address(vault)).requestInstantWithdrawal(5_000_000e6);
         }
 
         // 3 users queue 3M each
         for (uint256 i = 5; i < 8; i++) {
             vm.prank(users[i]);
-            IQueueModule(address(vault)).requestClaim(false, 3_000_000e6);
+            (uint256 epochId, uint256 claimId) =
+                IQueueModule(address(vault)).requestEpochWithdrawal(3_000_000e6);
+            dayClaims[nClaims++] = DayClaim(users[i], epochId, claimId);
         }
 
-        // Keeper settles
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(50);
-
         // DAY 7: Epoch rollover + crystallize
-        vm.warp(block.timestamp + 3 days);
+        t += 3 days;
+        vm.warp(t);
 
         // Simulate profit
         usdc._mint(address(vault), 200_000e6);
@@ -542,20 +594,30 @@ contract ExitEngine_StressTest is Test {
         console2.log("Day 7 TVL:", vault.totalAssets() / 1e6);
 
         // DAY 8: Force withdraw + instant + queued
-        vm.warp(block.timestamp + 1 days);
+        t += 1 days;
+        vm.warp(t);
 
         vm.prank(users[9]);
         IForceWithdrawAll(address(vault)).forceWithdrawAll(users[9], 0);
         assertEq(vault.balanceOf(users[9]), 0, "user9 fully exited");
 
         vm.prank(users[8]);
-        IQueueModule(address(vault)).requestClaim(true, 1_000_000e6);
+        IQueueModule(address(vault)).requestInstantWithdrawal(1_000_000e6);
 
+        // Cumulative elapsed since Day 1 is now 7 days -- the epoch all the
+        // above queued claims landed in (never closed until now) is eligible.
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        uint256 settledEpochId = dayClaims[0].epochId;
+        IQueueModule(address(vault)).fundEpoch(settledEpochId);
+        for (uint256 i = 0; i < nClaims; i++) {
+            vm.prank(dayClaims[i].user);
+            IQueueModule(address(vault)).claimEpochAssets(dayClaims[i].epochId, dayClaims[i].claimId);
+        }
+
+        // Day 8's own queued claim lands in the epoch that just opened after
+        // the close above -- leave it outstanding (not yet eligible to close).
         vm.prank(users[7]);
-        IQueueModule(address(vault)).requestClaim(false, 2_000_000e6);
-
-        // Final settle
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(50);
+        IQueueModule(address(vault)).requestEpochWithdrawal(2_000_000e6);
 
         // FINAL CHECKS
         uint256 finalAssets = vault.totalAssets();
@@ -565,7 +627,7 @@ contract ExitEngine_StressTest is Test {
         console2.log("Final TVL:", finalAssets / 1e6);
         console2.log("Final supply:", finalSupply / 1e6);
         console2.log("Fee shares:", finalFeeShares / 1e6);
-        console2.log("Queue:", IQueueModule(address(vault)).queueLength());
+        console2.log("Queue:", IQueueModule(address(vault)).outstandingClaimCount());
 
         assertGt(finalFeeShares, 0, "fees collected");
         assertEq(vault.balanceOf(users[9]), 0, "user9 exited");

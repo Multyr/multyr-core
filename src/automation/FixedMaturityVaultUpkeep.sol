@@ -5,7 +5,7 @@ import { AutomationCompatibleInterface } from "./AutomationCompatibleInterface.s
 import { IFixedMaturityModule } from "../interfaces/IFixedMaturityModule.sol";
 import { IFixedTermStrategy } from "../interfaces/IFixedTermStrategy.sol";
 import { VaultMode, VaultState } from "../core/storage/FixedMaturityStorage.sol";
-import { IQueueModule } from "../interfaces/IQueueModule.sol";
+import { EpochedQueueModule } from "../core/modules/EpochedQueueModule.sol";
 
 // ── Upkeep opcodes ────────────────────────────────────────────────────────────
 uint8 constant OP_NONE            = 0;
@@ -14,9 +14,10 @@ uint8 constant OP_FM_FAIL         = 2; // Funding -> FundingFailed
 uint8 constant OP_FM_ACTIVATE     = 3; // Starting -> Active (+ deploy via StrategyRouter)
 uint8 constant OP_FM_MARK_MATURED = 4; // Active -> Matured
 uint8 constant OP_FM_RECALL       = 5; // Matured: recall capital via Core -> Router -> Strategy
-uint8 constant OP_FM_SETTLE       = 6; // Matured: settleFeesAndProcessQueue batch
-uint8 constant OP_FM_CLOSE        = 7; // Matured -> Closed (pendingShares == 0)
-uint8 constant OP_FM_MONITOR_ONLY = 8; // explicit no-op for monitoring
+uint8 constant OP_FM_EPOCH_CLOSE  = 6; // Matured: closeCurrentEpoch() (epoch-model queue)
+uint8 constant OP_FM_EPOCH_FUND   = 7; // Matured: fundEpoch(oldestUnfundedEpochId)
+uint8 constant OP_FM_CLOSE        = 8; // Matured -> Closed (outstandingClaimCount == 0)
+uint8 constant OP_FM_MONITOR_ONLY = 9; // explicit no-op for monitoring
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 error InvalidFixedMaturityVault();
@@ -30,17 +31,28 @@ error UnknownOperation();
 contract FixedMaturityVaultUpkeep is AutomationCompatibleInterface {
 
     address public immutable vault;
-    uint32  public immutable maxSettleClaimsPerUpkeep;
     bool    public immutable strictMode;
+
+    // EPOCH_FUND stall backoff -- mirrors VaultUpkeep.sol's mechanism. In the
+    // Matured state, EPOCH_FUND and EPOCH_CLOSE are the ONLY two ops, and
+    // fundEpoch() can legitimately no-op forever under a persistent liquidity
+    // shortfall. Without this, checkUpkeep's unconditional EPOCH_FUND
+    // priority would starve EPOCH_CLOSE indefinitely for any claims
+    // accumulating in the still-open epoch. No Ownable here, so the
+    // threshold/backoff are fixed rather than governance-configurable.
+    uint256 internal lastEpochFundTargetId = type(uint256).max;
+    uint16  internal epochFundStallCount;
+    uint64  internal lastEpochFundStallTs;
+    uint16  internal constant EPOCH_FUND_STALL_THRESHOLD = 1;
+    uint32  internal constant EPOCH_FUND_STALL_BACKOFF_SECONDS = 900; // 15min
 
     event FixedMaturityUpkeepChecked(uint8 indexed op, bool upkeepNeeded, uint8 indexed state);
     event FixedMaturityUpkeepPerformed(uint8 indexed op, uint8 indexed stateBefore, uint8 indexed stateAfter);
     event FixedMaturityUpkeepNoOp(uint8 indexed op, uint8 indexed state);
 
-    constructor(address vault_, uint32 maxClaims_, bool strict_) {
+    constructor(address vault_, bool strict_) {
         if (vault_ == address(0)) revert InvalidFixedMaturityVault();
         vault = vault_;
-        maxSettleClaimsPerUpkeep = maxClaims_ == 0 ? 15 : maxClaims_;
         strictMode = strict_;
     }
 
@@ -62,7 +74,7 @@ contract FixedMaturityVaultUpkeep is AutomationCompatibleInterface {
             uint256 net      = IFixedMaturityModule(vault).netFundedAssets();
             uint256 minFunds = IFixedMaturityModule(vault).minFundingAssets();
             bool deadlinePassed = block.timestamp >= deadline;
-            if (deadlinePassed && net < minFunds)  return (true, abi.encode(OP_FM_FAIL));
+            if (deadlinePassed && net < minFunds)  return (true, abi.encode(OP_FM_FAIL, uint256(0)));
             return (false, "");
         }
 
@@ -74,7 +86,7 @@ contract FixedMaturityVaultUpkeep is AutomationCompatibleInterface {
             if (block.timestamp >= IFixedMaturityModule(vault).maturityTs()) {
                 address strat = IFixedMaturityModule(vault).fixedTermStrategy();
                 if (_stratIsMaturityReady(strat)) {
-                    return (true, abi.encode(OP_FM_MARK_MATURED));
+                    return (true, abi.encode(OP_FM_MARK_MATURED, uint256(0)));
                 }
                 return (false, "");
             }
@@ -86,8 +98,29 @@ contract FixedMaturityVaultUpkeep is AutomationCompatibleInterface {
             // Once the matured strategy is fully drained, queue settlement must
             // resume even if the strategy continues to report "maturity ready".
             if (_stratWithdrawable(strat) > 0) return (false, "");
-            uint256 pending = _pendingShares();
-            if (pending > 0) return (true, abi.encode(OP_FM_SETTLE));
+
+            // Priority: unlock a backlogged closed-but-unfunded epoch first —
+            // fundEpoch() runs its own liquidity waterfall internally. Unless
+            // this exact epoch already stalled past the threshold, in which
+            // case yield to EPOCH_CLOSE for a cooldown window so claims
+            // accumulating in the still-open epoch aren't blocked forever by
+            // one persistently-underfunded epoch.
+            uint256 oldestUnfunded = _oldestUnfundedEpochId();
+            uint256 curEpoch = _currentEpochId();
+            if (oldestUnfunded < curEpoch) {
+                bool stalled = oldestUnfunded == lastEpochFundTargetId
+                    && epochFundStallCount >= EPOCH_FUND_STALL_THRESHOLD
+                    && block.timestamp < uint256(lastEpochFundStallTs) + uint256(EPOCH_FUND_STALL_BACKOFF_SECONDS);
+                if (!stalled) {
+                    return (true, abi.encode(OP_FM_EPOCH_FUND, oldestUnfunded));
+                }
+            }
+
+            // Otherwise close the current epoch once its min duration has
+            // elapsed, but only if it actually has claims (anti-churn).
+            if (_canCloseCurrentEpoch() && _currentEpochClaimCount() > 0) {
+                return (true, abi.encode(OP_FM_EPOCH_CLOSE, uint256(0)));
+            }
             return (false, "");
         }
 
@@ -100,7 +133,7 @@ contract FixedMaturityVaultUpkeep is AutomationCompatibleInterface {
     // ═══════════════════════════════════════════════════════════════════════════
 
     function performUpkeep(bytes calldata performData) external override {
-        uint8 op = abi.decode(performData, (uint8));
+        (uint8 op, uint256 arg) = _decode(performData);
         (, VaultState stateBefore) = IFixedMaturityModule(vault).currentVaultModeAndState();
 
         // Stale performData protection: mode must still be FixedMaturity
@@ -122,8 +155,33 @@ contract FixedMaturityVaultUpkeep is AutomationCompatibleInterface {
         } else if (op == OP_FM_RECALL) {
             // Always via Core → StrategyRouter → Strategy, never direct strategy call
             IFixedMaturityModule(vault).recallFixedTermCapital();
-        } else if (op == OP_FM_SETTLE) {
-            IQueueModule(vault).settleFeesAndProcessQueue(maxSettleClaimsPerUpkeep);
+        } else if (op == OP_FM_EPOCH_CLOSE) {
+            EpochedQueueModule(vault).closeCurrentEpoch();
+        } else if (op == OP_FM_EPOCH_FUND) {
+            // fundEpoch() runs its own warm-refill -> strategy-redeem waterfall
+            // internally; a partial fund is retried next cycle, not a failure.
+            // Swallowed deliberately: a revert here (an already-Funded target,
+            // say) is a stall like any other, and must still be accounted for
+            // below. Leaving it to bubble would skip the bookkeeping entirely
+            // and let EPOCH_FUND keep its unconditional priority forever.
+            try EpochedQueueModule(vault).fundEpoch(arg) { } catch { }
+
+            // Track whether this attempt made progress on the SAME target
+            // epoch, so checkUpkeep can yield priority once it stalls. Runs on
+            // both outcomes -- a revert is a stall, not a non-event.
+            uint256 stillOldest = _oldestUnfundedEpochId();
+            if (stillOldest == arg) {
+                if (lastEpochFundTargetId == arg) {
+                    epochFundStallCount++;
+                } else {
+                    lastEpochFundTargetId = arg;
+                    epochFundStallCount = 1;
+                }
+                lastEpochFundStallTs = uint64(block.timestamp);
+            } else {
+                lastEpochFundTargetId = type(uint256).max;
+                epochFundStallCount = 0;
+            }
         } else if (op == OP_FM_CLOSE) {
             IFixedMaturityModule(vault).closeFixedMaturityCycle();
         } else if (op == OP_FM_MONITOR_ONLY) {
@@ -158,10 +216,39 @@ contract FixedMaturityVaultUpkeep is AutomationCompatibleInterface {
         if (ok && data.length == 32) ready = abi.decode(data, (bool));
     }
 
-    function _pendingShares() internal view returns (uint256 pending) {
+    function _oldestUnfundedEpochId() internal view returns (uint256 id) {
         (bool ok, bytes memory data) = vault.staticcall(
-            abi.encodeWithSignature("pendingShares()")
+            abi.encodeWithSignature("oldestUnfundedEpochId()")
         );
-        if (ok && data.length == 32) pending = abi.decode(data, (uint256));
+        if (ok && data.length == 32) id = abi.decode(data, (uint256));
+    }
+
+    function _currentEpochId() internal view returns (uint256 id) {
+        (bool ok, bytes memory data) = vault.staticcall(
+            abi.encodeWithSignature("currentEpochId()")
+        );
+        if (ok && data.length == 32) id = abi.decode(data, (uint256));
+    }
+
+    function _canCloseCurrentEpoch() internal view returns (bool ready) {
+        (bool ok, bytes memory data) = vault.staticcall(
+            abi.encodeWithSignature("canCloseCurrentEpoch()")
+        );
+        if (ok && data.length == 32) ready = abi.decode(data, (bool));
+    }
+
+    function _currentEpochClaimCount() internal view returns (uint256 count) {
+        (bool ok, bytes memory data) = vault.staticcall(
+            abi.encodeWithSignature("currentEpochClaimCount()")
+        );
+        if (ok && data.length == 32) count = abi.decode(data, (uint256));
+    }
+
+    function _decode(bytes calldata data) internal pure returns (uint8 op, uint256 arg) {
+        if (data.length == 32) {
+            op = abi.decode(data, (uint8));
+            return (op, 0);
+        }
+        (op, arg) = abi.decode(data, (uint8, uint256));
     }
 }

@@ -7,7 +7,7 @@ import { CoreVault } from "../../../src/core/CoreVault.sol";
 import { CoreHarness } from "../../helpers/CoreHarness.sol";
 import { ERC20Mock } from "../../../src/mocks/ERC20Mock.sol";
 import { MockParamsProvider } from "../../helpers/MockParamsProvider.sol";
-import { QueueModule } from "../../../src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "../../../src/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "../../../src/core/modules/AdminModule.sol";
 import { IQueueModule } from "../../../src/interfaces/IQueueModule.sol";
 
@@ -22,7 +22,7 @@ contract LockPeriodProtection is Test {
     CoreHarness internal vault;
     ERC20Mock internal usdc;
     MockParamsProvider internal params;
-    QueueModule internal queueModule;
+    EpochedQueueModule internal queueModule;
     AdminModule internal adminModule;
 
     address internal owner = address(0xA11CE);
@@ -45,7 +45,7 @@ contract LockPeriodProtection is Test {
         params.setLockPeriod(LOCK_PERIOD);
 
         // Deploy modules
-        queueModule = new QueueModule();
+        queueModule = new EpochedQueueModule();
         adminModule = new AdminModule();
 
         // Deploy CoreHarness (wires all modules + unpauses automatically)
@@ -81,23 +81,22 @@ contract LockPeriodProtection is Test {
     }
 
     function _wireModules() internal {
-        // QueueModule selectors (PUBLIC)
+        // EpochedQueueModule selectors (PUBLIC)
         vault.setModule(
-            QueueModule.requestClaim.selector, address(queueModule), vault.ROLE_PUBLIC()
+            EpochedQueueModule.requestEpochWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
-        vault.setModule(QueueModule.cancelClaim.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.cancelEpochWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.closeCurrentEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.fundEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.claimEpochAssets.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.batchClaimEpochAssets.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(
-            QueueModule.processQueuedRedemptions.selector, address(queueModule), vault.ROLE_PUBLIC()
+            EpochedQueueModule.requestInstantWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
         vault.setModule(
-            QueueModule.settleFeesAndProcessQueue.selector,
-            address(queueModule),
-            vault.ROLE_PUBLIC()
+            EpochedQueueModule.totalEscrowedShares.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
-        vault.setModule(
-            QueueModule.pendingShares.selector, address(queueModule), vault.ROLE_PUBLIC()
-        );
-        vault.setModule(QueueModule.queueLength.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.outstandingClaimCount.selector, address(queueModule), vault.ROLE_PUBLIC());
 
         // AdminModule selectors (OWNER)
         vault.setModule(
@@ -158,9 +157,8 @@ contract LockPeriodProtection is Test {
         // Now withdrawal should work (async pattern)
         uint256 usdcBefore = usdc.balanceOf(attacker);
         uint256 shares = vault.previewWithdraw(FLASH_AMOUNT);
-        IQueueModule(address(vault)).requestClaim(true, shares);
+        IQueueModule(address(vault)).requestInstantWithdrawal(shares);
         vm.stopPrank();
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(1);
         uint256 assets = usdc.balanceOf(attacker) - usdcBefore;
         assertGt(assets, 0, "withdraw works after lock");
     }
@@ -179,9 +177,8 @@ contract LockPeriodProtection is Test {
 
         // Now redeem should work (async pattern)
         uint256 usdcBefore = usdc.balanceOf(attacker);
-        IQueueModule(address(vault)).requestClaim(true, shares);
+        IQueueModule(address(vault)).requestInstantWithdrawal(shares);
         vm.stopPrank();
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(1);
         uint256 assets = usdc.balanceOf(attacker) - usdcBefore;
         assertGt(assets, 0, "redeem works after lock");
     }
@@ -268,9 +265,8 @@ contract LockPeriodProtection is Test {
 
         // Now should work (129602 > 129601, async pattern)
         uint256 sh = vault.previewWithdraw(1e6);
-        IQueueModule(address(vault)).requestClaim(true, sh);
+        IQueueModule(address(vault)).requestInstantWithdrawal(sh);
         vm.stopPrank();
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(1);
     }
 
     /* ========== FUZZ TESTS ========== */
@@ -313,9 +309,8 @@ contract LockPeriodProtection is Test {
         // Should work (async pattern)
         uint256 usdcBefore = usdc.balanceOf(attacker);
         uint256 sh = vault.previewWithdraw(amount / 2);
-        IQueueModule(address(vault)).requestClaim(true, sh);
+        IQueueModule(address(vault)).requestInstantWithdrawal(sh);
         vm.stopPrank();
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(1);
         uint256 received = usdc.balanceOf(attacker) - usdcBefore;
         assertGt(received, 0, "withdraw works after lock");
     }
@@ -380,7 +375,7 @@ contract LockPeriodProtection is Test {
         uint256 shares = vault.balanceOf(attacker);
 
         // Request claim immediately
-        try IQueueModule(address(vault)).requestClaim(true, shares) {
+        try IQueueModule(address(vault)).requestInstantWithdrawal(shares) {
             // If immediate claim allowed, funds should not be transferred yet
             // (claim goes to queue or is blocked)
             uint256 attackerBalance = usdc.balanceOf(attacker);

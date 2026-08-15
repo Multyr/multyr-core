@@ -15,7 +15,6 @@ import { IIncentives } from "../interfaces/IIncentives.sol";
 import { ICoreVault } from "../interfaces/ICoreVault.sol";
 import { CoreStorage } from "./storage/CoreStorage.sol";
 import { FeeStorage } from "./storage/FeeStorage.sol";
-import { QueueStorage } from "./storage/QueueStorage.sol";
 import { Events } from "./libraries/Events.sol";
 import { Percentage } from "../libs/Percentage.sol";
 import { SelectorRegistry } from "./libraries/SelectorRegistry.sol";
@@ -701,9 +700,31 @@ contract CoreVault is ERC4626, ICoreVault {
     // ICoreVault VIEW INTERFACE
     // ═══════════════════════════════════════════════════════════════════════════════
 
+    /// @notice True if there is epoch-queue work a keeper should perform:
+    ///         either the open epoch is closeable and non-empty, or a prior
+    ///         epoch closed but hasn't been funded yet.
+    /// @dev Reads EpochedQueueModule's delegatecall-dispatched views via
+    ///      staticcall-to-self (this function lives in CoreVault's own
+    ///      bytecode, not the module, so it cannot call them directly).
     function canSettle() external view returns (bool) {
-        QueueStorage.Layout storage q = QueueStorage.layout();
-        return q.queue.length > q.head;
+        (bool okClose, bytes memory dataClose) =
+            address(this).staticcall(abi.encodeWithSignature("canCloseCurrentEpoch()"));
+        if (okClose && dataClose.length == 32 && abi.decode(dataClose, (bool))) {
+            (bool okCnt, bytes memory dataCnt) =
+                address(this).staticcall(abi.encodeWithSignature("currentEpochClaimCount()"));
+            if (okCnt && dataCnt.length == 32 && abi.decode(dataCnt, (uint256)) > 0) {
+                return true;
+            }
+        }
+
+        (bool okOldest, bytes memory dataOldest) =
+            address(this).staticcall(abi.encodeWithSignature("oldestUnfundedEpochId()"));
+        (bool okCur, bytes memory dataCur) =
+            address(this).staticcall(abi.encodeWithSignature("currentEpochId()"));
+        if (okOldest && okCur && dataOldest.length == 32 && dataCur.length == 32) {
+            return abi.decode(dataOldest, (uint256)) < abi.decode(dataCur, (uint256));
+        }
+        return false;
     }
 
     function canCrystallize() external view returns (bool) {
@@ -762,37 +783,6 @@ contract CoreVault is ERC4626, ICoreVault {
         return (true, target - currentCash);
     }
 
-    /// @notice Returns strategy redeem deficit for pending queue claims.
-    /// @dev Single source of truth for VaultUpkeep scheduler.
-    ///      Returns 0 if hot + warm (discounted by slippage) cover the batch.
-    ///      Returns the USDC shortfall that must come from strategy redeem.
-    function deficitForQueue(uint256 maxClaims) external view returns (uint256 deficit) {
-        (bool ok, bytes memory data) = address(this).staticcall(
-            abi.encodeWithSignature("requiredHotForBatch(uint256)", maxClaims)
-        );
-        if (!ok) return 0;
-        uint256 required = abi.decode(data, (uint256));
-        if (required == 0) return 0;
-
-        uint256 hot = IERC20(asset()).balanceOf(address(this));
-        if (hot >= required) return 0;
-
-        // Discount warm by slippage (conservative estimate)
-        CoreStorage.Layout storage core = CoreStorage.layout();
-        IBufferManager bm = core.bufferManager;
-        if (address(bm) != address(0)) {
-            (uint256 warmNav,, bool valid) = bm.warmNavState();
-            if (valid && warmNav > 0) {
-                uint16 slipBps = bm.getConfig().maxWarmSlippageBps;
-                uint256 usableWarm = warmNav * (10000 - uint256(slipBps)) / 10000;
-                uint256 available = hot + usableWarm;
-                if (available >= required) return 0;
-                return required - available;
-            }
-        }
-        return required - hot;
-    }
-
     // ═══════════════════════════════════════════════════════════════════════════════
     // VIEW HELPERS
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -821,11 +811,29 @@ contract CoreVault is ERC4626, ICoreVault {
     // WARM ADAPTER APPROVALS
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    function approveWarmAdapters(address[] calldata adapters) external onlyOwner {
+    /// @notice Grant each warm adapter a BOUNDED allowance to pull the vault's
+    ///         underlying. Warm adapters pull with transferFrom rather than
+    ///         receiving a push, so they need standing allowance; an unbounded
+    ///         one meant a single compromised or buggy adapter could drain the
+    ///         vault outright, and reservedForClaims cannot defend against that
+    ///         because it is enforced when sizing a deploy, not when the token
+    ///         moves.
+    /// @dev The allowance depletes as it is spent and is not self-renewing:
+    ///      once an adapter has pulled `cap` in total, warm deploys through it
+    ///      stop until governance tops it up. That is the intended trade -- a
+    ///      visible, deliberate budget per adapter instead of an open tap. Size
+    ///      it against the vault's deposit cap and expected warm cycling, not
+    ///      against a single deploy.
+    ///
+    ///      Pairs with the adapter-list guard on the BufferManager side: this
+    ///      bounds what each adapter can take, that bounds who can become an
+    ///      adapter. Neither alone is sufficient.
+    function approveWarmAdapters(address[] calldata adapters, uint256 cap) external onlyOwner {
+        if (cap == 0) revert ZeroAmount();
         address assetAddr = asset();
         for (uint256 i; i < adapters.length;) {
-            IERC20(assetAddr).forceApprove(adapters[i], type(uint256).max);
-            emit Events.WarmAdapterApproved(adapters[i]);
+            IERC20(assetAddr).forceApprove(adapters[i], cap);
+            emit Events.WarmAdapterApproved(adapters[i], cap);
             unchecked { ++i; }
         }
     }

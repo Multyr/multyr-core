@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import { Test } from "forge-std/Test.sol";
 import { CoreVault } from "../../../src/core/CoreVault.sol";
 import { AdminModule } from "../../../src/core/modules/AdminModule.sol";
-import { QueueModule } from "../../../src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "../../../src/core/modules/EpochedQueueModule.sol";
 import { IAdminModule } from "../../../src/interfaces/IAdminModule.sol";
 import { IQueueModule } from "../../../src/interfaces/IQueueModule.sol";
 import { SelectorLib } from "../../../src/core/libraries/SelectorLib.sol";
@@ -20,12 +20,12 @@ import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTes
  * @title CoreVault_PerfFeeMixin Test Suite
  * @notice Comprehensive test coverage for performance fee handling in modular CoreVault
  * @dev Tests HWM tracking, crystallization logic, fee calculations, and interval enforcement
- *      Updated for Diamond-lite architecture with AdminModule/QueueModule wiring
+ *      Updated for Diamond-lite architecture with AdminModule/EpochedQueueModule wiring
  */
 contract CoreVaultPerfFeeMixinTest is Test {
     CoreVault public vault;
     AdminModule public adminModule;
-    QueueModule public queueModule;
+    EpochedQueueModule public queueModule;
     MockUSDC public usdc;
     MockParamsProvider public params;
 
@@ -46,9 +46,9 @@ contract CoreVaultPerfFeeMixinTest is Test {
         usdc = new MockUSDC();
         params = new MockParamsProvider();
 
-        // Deploy AdminModule and QueueModule
+        // Deploy AdminModule and EpochedQueueModule
         adminModule = new AdminModule();
-        queueModule = new QueueModule();
+        queueModule = new EpochedQueueModule();
 
         // Deploy vault with 6-param constructor (via CoreHarness for setBufferManagerUnsafe)
         vm.prank(owner);
@@ -77,13 +77,16 @@ contract CoreVaultPerfFeeMixinTest is Test {
             address(vault), adminViewSelectors, address(adminModule), ROLE_PUBLIC
         );
 
-        // Wire QueueModule selectors (PUBLIC) - includes endEpochCrystallize
-        bytes4[] memory queueSelectors = new bytes4[](5);
-        queueSelectors[0] = QueueModule.requestClaim.selector;
-        queueSelectors[1] = QueueModule.cancelClaim.selector;
-        queueSelectors[2] = QueueModule.processQueuedRedemptions.selector;
-        queueSelectors[3] = QueueModule.settleFeesAndProcessQueue.selector;
-        queueSelectors[4] = QueueModule.endEpochCrystallize.selector;
+        // Wire EpochedQueueModule selectors (PUBLIC) - includes endEpochCrystallize
+        bytes4[] memory queueSelectors = new bytes4[](8);
+        queueSelectors[0] = EpochedQueueModule.requestEpochWithdrawal.selector;
+        queueSelectors[1] = EpochedQueueModule.cancelEpochWithdrawal.selector;
+        queueSelectors[2] = EpochedQueueModule.closeCurrentEpoch.selector;
+        queueSelectors[3] = EpochedQueueModule.fundEpoch.selector;
+        queueSelectors[4] = EpochedQueueModule.claimEpochAssets.selector;
+        queueSelectors[5] = EpochedQueueModule.requestInstantWithdrawal.selector;
+        queueSelectors[6] = EpochedQueueModule.batchClaimEpochAssets.selector;
+        queueSelectors[7] = EpochedQueueModule.endEpochCrystallize.selector;
         ModuleSetter.setModulesSame(
             address(vault), queueSelectors, address(queueModule), ROLE_PUBLIC
         );
@@ -195,10 +198,10 @@ contract CoreVaultPerfFeeMixinTest is Test {
 
         uint256 feeCollectorSharesBefore = vault.balanceOf(feeCollector);
 
-        // Simulate loss: withdraw almost everything via requestClaim
+        // Simulate loss: withdraw almost everything via requestInstantWithdrawal
         uint256 sharesToClaim = vault.convertToShares(500e6);
         vm.prank(user);
-        IQueueModule(address(vault)).requestClaim(true, sharesToClaim);
+        IQueueModule(address(vault)).requestInstantWithdrawal(sharesToClaim);
 
         // Wait interval
         vm.warp(block.timestamp + MIN_INTERVAL + 1);
@@ -284,12 +287,15 @@ contract CoreVaultPerfFeeMixinTest is Test {
             address(vaultZeroFee), adminViewSelectors, address(adminModule), ROLE_PUBLIC
         );
 
-        bytes4[] memory queueSelectors = new bytes4[](5);
-        queueSelectors[0] = QueueModule.requestClaim.selector;
-        queueSelectors[1] = QueueModule.cancelClaim.selector;
-        queueSelectors[2] = QueueModule.processQueuedRedemptions.selector;
-        queueSelectors[3] = QueueModule.settleFeesAndProcessQueue.selector;
-        queueSelectors[4] = QueueModule.endEpochCrystallize.selector;
+        bytes4[] memory queueSelectors = new bytes4[](8);
+        queueSelectors[0] = EpochedQueueModule.requestEpochWithdrawal.selector;
+        queueSelectors[1] = EpochedQueueModule.cancelEpochWithdrawal.selector;
+        queueSelectors[2] = EpochedQueueModule.closeCurrentEpoch.selector;
+        queueSelectors[3] = EpochedQueueModule.fundEpoch.selector;
+        queueSelectors[4] = EpochedQueueModule.claimEpochAssets.selector;
+        queueSelectors[5] = EpochedQueueModule.requestInstantWithdrawal.selector;
+        queueSelectors[6] = EpochedQueueModule.batchClaimEpochAssets.selector;
+        queueSelectors[7] = EpochedQueueModule.endEpochCrystallize.selector;
         ModuleSetter.setModulesSame(
             address(vaultZeroFee), queueSelectors, address(queueModule), ROLE_PUBLIC
         );
@@ -388,10 +394,10 @@ contract CoreVaultPerfFeeMixinTest is Test {
         (,, uint256 hwm2,) = admin().getPerfParams();
         assertGt(hwm2, hwm1, "HWM should increase after profit");
 
-        // Simulate loss (partial withdrawal via requestClaim)
+        // Simulate loss (partial withdrawal via requestInstantWithdrawal)
         uint256 sharesToClaim = vault.convertToShares(600e6);
         vm.prank(user);
-        IQueueModule(address(vault)).requestClaim(true, sharesToClaim);
+        IQueueModule(address(vault)).requestInstantWithdrawal(sharesToClaim);
         vm.warp(block.timestamp + MIN_INTERVAL + 1);
         queue().endEpochCrystallize();
         (,, uint256 hwm3,) = admin().getPerfParams();

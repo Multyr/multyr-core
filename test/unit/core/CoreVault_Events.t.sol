@@ -4,20 +4,22 @@ pragma solidity ^0.8.28;
 import { BaseVaultTest } from "../../helpers/BaseVaultTest.t.sol";
 import { Vm } from "forge-std/Vm.sol";
 import { CoreHarness } from "../../helpers/CoreHarness.sol";
-import { QueueModule } from "../../../src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "../../../src/core/modules/EpochedQueueModule.sol";
 import { SelectorLib } from "../../../src/core/libraries/SelectorLib.sol";
 import { ModuleSetter } from "../../helpers/ModuleSetter.sol";
 
 interface IQueueModule {
-    function requestClaim(bool immediate, uint256 shares) external;
+    function requestInstantWithdrawal(uint256 shares)
+        external
+        returns (bool settledImmediately, uint256 epochId, uint256 claimId);
 }
 
 contract CoreVault_Events is BaseVaultTest {
     function setUp() public override {
         super.setUp();
 
-        // Wire QueueModule for requestClaim
-        QueueModule qm = new QueueModule();
+        // Wire EpochedQueueModule for requestInstantWithdrawal
+        EpochedQueueModule qm = new EpochedQueueModule();
         bytes4[] memory queueSels = SelectorLib.getQueueModuleSelectors();
         ModuleSetter.setModulesSame(
             vaultAddr, queueSels, address(qm), SelectorLib.ROLE_PUBLIC
@@ -53,12 +55,12 @@ contract CoreVault_Events is BaseVaultTest {
         }
         assertTrue(depFound, "DepositFeeTaken not emitted");
 
-        // instant claim and check FeePaid event (queued protocol: use requestClaim(true))
+        // instant claim and check FeePaid event (queued protocol: use requestInstantWithdrawal)
         vm.recordLogs();
         vm.startPrank(user);
         uint256 userShares = vault.balanceOf(user);
         uint256 claimShares = userShares / 10; // claim 10%
-        IQueueModule(vaultAddr).requestClaim(true, claimShares);
+        IQueueModule(vaultAddr).requestInstantWithdrawal(claimShares);
         vm.stopPrank();
         logs = vm.getRecordedLogs();
         bytes32 feePaidSig = keccak256("FeePaid(address,address,uint256)");

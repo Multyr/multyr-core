@@ -10,7 +10,7 @@
 
 1. [Overview](#1-overview)
 2. [ERC4626Module](#2-erc4626module)
-3. [QueueModule](#3-queuemodule)
+3. [EpochedQueueModule](#3-epochedqueuemodule)
 4. [AdminModule](#4-adminmodule)
 5. [BufferManager](#5-buffermanager)
 6. [FixedMaturityModule](#6-fixedmaturitymodule)
@@ -42,7 +42,7 @@ Multyr Core uses a Diamond-lite architecture where all economic logic is impleme
 
 | Category | Modules | Deployment pattern |
 |---|---|---|
-| Delegatecall modules | ERC4626Module, QueueModule, AdminModule, LiquidityOpsModule, FixedMaturityModule | External contracts, invoked via `delegatecall` |
+| Delegatecall modules | ERC4626Module, EpochedQueueModule, AdminModule, LiquidityOpsModule, FixedMaturityModule | External contracts, invoked via `delegatecall` |
 | Standalone modules | BufferManager, FeeCollector, BatchGuardrails, PriceOracleMiddleware, ExecutionMemory | Standard external contracts, external call |
 | Strategy infrastructure | StrategyRouter, StrategyHealthRegistry | Standalone external contracts; called by LiquidityOpsModule |
 | V10 allocation | StrategyScorer, RouterAllocationPolicy, RouterRebalanceGuard | Standalone view / guard contracts; called by LiquidityOpsModule and StrategyRouter |
@@ -64,7 +64,7 @@ Multyr Core uses a Diamond-lite architecture where all economic logic is impleme
 
 ### 2.1 Role
 
-Handles all user-facing deposit and force-exit operations. Standard `withdraw()` / `redeem()` always revert — users must use `QueueModule.requestClaim()` for queue-based exits.
+Handles all user-facing deposit and force-exit operations. Standard `withdraw()` / `redeem()` always revert — users must use `EpochedQueueModule.requestInstantWithdrawal()` / `requestEpochWithdrawal()` for queue-based exits.
 
 ### 2.2 Public Functions
 
@@ -159,103 +159,120 @@ Source: `src/core/modules/ERC4626Module.sol:163-250`.
 
 ---
 
-## 3. QueueModule
+## 3. EpochedQueueModule
 
-**File**: `src/core/modules/QueueModule.sol`
-**Version**: v6 (ExitEngineLib Architecture)
+**File**: `src/core/modules/EpochedQueueModule.sol`
 **Delegatecall**: yes
-**Storage namespaces**: `CoreStorage`, `QueueStorage`, `FeeStorage`, `FixedMaturityStorage`
+**Storage namespaces**: `CoreStorage`, `EpochQueueStorage`, `FeeStorage`, `FixedMaturityStorage`
+
+> **History**: this module replaced `QueueModule.sol` (a FIFO array with a keeper-scanned
+> settle loop) as the sole production queue-settlement mechanism. `QueueModule.sol` has been
+> deleted; see `docs/queue-mechanics.md` for the full behavioral writeup and migration notes.
+> The retired `QueueStorage.sol` layout is kept only as a permanently-reserved EIP-7201 slot —
+> no live code reads or writes it.
 
 ### 3.1 Role
 
-Manages the async exit queue: accepts claim requests, processes batch settlements, crystallizes performance fees, and manages epoch rollover.
+Manages the async exit queue using Renzo ezETH-style epoch batching: accepts claim requests
+into a currently-open epoch, closes the epoch to lock a single price-per-share for every claim
+in it, pulls liquidity once per epoch, and lets users self-serve their claim via a pull-based
+call. Also owns performance-fee crystallization and NAV smoothing (decoupled from the epoch
+lifecycle — see `docs/queue-mechanics.md` §7).
 
 ### 3.2 Public Functions
 
 | Function | Access | Description |
 |---|---|---|
-| `requestClaim(bool immediate, uint256 shares)` | PUBLIC | Submit exit: instant or queued |
-| `cancelClaim(uint256 claimId)` | PUBLIC | Cancel pending queued claim |
-| `processQueuedRedemptions(uint256 maxClaims)` | PUBLIC | Process queue (no cap enforcement) |
-| `settleFeesAndProcessQueue(uint256 maxClaims)` | PUBLIC | Process queue with epoch cap |
-| `endEpochCrystallize()` | PUBLIC | Crystallize perf fee + update NAV smoothing |
-| `compactQueue()` | PUBLIC | GC: remove processed head entries from queue array |
-| `nextClaimId()` | PUBLIC view | Auto-increment counter |
-| `queueLength()` | PUBLIC view | Active queue length (from head to end) |
-| `pendingShares()` | PUBLIC view | Total shares in escrow |
-| `requiredHotForBatch(uint256 maxClaims)` | PUBLIC view | USDC needed for next settle batch |
-| `settlePreview(uint256 maxClaims)` | PUBLIC view | Preview of settle outcome |
+| `requestEpochWithdrawal(uint256 shares)` | PUBLIC | Submit a standard (queued) withdrawal into the current open epoch |
+| `cancelEpochWithdrawal(uint256 epochId, uint256 claimId)` | PUBLIC | Cancel a claim while its epoch is still Open |
+| `closeCurrentEpoch()` | PUBLIC | Lock PPS for the current epoch, open the next one |
+| `fundEpoch(uint256 epochId)` | PUBLIC | Pull liquidity (warm refill → strategy redeem) for a Closed epoch |
+| `claimEpochAssets(uint256 epochId, uint256 claimId)` | PUBLIC | Self-serve claim from a Funded epoch |
+| `batchClaimEpochAssets(uint256 epochId, uint256[] claimIds)` | PUBLIC | Batch self-serve claim for one user's multiple claims |
+| `requestInstantWithdrawal(uint256 shares)` | PUBLIC | Cap-eligible instant exit; falls back to the epoch queue otherwise |
+| `endEpochCrystallize()` | PUBLIC | Crystallize perf fee + update NAV smoothing (independent of epoch state) |
+| `currentEpochId()` / `epochData(id)` / `epochClaim(id, claimId)` | PUBLIC view | Epoch and claim state |
+| `nextClaimIdForEpoch(id)` | PUBLIC view | Next claim ID counter for a given epoch |
+| `totalEscrowedShares()` | PUBLIC view | Total shares in escrow across all epochs |
+| `outstandingClaimCount()` | PUBLIC view | Total unclaimed claims across all epochs (dynamic-cap signal) |
+| `oldestUnfundedEpochId()` | PUBLIC view | Keeper cursor — oldest Closed-not-yet-Funded epoch |
+| `epochDeficit(id)` | PUBLIC view | Remaining liquidity shortfall for a Closed epoch |
+| `canCloseCurrentEpoch()` / `currentEpochClaimCount()` | PUBLIC view | Keeper eligibility + anti-churn checks |
 
-Source: `src/core/modules/QueueModule.sol:81-296`.
+Source: `src/core/modules/EpochedQueueModule.sol:212-833`.
 
-### 3.3 requestClaim Decision Tree
+### 3.3 requestEpochWithdrawal / requestInstantWithdrawal Decision Tree
 
 ```
-requestClaim(immediate, shares):
-  1. _checkStandardExitAllowed()     — FixedMaturity gate
-  2. _enterNonReentrant()
-  3. rollEpochIfNeeded()             — parametric epoch duration
-  4. gross = convertToAssets(shares)
-  5. Check minClaimAmount
-  6. _checkQueueAntiSpam()           — cooldown + per-epoch count
-  7. if (immediate AND _canSettleInstant()):
+requestInstantWithdrawal(shares):
+  1. _checkStandardExitAllowed(fm, immediate=true)
+  2. _trySoftRefreshWarmNav(); rollEpochIfNeeded()   — the CAP epoch (ExitEngineLib), not the settlement epoch
+  3. gross = convertToAssets(shares)
+  4. if _canInstant(gross, wp, core):
        INSTANT PATH:
-       - computeFeeShares(INSTANT)
-       - processorTransfer(user → feeCollector, feeShares)
-       - processorBurn(user, userShares)
-       - safeTransfer(user, netAssets)
-       - consumeEpochCap(gross)
+       - computeFeeShares(shares, INSTANT, fee)
+       - _transferShares(user → feeCollector, feeShares); _burn(user, netShares)
+       - safeTransfer(user, netAssets); consumeEpochCap(gross)
        - emit InstantExit
+       - return (settledImmediately=true, epochId=0, claimId=0)
      else:
-       QUEUE PATH:
-       - processorTransfer(user → vault, shares)  [escrow]
-       - create Claim{user, ts, immediate=false, settled=false, shares}
-       - push claimId to queue
-       - emit ClaimQueued
+       FALLBACK — same as requestEpochWithdrawal(shares):
+       - _transferShares(user → vault, shares)  [escrow ALL gross shares]
+       - claimId = ++nextClaimId[epochId]; record EpochClaim{user, netShares, feeShares, claimed=false}
+       - escrowedShares += shares; outstandingClaimCount += 1
+       - emit EpochWithdrawalRequested
+       - return (settledImmediately=false, epochId, claimId)
 ```
 
-Source: `src/core/modules/QueueModule.sol:81-169`.
+Callers must branch on `settledImmediately` — a cap-exhausted instant request never reverts,
+it silently becomes a standard epoch claim (W2 rule).
 
-### 3.4 Settlement Algorithm
+Source: `src/core/modules/EpochedQueueModule.sol:212-289, 698-749`.
 
-`_settleScan()` implements a bounded three-step algorithm:
+### 3.4 Settlement: Close → Fund → Claim
 
-**Step A — Pre-scan** (`_boundedPreScan`):
-- Scans up to `maxClaims * 2` queue entries.
-- Stops after `MAX_CONSECUTIVE_INELIGIBLE = 32` consecutive ineligible entries.
-- Outputs: `requiredHot`, `eligibleCount`, `scanWindowEnd`.
+Settlement is a three-step, **epoch-wide** (not per-claim) process — the core structural
+difference from the old per-claim settle loop:
 
-**Step B — Warm refill**:
-- If `hot < requiredHot`, attempts `bm.refill(warmGap)` (try/catch).
-- Warm refill only — no strategy redeem in settle path.
+**Step A — `closeCurrentEpoch()`** (permissionless, gated on `minEpochDuration`):
+- Snapshots `ppsAtClose = totalAssets/totalSupply` once for the whole epoch.
+- Batch-transfers accumulated fee shares to `feeCollector` in one call.
+- Opens the next epoch immediately so new submissions are never blocked.
 
-**Step C — Settle loop** `[head, scanWindowEnd)`:
-- Per-claim: escrow invariant check → eligibility check → hot liquidity check → ExitEngineLib fee → settle.
-- Pricing: cached `(cachedTA, cachedTS)` snapshot for deterministic intra-batch PPS.
-- Head advancement: after loop, head advances past leading settled/ghost entries.
+**Step B — `fundEpoch(epochId)`** (permissionless, repeatable):
+- One liquidity pull covers the epoch's entire net liability, not a per-batch slice.
+- Waterfall: warm refill first (`bm.refill`), then strategy redeem (`router.planRedeem` /
+  `executeRedeemBatch`) for any remaining gap — both try/catch, W2 rule.
+- Epoch transitions to `Funded` only once `hot >= totalNetAssets`; otherwise stays `Closed`
+  for a later retry.
 
-Source: `src/core/modules/QueueModule.sol:358-521`.
+**Step C — `claimEpochAssets(epochId, claimId)`** (pull-based, per claimant, any time after Funded):
+- `assets = claim.netShares * epoch.ppsAtClose / WAD` — deterministic, no live-PPS exposure.
+- No keeper required for a user to receive funds.
+
+Source: `src/core/modules/EpochedQueueModule.sol:327-513`.
 
 ### 3.5 Epoch Management
 
-`ExitEngineLib.rollEpochIfNeeded()` is called at the start of `requestClaim`, `processQueuedRedemptions`, and `settleFeesAndProcessQueue`. It aligns `epochStart` to the nearest epoch boundary relative to the original start:
-
-```solidity
-// ExitEngineLib.sol:86-91
-core.epochStart = uint64(block.timestamp - ((block.timestamp - es) % dur));
-core.epochWithdrawn = 0;
-```
-
-This ensures epoch boundaries are predictable and monotonically increasing.
+`EpochedQueueModule`'s settlement epoch (`currentEpochId`, duration from
+`IParamsProvider.QueueParams.epochDuration`) is a **separate concept** from `ExitEngineLib`'s
+withdrawal-cap epoch (`CoreStorage.epochStart`, rolled by `rollEpochIfNeeded()`). The settlement
+epoch only advances when `closeCurrentEpoch()` is explicitly called; the cap epoch rolls
+automatically on interaction. See `docs/queue-mechanics.md` §6 for the full distinction — they
+are not architecturally coupled even though test fixtures often configure matching durations.
 
 ### 3.6 Performance Fee Crystallization
 
-`_crystallize()` (`src/core/modules/QueueModule.sol:763-803`):
+`_crystallize()` (`src/core/modules/EpochedQueueModule.sol:576-653`) — ported verbatim from
+`QueueModule.sol`, unchanged logic:
 1. Compute PPS = `totalAssets / totalSupply`.
 2. If PPS <= HWM: update HWM, no fee.
 3. If PPS > HWM: `profit = totalAssets - HWM * totalSupply`, `feeAssets = profit * perfRateX`.
 4. `feeShares = convertToShares(feeAssets)` — minted (dilutive, by design).
 5. Update HWM = new PPS post-mint.
+
+This logic has zero dependency on `EpochQueueStorage` — crystallization can be triggered
+independent of any epoch's open/closed/funded state (see `docs/queue-mechanics.md` §7).
 
 Performance fee minting is the ONLY exit-related path that mints new shares (fee accrual is dilutive). All other exits are non-dilutive.
 
@@ -521,7 +538,7 @@ Receives vault share fees and distributes them to configured sinks: treasury, op
 
 ### 8.2 AUTO_HARVEST Mode
 
-In `AUTO_HARVEST` mode, `FeeCollector` calls `IQueueModule.requestClaim(true, bal)` on the vault to convert shares to USDC. If the instant exit falls back to queue (epoch cap exhausted), `pendingHarvestShares[token]` is incremented. A subsequent `harvestQueued()` call checks for settled shares and credits the remaining USDC.
+In `AUTO_HARVEST` mode, `FeeCollector` calls `IQueueModule.requestInstantWithdrawal(bal)` on the vault to convert shares to USDC. If the instant exit falls back to the epoch queue (cap exhausted, or free liquidity below the ask), `pendingHarvestShares[token]` is incremented and the claim's `(epochId, claimId)` is appended to a per-token list. `harvestQueued()` walks that list and settles whichever claims sit in a funded epoch, leaving the rest queued, so one epoch that never funds delays only its own claim instead of blocking the token. An instant harvest whose payout rounds down to zero emits `HarvestDustBurned` and records nothing, since the inline-settlement path returns `(0, 0)` for the claim handle.
 
 Source: `src/core/modules/FeeCollector.sol:55-58`.
 
@@ -585,7 +602,7 @@ interface IIncentivesEngine {
 }
 ```
 
-`onExitLight()` is called in the queue settle path (gas-constrained). Source: `src/core/modules/QueueModule.sol:644-651`.
+`onExitLight()` is called in the queue settle path (gas-constrained). Source: `src/core/modules/EpochedQueueModule.sol:892-901` (`_notifyIncentivesExit`).
 
 ### 10.3 Error Handling
 
@@ -1024,7 +1041,7 @@ After `maxConsecutiveSkips` (default: 5) consecutive skips, hysteresis threshold
 graph LR
     CV["CoreVault"]
     EM["ERC4626Module"]
-    QM["QueueModule"]
+    QM["EpochedQueueModule"]
     AM["AdminModule"]
     LOM["LiquidityOpsModule"]
     FM["FixedMaturityModule"]
@@ -1078,7 +1095,7 @@ graph LR
 | Module | Key Invariants |
 |---|---|
 | ERC4626Module | withdraw/redeem always revert; no mint on exit; deposit blocked if warmNavInvalid |
-| QueueModule | totalSupply decreases only on exit; batch PPS deterministic; escrow balance ≥ pendingClaim.shares |
+| EpochedQueueModule | totalSupply decreases only on exit; PPS deterministic per-epoch (locked at close); escrow balance == totalEscrowedShares |
 | AdminModule | Pending params must be resolved before new submission; ETA window 7 days; fee caps enforced |
 | BufferManager | Never holds idle USDC; cachedWarmNav reflects 100% of warm assets |
 | FixedMaturityModule | finalPerformanceFeeApplied exactly once; fundingFailedPPS immutable after markFundingFailed |
@@ -1156,6 +1173,6 @@ Source: estimated from `forge test --gas-report` output on branch `pierdev`. Act
 - `docs/01-architecture/FEECOLLECTOR-SAFETYRESERVE.md` — FeeCollector modes terminology
 
 **Discrepancies found** (code vs. old source .md):
-- [^1]: FeeCollector docs may reference `IERC4626Minimal.redeem()` as the harvest path. Code shows `src/core/modules/FeeCollector.sol` uses `IQueueModule.requestClaim(true, bal)` (see `src/core/modules/FeeCollector.sol:56-58`) — corrected in FIX-FEECOLLECTOR-AUTOHARVEST-01. Old sync-redeem flow is broken in v9+ (`AsyncWithdrawalRequired`).
-- [^2]: Some docs may list only 8-10 modules. Current codebase has 17: ERC4626Module, QueueModule, AdminModule, BufferManager, FixedMaturityModule, LiquidityOpsModule, FeeCollector, Incentives, IncentivesEngine, BatchGuardrails, PriceOracleMiddleware, ExecutionMemory, StrategyRouter, StrategyScorer, StrategyHealthRegistry, RouterAllocationPolicy, RouterRebalanceGuard.
+- [^1]: FeeCollector docs may reference `IERC4626Minimal.redeem()` as the harvest path. Code shows `src/core/modules/FeeCollector.sol` uses `IQueueModule.requestInstantWithdrawal(bal)` — corrected in FIX-FEECOLLECTOR-AUTOHARVEST-01. Old sync-redeem flow is broken in v9+ (`AsyncWithdrawalRequired`).
+- [^2]: Some docs may list only 8-10 modules. Current codebase has 17: ERC4626Module, EpochedQueueModule, AdminModule, BufferManager, FixedMaturityModule, LiquidityOpsModule, FeeCollector, Incentives, IncentivesEngine, BatchGuardrails, PriceOracleMiddleware, ExecutionMemory, StrategyRouter, StrategyScorer, StrategyHealthRegistry, RouterAllocationPolicy, RouterRebalanceGuard.
 - [^3]: RouterAllocationPolicy, RouterRebalanceGuard, and ExecutionMemory (`src/core/storage/CoreStorage.sol:100-105`) represent a partially-implemented V10 allocation engine. The feature is optional (controlled by `strictExecutionMemory`) and not fully activated in current production deployment.

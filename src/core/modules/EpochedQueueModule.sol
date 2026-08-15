@@ -29,7 +29,7 @@ import {
 library EpochQueueStorage {
     // keccak256(abi.encode(uint256(keccak256("multyr.storage.EpochQueue.v1")) - 1)) & ~bytes32(uint256(0xff))
     bytes32 internal constant SLOT =
-        0x3e5f2b4af1c6d7890a2b1c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c400;
+        0xd8f6996c75206120e7e007afb307a0ab5673f8e6af6fff1bc619c574ef0f3000;
 
     enum EpochState { Open, Closed, Funded }
 
@@ -66,6 +66,56 @@ library EpochQueueStorage {
         mapping(uint256 => uint256) nextClaimId;
         // total shares sitting in vault escrow across ALL open epochs
         uint256 escrowedShares;
+        // Total unclaimed claims across ALL epochs (open + closed-unfunded +
+        // funded-unclaimed). Used as the dynamic-cap "queue depth" signal —
+        // unlike EpochData.claimCount (which resets to 0 every closeCurrentEpoch()),
+        // this persists across epoch boundaries so cap stress detection can't be
+        // dodged by waiting for the next epoch to open. Mirrors escrowedShares'
+        // "running total across all epochs" pattern, but counts claims (matching
+        // QueueModule/ExitEngineLib's queue-depth unit) rather than shares.
+        uint256 outstandingClaimCount;
+        // Oldest epoch that is CLOSED but not yet FUNDED — the epoch-model
+        // equivalent of QueueStorage.head. Lets a keeper find "what needs
+        // fundEpoch() next" in O(1) instead of scanning epoch IDs from 0.
+        // Lazily advanced in fundEpoch() past any now-consecutively-FUNDED
+        // epochs (funding can happen out of order, so this only advances when
+        // the just-funded epoch IS the current cursor position).
+        uint256 oldestUnfundedEpochId;
+        // Assets earmarked for FUNDED-but-unclaimed claims across ALL funded
+        // epochs. This is what makes FUNDED a real claim on assets instead of
+        // a snapshot: every consumer of "hot balance" for another purpose
+        // (instant exits, deployToStrategies, funding a LATER epoch) must
+        // treat `hot - reservedForClaims` as the only spendable balance.
+        // Incremented in fundEpoch() when an epoch is marked Funded,
+        // decremented in claimEpochAssets()/batchClaimEpochAssets() as each
+        // claim is actually paid out.
+        //
+        // NOT an exact round trip: the reservation is taken as
+        // mulWadDown(totalNetShares, ppsAtClose) while each release is
+        // mulWadDown(netShares_i, ppsAtClose), and per-claim truncation makes
+        // the releases sum to at most the reservation. A fully drained epoch
+        // therefore leaves under one asset-unit behind -- measured at 1 wei per
+        // multi-claim epoch, which for 6-decimal USDC is 1e-6. It is dust by
+        // construction and no claimant is ever short-paid by it, but it does
+        // mean this counter is monotonically non-zero once the first
+        // multi-claim epoch settles. NEVER write an invariant asserting
+        // reservedForClaims == 0; bound it against the epoch count instead.
+        uint256 reservedForClaims;
+        // Locked-pps liability for CLOSED-but-not-yet-FUNDED epochs. Unlike
+        // reservedForClaims this is not yet backed by any specific cash
+        // (fundEpoch() hasn't succeeded for it), but tracking it lets views
+        // (see CoreVaultLens.getVaultReport) value total pending withdrawals
+        // exactly, in O(1), without scanning epochs.
+        //
+        // Monotone per epoch by design: incremented at close, and moved into
+        // reservedForClaims when (and only when) that epoch funds. An epoch
+        // that closes and never funds keeps its share of this total forever,
+        // which is correct rather than a leak -- Closed is terminal until
+        // funding succeeds (claimEpochAssets requires Funded, and
+        // cancelEpochWithdrawal requires Open), so the liability really is
+        // still outstanding. Each epoch contributes to exactly one of the three
+        // buckets getVaultReport sums, so there is no double count.
+        uint256 closedPendingAssets;
     }
 
     function layout() internal pure returns (Layout storage l) {
@@ -136,6 +186,7 @@ contract EpochedQueueModule {
     error ReentrancyGuardLocked();
     error EpochAlreadyFunded();
     error InsufficientEscrow();
+    error ClaimTooSmall();
 
     // =========================================================================
     // EVENTS (epoch lifecycle + claims)
@@ -169,6 +220,34 @@ contract EpochedQueueModule {
         uint256 hotAfter
     );
     event EpochFunded(uint256 indexed epochId, uint256 totalNetAssets);
+    /// @notice fundEpoch() was called on an epoch that is already FUNDED, so
+    ///         there was nothing to do beyond syncing the keeper cursor.
+    /// @dev Not emitted on the keeper's normal path: it targets
+    ///      oldestUnfundedEpochId, which points at a CLOSED epoch whenever a
+    ///      backlog exists and equals currentEpochId when it does not, and
+    ///      checkUpkeep only schedules EPOCH_FUND in the former case. Seeing
+    ///      this event means the cursor was stale (cursorAfter > cursorBefore,
+    ///      now repaired) or the caller picked the wrong epoch (cursor
+    ///      unchanged).
+    event EpochFundSkipped(
+        uint256 indexed epochId,
+        uint256 cursorBefore,
+        uint256 cursorAfter
+    );
+
+    /// @notice A fundEpoch() attempt left the epoch CLOSED. Emitted on every
+    ///         failed or partial attempt so a stalled epoch is visible to
+    ///         monitoring without waiting for a user complaint.
+    /// @param epochId       the epoch that could not be funded
+    /// @param needed        the epoch's own locked-pps liability
+    /// @param freeLiquidity hot balance net of other funded epochs' reservations
+    /// @param shortfall     how much more is required before it can be funded
+    event EpochFundingShortfall(
+        uint256 indexed epochId,
+        uint256 needed,
+        uint256 freeLiquidity,
+        uint256 shortfall
+    );
     event EpochAssetsClaimed(
         uint256 indexed epochId,
         uint256 indexed claimId,
@@ -181,6 +260,12 @@ contract EpochedQueueModule {
     // CONSTANTS
     // =========================================================================
     uint256 public constant MAX_WARM_NAV_AGE = 15 minutes;
+
+    /// @notice Upper bound on how far one call may advance the
+    ///         oldestUnfundedEpochId cursor, so the scan can never blow the
+    ///         block gas limit. Hitting the bound leaves the cursor lagging,
+    ///         never stuck: see syncOldestUnfundedEpoch().
+    uint256 public constant MAX_CURSOR_SCAN = 50;
 
     // =========================================================================
     // EPOCH QUEUE -- WRITE FUNCTIONS
@@ -235,6 +320,17 @@ contract EpochedQueueModule {
 
         _trySoftRefreshWarmNav();
 
+        // --- Anti-spam floor (ported from QueueModule.requestClaim) ----------
+        // Unconditional, and here rather than at the entry points, because this
+        // is the single choke point where a claim enters the queue: no future
+        // entry point can create one without passing through it. The instant
+        // path checks the same thing up front as well, so its outcome depends on
+        // the caller's input rather than on vault state; the resulting double
+        // check on the fallback route is idempotent and costs one extra
+        // conversion on the rare branch. That is the intended trade -- there is
+        // deliberately no way to signal "already checked" and skip it.
+        _checkMinClaimAmount(core, shares);
+
         // --- Fee computation (STANDARD mode, rounding UP for protocol) -------
         (uint256 feeShares, uint256 netShares) =
             ExitEngineLib.computeFeeShares(shares, ExitEngineLib.ExitMode.STANDARD, f.fee);
@@ -260,6 +356,7 @@ contract EpochedQueueModule {
 
         // --- Global escrow tracker ------------------------------------------
         eq.escrowedShares += shares;
+        eq.outstandingClaimCount += 1;
 
         // --- Incentives sync (best-effort) -----------------------------------
         // Skip the convertToAssets() call entirely when no engine is wired --
@@ -271,10 +368,26 @@ contract EpochedQueueModule {
         emit EpochWithdrawalRequested(epochId, claimId, user, shares, netShares, feeShares);
     }
 
+    /// @dev Anti-spam floor on exits, bounding dust-claim griefing against
+    ///      outstandingClaimCount. Applies to every caller without exception:
+    ///      an address-based carve-out inside a security check is a standing
+    ///      invitation to widen it. Callers that cannot tolerate a revert --
+    ///      FeeCollector's AUTO_HARVEST is the one in-protocol case -- handle
+    ///      the failure on their own side rather than being special-cased here.
+    function _checkMinClaimAmount(CoreStorage.Layout storage core, uint256 shares)
+        internal
+        view
+    {
+        uint256 floor_ = core.params.getWithdrawalParams(address(this)).minClaimAmount;
+        if (floor_ == 0) return;
+        if (_convertToAssets(shares) < floor_) revert ClaimTooSmall();
+    }
+
     /// @notice Cancel a claim while the epoch is still OPEN.
     ///         Returns all gross shares (netShares + feeShares) to the user.
     ///         Not allowed once the epoch has closed.
     function cancelEpochWithdrawal(uint256 epochId, uint256 claimId) external {
+        _enterNonReentrant();
         EpochQueueStorage.Layout storage eq = EpochQueueStorage.layout();
         EpochQueueStorage.EpochData  storage epoch = eq.epochs[epochId];
         EpochQueueStorage.EpochClaim storage claim = eq.claims[epochId][claimId];
@@ -295,6 +408,7 @@ contract EpochedQueueModule {
         epoch.totalFeeShares   -= claim.feeShares;
         epoch.claimCount       -= 1;
         eq.escrowedShares      -= grossShares;
+        eq.outstandingClaimCount -= 1;
 
         // Mark cancelled (reuse the claimed flag)
         claim.claimed = true;
@@ -303,6 +417,8 @@ contract EpochedQueueModule {
         _transferShares(address(this), msg.sender, grossShares);
 
         emit EpochWithdrawalCancelled(epochId, claimId, msg.sender, grossShares);
+
+        _exitNonReentrant();
     }
 
     /// @notice Close the current epoch and lock the PPS snapshot.
@@ -311,6 +427,10 @@ contract EpochedQueueModule {
     ///         feeCollector in a single call (vs. per-claim in QueueModule).
     ///         Opens a fresh epoch immediately so new submissions are not blocked.
     function closeCurrentEpoch() external {
+        // Guarded for the same reason as the rest: it refreshes warm NAV and
+        // batch-transfers fee shares out, both external calls, before writing
+        // the epoch's locked price.
+        _enterNonReentrant();
         _checkSettlementAllowed(FixedMaturityStorage.layout());
 
         EpochQueueStorage.Layout storage eq = EpochQueueStorage.layout();
@@ -336,6 +456,10 @@ contract EpochedQueueModule {
         epoch.totalNetAssets = FixedPoint.mulWadDown(epoch.totalNetShares, pps);
         epoch.closedAt       = uint64(block.timestamp);
         epoch.state          = EpochQueueStorage.EpochState.Closed;
+
+        // Locked-pps liability, not yet backed by reserved cash (that only
+        // happens once fundEpoch() succeeds) -- see EpochQueueStorage.Layout.
+        eq.closedPendingAssets += epoch.totalNetAssets;
 
         // --- Batch fee transfer (one safeTransfer vs n transfers in QueueModule)
         // Fee shares have been sitting in escrow since submission.
@@ -363,6 +487,8 @@ contract EpochedQueueModule {
         eq.epochs[nextId].openedAt         = uint64(block.timestamp);
         eq.epochs[nextId].state            = EpochQueueStorage.EpochState.Open;
         emit EpochOpened(nextId, uint64(block.timestamp));
+
+        _exitNonReentrant();
     }
 
     /// @notice Pull liquidity deficit for a CLOSED epoch.
@@ -374,19 +500,49 @@ contract EpochedQueueModule {
     ///         Core improvement over QueueModule: a single external-call pull
     ///         covers ALL claims in the epoch, not one pull per settled claim.
     function fundEpoch(uint256 epochId) external {
+        // Guarded like every other state-changing entry point on this module.
+        // This one calls out to the buffer manager and the strategy router
+        // mid-body and then re-reads the hot balance to decide whether to mark
+        // the epoch FUNDED, so a reentrant call landing between the pull and
+        // that read is exactly the shape worth excluding.
+        _enterNonReentrant();
         EpochQueueStorage.Layout storage eq = EpochQueueStorage.layout();
         EpochQueueStorage.EpochData storage epoch = eq.epochs[epochId];
 
         if (epoch.state == EpochQueueStorage.EpochState.Open)   revert EpochNotClosed();
-        if (epoch.state == EpochQueueStorage.EpochState.Funded)  revert EpochAlreadyFunded();
+        // Already funded: no-op rather than revert, matching this function's
+        // documented "safe to call multiple times" contract. Reverting here
+        // made the cursor wedge unrecoverable -- oldestUnfundedEpochId can land
+        // on a Funded epoch when the bounded advance scan below stops early,
+        // and a keeper pointed at it would then revert on every single cycle
+        // with no way back. Syncing the cursor first makes the call self-heal.
+        if (epoch.state == EpochQueueStorage.EpochState.Funded) {
+            uint256 cursorBefore = eq.oldestUnfundedEpochId;
+            _syncOldestUnfunded(eq);
+            // Turning the old EpochAlreadyFunded revert into a no-op kept the
+            // keeper alive but cost the diagnostic: an integrator targeting the
+            // wrong epoch got silence. Emitting the cursor either side of the
+            // sync keeps the case observable and tells the two apart -- a moved
+            // cursor is the self-heal doing its job, an unmoved one is a caller
+            // that had nothing to do here.
+            emit EpochFundSkipped(epochId, cursorBefore, eq.oldestUnfundedEpochId);
+            _exitNonReentrant();
+            return;
+        }
 
         address assetAddr = _asset();
         uint256 hot       = IERC20(assetAddr).balanceOf(address(this));
 
-        emit EpochFundAttempt(epochId, epoch.totalNetAssets, hot, 0 /* filled below */);
+        // "needed" is this epoch's liability PLUS everything already reserved
+        // for other FUNDED-but-unclaimed epochs -- hot must cover both before
+        // this epoch can be marked Funded, otherwise funding it would just be
+        // spending cash another epoch's claimants already own.
+        uint256 needed = epoch.totalNetAssets + eq.reservedForClaims;
 
-        if (hot < epoch.totalNetAssets) {
-            uint256 deficit = epoch.totalNetAssets - hot;
+        uint256 hotBefore = hot;
+
+        if (hot < needed) {
+            uint256 deficit = needed - hot;
             CoreStorage.Layout storage core = CoreStorage.layout();
 
             // --- Step 1: try warm refill (cheaper than strategy redeem) ------
@@ -400,7 +556,7 @@ contract EpochedQueueModule {
                         emit Events.QueueWarmRefillFailed(epochId, pullWarm, reason);
                     }
                     hot    = IERC20(assetAddr).balanceOf(address(this));
-                    deficit = hot < epoch.totalNetAssets ? epoch.totalNetAssets - hot : 0;
+                    deficit = hot < needed ? needed - hot : 0;
                 }
             }
 
@@ -419,16 +575,71 @@ contract EpochedQueueModule {
             }
         }
 
-        emit EpochFundAttempt(epochId, epoch.totalNetAssets, 0 /* filled above */, hot);
+        // One event per call, with both balances populated. It used to be
+        // emitted twice, once with hotAfter zeroed and once with hotBefore
+        // zeroed, so an indexer reading either line in isolation got a
+        // fabricated balance.
+        emit EpochFundAttempt(epochId, epoch.totalNetAssets, hotBefore, hot);
 
-        // Mark funded only when fully covered
-        if (hot >= epoch.totalNetAssets) {
+        // Mark funded only when fully covered (this epoch's liability AND
+        // everything already reserved for other funded epochs)
+        if (hot >= needed) {
             epoch.state    = EpochQueueStorage.EpochState.Funded;
             epoch.fundedAt = uint64(block.timestamp);
+            eq.closedPendingAssets -= epoch.totalNetAssets;
+            eq.reservedForClaims   += epoch.totalNetAssets;
             emit EpochFunded(epochId, epoch.totalNetAssets);
+
+            // Advance the oldest-unfunded cursor past any now-consecutively-
+            // FUNDED epochs, but only if this WAS the cursor position — funding
+            // can happen out of order, so a later epoch being funded first must
+            // not move the cursor past an still-unfunded earlier one.
+            if (epochId == eq.oldestUnfundedEpochId) {
+                _syncOldestUnfunded(eq);
+            }
+        } else {
+            // Underfunded: the epoch stays CLOSED and fundEpoch() can be
+            // retried as liquidity arrives. This branch used to emit nothing at
+            // all, so a funding failure was invisible to monitoring -- the only
+            // symptom was a user reporting they had not been paid. Free
+            // liquidity is reported net of other funded epochs' reservations,
+            // which is the number that actually governs whether this epoch can
+            // ever be funded.
+            uint256 reserved = eq.reservedForClaims;
+            emit EpochFundingShortfall(
+                epochId,
+                epoch.totalNetAssets,
+                hot > reserved ? hot - reserved : 0,
+                needed - hot
+            );
         }
-        // If still underfunded the epoch remains CLOSED;
-        // fundEpoch() can be retried as more liquidity becomes available.
+
+        _exitNonReentrant();
+    }
+
+    /// @notice Advance oldestUnfundedEpochId past any leading FUNDED epochs.
+    ///         Permissionless and idempotent.
+    /// @dev The scan is bounded, so a long run of out-of-order-funded epochs
+    ///      may leave the cursor short of the true oldest unfunded epoch. That
+    ///      is a lag, not a wedge: every further call advances it another
+    ///      bounded step, and fundEpoch() on an already-funded target syncs it
+    ///      too instead of reverting. A cursor pointing at a FUNDED epoch is
+    ///      therefore always recoverable without governance.
+    function syncOldestUnfundedEpoch() external {
+        _syncOldestUnfunded(EpochQueueStorage.layout());
+    }
+
+    function _syncOldestUnfunded(EpochQueueStorage.Layout storage eq) internal {
+        uint256 next = eq.oldestUnfundedEpochId;
+        uint256 scanned = 0;
+        while (
+            next < eq.currentEpochId &&
+            eq.epochs[next].state == EpochQueueStorage.EpochState.Funded &&
+            scanned < MAX_CURSOR_SCAN
+        ) {
+            unchecked { ++next; ++scanned; }
+        }
+        if (next != eq.oldestUnfundedEpochId) eq.oldestUnfundedEpochId = next;
     }
 
     /// @notice User self-claims their assets from a FUNDED epoch.
@@ -460,6 +671,9 @@ contract EpochedQueueModule {
         // feeShares already left escrow (transferred to feeCollector) at close;
         // only netShares remain in escrow for this claim.
         eq.escrowedShares   -= claim.netShares;
+        eq.outstandingClaimCount -= 1;
+        // This claim's assets are no longer reserved -- they've been paid.
+        eq.reservedForClaims -= assets;
 
         // Burn net shares from escrow
         _burn(address(this), claim.netShares);
@@ -502,6 +716,9 @@ contract EpochedQueueModule {
 
                 // feeShares already left escrow at close; only netShares remain.
                 eq.escrowedShares -= claim.netShares;
+                eq.outstandingClaimCount -= 1;
+                // This claim's assets are no longer reserved -- they've been paid.
+                eq.reservedForClaims -= assets;
 
                 _burn(address(this), claim.netShares);
 
@@ -519,6 +736,140 @@ contract EpochedQueueModule {
         }
 
         _exitNonReentrant();
+    }
+
+    // =========================================================================
+    // PERFORMANCE FEE CRYSTALLIZATION
+    // =========================================================================
+    // Ported verbatim from QueueModule.sol: crystallization is independent of
+    // which queue-settlement mechanism a vault uses (no QueueStorage/epoch
+    // dependency in this logic at all) — it was only ever colocated with
+    // QueueModule because that was the only queue module wired at the time.
+
+    /// @notice End epoch and crystallize performance fee. Permissionless.
+    function endEpochCrystallize() external {
+        _crystallize();
+        _updateNavSmooth();
+    }
+
+    function _pps() internal view returns (uint256) {
+        uint256 ts = _totalSupply();
+        return ts == 0 ? FixedPoint.WAD : FixedPoint.divWadDown(_totalAssets(), ts);
+    }
+
+    function _crystallize() internal returns (uint256 newHwm, uint256 feeAssets) {
+        FeeStorage.Layout storage f = FeeStorage.layout();
+        CoreStorage.Layout storage core = CoreStorage.layout();
+
+        uint256 ts = _totalSupply();
+        if (ts == 0) {
+            // Escape-hatch guard: only reset the fee baseline to WAD when the vault
+            // is genuinely empty (no residual/dust assets). If assets remain while
+            // supply is zero (e.g. dust left after a full redemption), keep the
+            // existing HWM -- otherwise a forced empty-then-refill cycle could wipe
+            // an already fee-eligible high-water mark while value still sits in the
+            // vault, letting fresh "profit" be recognised on value that was never
+            // actually new.
+            uint256 assetsNow = _totalAssets();
+            if (assetsNow == 0) {
+                // Genuine fresh start: reset the baseline and record the event.
+                f.highWaterMark = FixedPoint.WAD;
+                f.lastCrystallize = uint64(block.timestamp);
+                emit Events.Crystallized(0, FixedPoint.WAD, 0);
+                return (FixedPoint.WAD, 0);
+            }
+            // Dust present: preserve the existing baseline. This is a no-op (no
+            // fee, no HWM change) so -- same reasoning as the drawdown branch
+            // below -- lastCrystallize is deliberately left untouched, and the
+            // storage slot is only written if it needs initialising.
+            uint256 preserved = f.highWaterMark == 0 ? FixedPoint.WAD : f.highWaterMark;
+            if (f.highWaterMark == 0) f.highWaterMark = preserved;
+            emit Events.Crystallized(0, preserved, 0);
+            return (preserved, 0);
+        }
+
+        uint256 pps = _pps();
+        uint256 old = f.highWaterMark == 0 ? FixedPoint.WAD : f.highWaterMark;
+
+        if (pps <= old) {
+            // HWM is monotonically non-decreasing. Initialise the storage slot on
+            // the very first crystallise (highWaterMark == 0 means "use WAD as
+            // default" but the value is never persisted until here); otherwise
+            // this write would just re-store the same value, so it's skipped.
+            if (f.highWaterMark == 0) f.highWaterMark = old;
+            // Deliberately NOT touching lastCrystallize here: this call is a no-op
+            // (no profit crystallized). Since endEpochCrystallize() is ROLE_PUBLIC,
+            // bumping the timer on every no-op call would let anyone repeatedly
+            // push lastCrystallize forward for free, indefinitely delaying the next
+            // legitimate (profitable) crystallization. The interval clock should
+            // only advance on a real crystallization event.
+            emit Events.Crystallized(old, pps, 0);
+            return (old, 0);
+        }
+
+        // Interval guard: block fee extraction within the minimum crystallise interval.
+        // Guard is skipped on the very first crystallise (highWaterMark == 0).
+        uint64 minInterval = f.minCrystallizeInterval;
+        if (f.highWaterMark != 0 && minInterval > 0 &&
+            block.timestamp < uint256(f.lastCrystallize) + uint256(minInterval)) {
+            return (old, 0);
+        }
+
+        uint256 total = _totalAssets();
+        uint256 oldAssets = FixedPoint.mulWadDown(old, ts);
+        uint256 profit = total > oldAssets ? total - oldAssets : 0;
+        feeAssets = FixedPoint.mulWadDown(profit, f.perfRateX);
+
+        if (feeAssets > 0) {
+            uint256 ppsBefore = pps;
+            uint256 feeShares = _previewDeposit(feeAssets);
+            if (feeShares > 0) {
+                _mint(core.feeCollector, feeShares);
+                emit Events.PerfFeeMinted(old, ppsBefore, feeShares, _pps());
+            }
+        }
+
+        newHwm = _pps();
+        f.highWaterMark = newHwm;
+        f.lastCrystallize = uint64(block.timestamp);
+        emit Events.Crystallized(old, newHwm, feeAssets);
+    }
+
+    function _updateNavSmooth() internal {
+        CoreStorage.Layout storage core = CoreStorage.layout();
+        if (address(core.params) == address(0)) return;
+
+        IParamsProvider.NavSmoothingParams memory nsp =
+            core.params.getNavSmoothingParams(address(this));
+        if (!nsp.enabled) return;
+
+        uint256 navReal = _totalAssets();
+        bool initialized =
+            (core.packedFlags & CoreStorage.FLAG_NAV_SMOOTH_INIT) != 0;
+
+        if (!initialized) {
+            core.navSmooth = navReal;
+            core.lastNavSmoothUpdate = uint64(block.timestamp);
+            core.packedFlags |= CoreStorage.FLAG_NAV_SMOOTH_INIT;
+            emit Events.NavSmoothUpdated(navReal, navReal, block.timestamp);
+            return;
+        }
+
+        if (
+            block.timestamp
+                < uint256(core.lastNavSmoothUpdate) + nsp.interval
+        ) {
+            return;
+        }
+
+        uint256 alpha = nsp.alphaBps;
+        uint256 newSmooth =
+            (alpha * navReal + (10000 - alpha) * core.navSmooth) / 10000;
+
+        core.navSmooth = newSmooth;
+        core.lastNavSmoothUpdate = uint64(block.timestamp);
+
+        emit Events.NavSmoothUpdated(navReal, newSmooth, block.timestamp);
     }
 
     // =========================================================================
@@ -542,8 +893,14 @@ contract EpochedQueueModule {
 
         _trySoftRefreshWarmNav();
 
+        // Anti-spam floor, enforced BEFORE the cap/liquidity branch so the
+        // outcome tracks the caller's input rather than vault state. Without
+        // this, the same sub-floor request settled while the cap had room and
+        // reverted once it was exhausted.
+        _checkMinClaimAmount(core, shares);
+
         bool rolled = ExitEngineLib.rollEpochIfNeeded(core);
-        if (rolled) emit Events.EpochRolled(core.epochStart);
+        if (rolled) emit Events.WithdrawalCapEpochRolled(core.epochStart);
 
         IParamsProvider.WithdrawalParams memory wp = core.params.getWithdrawalParams(address(this));
         uint256 gross = _convertToAssets(shares);
@@ -595,6 +952,14 @@ contract EpochedQueueModule {
         return EpochQueueStorage.layout().currentEpochId;
     }
 
+    /// @notice Claim count of the currently open epoch — used by keepers as an
+    ///         anti-churn check before closeCurrentEpoch() (skip closing an
+    ///         epoch with nothing in it).
+    function currentEpochClaimCount() external view returns (uint256) {
+        EpochQueueStorage.Layout storage eq = EpochQueueStorage.layout();
+        return eq.epochs[eq.currentEpochId].claimCount;
+    }
+
     function epochData(uint256 epochId)
         external view
         returns (EpochQueueStorage.EpochData memory)
@@ -617,13 +982,44 @@ contract EpochedQueueModule {
         return EpochQueueStorage.layout().escrowedShares;
     }
 
-    /// @notice Returns the shortfall in hot assets to fund a specific epoch.
-    ///         Returns 0 if the epoch is already funded or hot >= totalNetAssets.
+    /// @notice Total unclaimed claims across ALL epochs — the dynamic-cap
+    ///         "queue depth" signal. See _epochCapRemaining().
+    function outstandingClaimCount() external view returns (uint256) {
+        return EpochQueueStorage.layout().outstandingClaimCount;
+    }
+
+    /// @notice Oldest epoch that is CLOSED but not yet FUNDED (the epoch-model
+    ///         equivalent of QueueStorage.head) — what a keeper should call
+    ///         fundEpoch() on next. Equal to currentEpochId() when there is no
+    ///         funding backlog (nothing closed-and-unfunded exists yet).
+    function oldestUnfundedEpochId() external view returns (uint256) {
+        return EpochQueueStorage.layout().oldestUnfundedEpochId;
+    }
+
+    /// @notice Returns the shortfall in hot assets to fund a specific epoch,
+    ///         net of everything already reserved for other funded epochs --
+    ///         matches fundEpoch()'s actual "needed" requirement.
+    ///         Returns 0 if the epoch is already funded or fully covered.
     function epochDeficit(uint256 epochId) external view returns (uint256) {
-        EpochQueueStorage.EpochData storage e = EpochQueueStorage.layout().epochs[epochId];
+        EpochQueueStorage.Layout storage eq = EpochQueueStorage.layout();
+        EpochQueueStorage.EpochData storage e = eq.epochs[epochId];
         if (e.state != EpochQueueStorage.EpochState.Closed) return 0;
         uint256 hot = IERC20(_asset()).balanceOf(address(this));
-        return hot < e.totalNetAssets ? e.totalNetAssets - hot : 0;
+        uint256 needed = e.totalNetAssets + eq.reservedForClaims;
+        return hot < needed ? needed - hot : 0;
+    }
+
+    /// @notice Assets earmarked for FUNDED-but-unclaimed claims across ALL
+    ///         funded epochs. This much of the hot balance is off-limits to
+    ///         instant exits, strategy deploys, and funding any other epoch.
+    function reservedForClaims() external view returns (uint256) {
+        return EpochQueueStorage.layout().reservedForClaims;
+    }
+
+    /// @notice Locked-pps liability for CLOSED-but-not-yet-FUNDED epochs.
+    ///         Not yet backed by reserved cash (see reservedForClaims()).
+    function closedPendingAssets() external view returns (uint256) {
+        return EpochQueueStorage.layout().closedPendingAssets;
     }
 
     /// @notice Returns true when the current open epoch can be closed.
@@ -683,6 +1079,15 @@ contract EpochedQueueModule {
         ICoreVault(address(this)).processorBurn(from, amount);
     }
 
+    /// @dev Raw asset-to-share conversion WITHOUT deposit fee. Used for perf fee minting.
+    function _previewDeposit(uint256 assets) internal view returns (uint256) {
+        return IERC4626(address(this)).convertToShares(assets);
+    }
+
+    function _mint(address to, uint256 amount) internal {
+        ICoreVault(address(this)).processorMint(to, amount);
+    }
+
     // =========================================================================
     // INTERNAL: NAV FRESHNESS + INCENTIVES + REENTRANCY
     // =========================================================================
@@ -740,18 +1145,27 @@ contract EpochedQueueModule {
         // ExitEngineLib.calculateCapRemaining uses), including dynamic cap support.
         if (gross > _epochCapRemaining(core, wp, _totalAssets())) return (false, address(0));
 
-        // Liquidity
+        // Liquidity -- hot balance net of everything already reserved for
+        // FUNDED-but-unclaimed epochs; an instant exit must never dip into
+        // cash another epoch's claimants already own.
         assetAddr = _asset();
-        if (IERC20(assetAddr).balanceOf(address(this)) < gross) return (false, address(0));
+        uint256 hot = IERC20(assetAddr).balanceOf(address(this));
+        uint256 reserved = EpochQueueStorage.layout().reservedForClaims;
+        uint256 free = hot > reserved ? hot - reserved : 0;
+        if (free < gross) return (false, address(0));
 
         return (true, assetAddr);
     }
 
     /// @dev Remaining immediate-withdrawal capacity for the current cap epoch.
     ///      Mirrors ExitEngineLib.calculateCapRemaining's bps-selection logic, but
-    ///      uses this module's own open-epoch claimCount as the "queue depth"
-    ///      signal for dynamic-cap scaling (EpochQueueStorage has no flat queue
-    ///      array to measure, unlike QueueStorage).
+    ///      uses eq.outstandingClaimCount (total unclaimed claims across ALL
+    ///      epochs) as the "queue depth" signal for dynamic-cap scaling.
+    ///      NOTE: this MUST be a cross-epoch running total, not the current
+    ///      open epoch's EpochData.claimCount — that counter resets to 0 every
+    ///      closeCurrentEpoch(), which would let dynamic-cap stress detection
+    ///      be dodged by simply waiting for the next epoch to open while a
+    ///      large backlog sits unfunded/unclaimed in prior epochs.
     function _epochCapRemaining(
         CoreStorage.Layout storage core,
         IParamsProvider.WithdrawalParams memory wp,
@@ -764,8 +1178,7 @@ contract EpochedQueueModule {
             if (dcp.minBps == 0 || dcp.maxBps == 0) {
                 cap = wp.capPerEpochBps;
             } else {
-                EpochQueueStorage.Layout storage eq = EpochQueueStorage.layout();
-                uint256 queueDepth = eq.epochs[eq.currentEpochId].claimCount;
+                uint256 queueDepth = EpochQueueStorage.layout().outstandingClaimCount;
                 cap = WithdrawalCapLib.calculateDynamicCapBps(
                     dcp.minBps, dcp.maxBps, dcp.queueStressThreshold, queueDepth
                 );

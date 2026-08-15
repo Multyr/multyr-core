@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { QueueModule } from "../modules/QueueModule.sol";
+import { EpochedQueueModule } from "../modules/EpochedQueueModule.sol";
 import { AdminModule } from "../modules/AdminModule.sol";
 import { LiquidityOpsModule } from "../modules/LiquidityOpsModule.sol";
 import { FixedMaturityModule } from "../modules/FixedMaturityModule.sol";
@@ -22,8 +22,9 @@ library SelectorLib {
     // ═══════════════════════════════════════════════════════════════════════════════
     // SELECTOR COUNTS (for validation)
     // ═══════════════════════════════════════════════════════════════════════════════
-    uint256 internal constant QUEUE_MODULE_SELECTORS = 6; // +1: compactQueue
-    uint256 internal constant QUEUE_MODULE_VIEW_SELECTORS = 5; // +1: requiredHotForBatch, +1: settlePreview
+    // "Queue module" = EpochedQueueModule (the sole queue-settlement mechanism).
+    uint256 internal constant QUEUE_MODULE_SELECTORS = 9; // +1: syncOldestUnfundedEpoch
+    uint256 internal constant QUEUE_MODULE_VIEW_SELECTORS = 12; // +1: reservedForClaims, +1: closedPendingAssets
     uint256 internal constant ADMIN_MODULE_OWNER_SELECTORS = 35; // +1: setRewardsTreasury
     uint256 internal constant ADMIN_MODULE_VIEW_SELECTORS = 15; // +1: getForceExitPenalty, +1: isPerfInitialized
     uint256 internal constant ERC4626_MODULE_SELECTORS = 11; // +1: forceWithdraw, +1: forceWithdrawAll
@@ -39,12 +40,15 @@ library SelectorLib {
     // ═══════════════════════════════════════════════════════════════════════════════
     function getQueueModuleSelectors() internal pure returns (bytes4[] memory selectors) {
         selectors = new bytes4[](QUEUE_MODULE_SELECTORS);
-        selectors[0] = QueueModule.requestClaim.selector;
-        selectors[1] = QueueModule.cancelClaim.selector;
-        selectors[2] = QueueModule.processQueuedRedemptions.selector;
-        selectors[3] = QueueModule.settleFeesAndProcessQueue.selector;
-        selectors[4] = QueueModule.endEpochCrystallize.selector;
-        selectors[5] = QueueModule.compactQueue.selector;
+        selectors[0] = EpochedQueueModule.requestEpochWithdrawal.selector;
+        selectors[1] = EpochedQueueModule.cancelEpochWithdrawal.selector;
+        selectors[2] = EpochedQueueModule.closeCurrentEpoch.selector;
+        selectors[3] = EpochedQueueModule.fundEpoch.selector;
+        selectors[4] = EpochedQueueModule.claimEpochAssets.selector;
+        selectors[5] = EpochedQueueModule.batchClaimEpochAssets.selector;
+        selectors[6] = EpochedQueueModule.requestInstantWithdrawal.selector;
+        selectors[7] = EpochedQueueModule.endEpochCrystallize.selector;
+        selectors[8] = EpochedQueueModule.syncOldestUnfundedEpoch.selector;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -52,11 +56,18 @@ library SelectorLib {
     // ═══════════════════════════════════════════════════════════════════════════════
     function getQueueModuleViewSelectors() internal pure returns (bytes4[] memory selectors) {
         selectors = new bytes4[](QUEUE_MODULE_VIEW_SELECTORS);
-        selectors[0] = QueueModule.nextClaimId.selector;
-        selectors[1] = QueueModule.queueLength.selector;
-        selectors[2] = QueueModule.pendingShares.selector;
-        selectors[3] = QueueModule.requiredHotForBatch.selector;
-        selectors[4] = QueueModule.settlePreview.selector;
+        selectors[0] = EpochedQueueModule.currentEpochId.selector;
+        selectors[1] = EpochedQueueModule.epochData.selector;
+        selectors[2] = EpochedQueueModule.epochClaim.selector;
+        selectors[3] = EpochedQueueModule.nextClaimIdForEpoch.selector;
+        selectors[4] = EpochedQueueModule.totalEscrowedShares.selector;
+        selectors[5] = EpochedQueueModule.outstandingClaimCount.selector;
+        selectors[6] = EpochedQueueModule.oldestUnfundedEpochId.selector;
+        selectors[7] = EpochedQueueModule.canCloseCurrentEpoch.selector;
+        selectors[8] = EpochedQueueModule.currentEpochClaimCount.selector;
+        selectors[9] = EpochedQueueModule.epochDeficit.selector;
+        selectors[10] = EpochedQueueModule.reservedForClaims.selector;
+        selectors[11] = EpochedQueueModule.closedPendingAssets.selector;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════

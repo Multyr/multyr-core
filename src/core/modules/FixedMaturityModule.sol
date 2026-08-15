@@ -13,9 +13,9 @@ import { FixedMaturityLogicLib } from "../libraries/FixedMaturityLogicLib.sol";
 import { Events } from "../libraries/Events.sol";
 import { IBufferManager } from "../../interfaces/IBufferManager.sol";
 import { IStrategyRouter } from "../../interfaces/IStrategyRouter.sol";
-import { IQueueModule } from "../../interfaces/IQueueModule.sol";
 import { ICoreVault } from "../../interfaces/ICoreVault.sol";
 import { FixedPoint } from "../../libs/FixedPoint.sol";
+import { EpochQueueStorage } from "./EpochedQueueModule.sol";
 
 // Errors from FixedMaturityStorage.sol (imported via transitive import):
 // DepositsClosedForVaultState, StandardExitNotAvailablePreMaturity,
@@ -58,6 +58,15 @@ contract FixedMaturityModule {
         CoreStorage.Layout storage core = CoreStorage.layout();
         if (fm.vaultMode != VaultMode.OpenEnded) revert InvalidVaultMode();
         if (core.packedFlags & CoreStorage.FLAG_ROUTING_FROZEN != 0) revert InvalidVaultMode();
+        // The FixedMaturity lifecycle moves capital out of the vault in states
+        // where the epoch queue is gated off (activateFixedMaturityCycle in
+        // Starting, refundClaim in FundingFailed), so neither consults
+        // reservedForClaims. That is only sound while no epoch claim can be
+        // outstanding across the switch -- claimEpochAssets has no FixedMaturity
+        // gate and would otherwise race the cycle deployment for the same cash.
+        if (EpochQueueStorage.layout().outstandingClaimCount != 0) {
+            revert CloseNotAllowedWithPendingShares();
+        }
         fm.vaultMode = VaultMode.FixedMaturity;
         fm.vaultState = VaultState.Funding;
         emit Events.VaultModeConfigured(1);
@@ -160,15 +169,18 @@ contract FixedMaturityModule {
         emit Events.FixedMaturityCycleActivated(fm.startTs, fm.maturityTs, amount);
     }
 
-    /// @notice Matured → Closed (requires pendingShares == 0, dust assets allowed).
+    /// @notice Matured → Closed (requires outstandingClaimCount == 0, dust assets allowed).
     function closeFixedMaturityCycle() external {
         FixedMaturityStorage.Layout storage fm = FixedMaturityStorage.layout();
         if (fm.vaultState != VaultState.Matured) revert InvalidVaultState();
 
-        // pendingShares == 0 is the only hard requirement. Dust assets are allowed.
-        if (IQueueModule(address(this)).pendingShares() != 0) {
-            revert CloseNotAllowedWithPendingShares();
-        }
+        // outstandingClaimCount == 0 is the only hard requirement (no claim left
+        // unclaimed across any epoch — open, closed-unfunded, or funded-unclaimed).
+        // Dust assets are allowed.
+        (bool ok, bytes memory data) = address(this).staticcall(
+            abi.encodeWithSignature("outstandingClaimCount()")
+        );
+        if (!ok || abi.decode(data, (uint256)) != 0) revert CloseNotAllowedWithPendingShares();
 
         fm.vaultState = VaultState.Closed;
         emit Events.FixedMaturityClosed();
@@ -362,7 +374,7 @@ contract FixedMaturityModule {
     /// @dev Apply final performance fee using the immutable snapshot in finalPerformanceFeeBaseAssets.
     ///      CEI pattern: set applied=true BEFORE any external calls.
     ///
-    ///      This mints fee shares the same way QueueModule._crystallize() does (preview
+    ///      This mints fee shares the same way EpochedQueueModule._crystallize() does (preview
     ///      deposit, mint to feeCollector), but it is NOT a duplicate of that function and
     ///      does not need its HWM-monotonicity or min-crystallize-interval fixes:
     ///      - No persistent high-water mark: profit is `finalPerformanceFeeBaseAssets -
@@ -389,7 +401,7 @@ contract FixedMaturityModule {
         uint256 feeAssets = FixedPoint.mulWadDown(profit, f.perfRateX);
         if (feeAssets == 0) return;
 
-        // Mint fee shares to feeCollector — same pattern as _crystallize() in QueueModule.
+        // Mint fee shares to feeCollector — same pattern as _crystallize() in EpochedQueueModule.
         uint256 feeShares = _previewDeposit(feeAssets);
         if (feeShares == 0) return;
 

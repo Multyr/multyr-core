@@ -15,7 +15,7 @@ import { FixedMaturityVaultUpkeep } from "@multyr-core/automation/FixedMaturityV
 ///      Does not require any special permissions to deploy -- Chainlink registers as forwarder.
 /// @custom:chain-id 42161 (Arbitrum One -- enforced at runtime)
 /// @custom:env-vars DEPLOYER_PRIVATE_KEY, FM_VAULT_ADDRESS,
-///                  FM_MAX_SETTLE_CLAIMS (opt, default 15), FM_UPKEEP_STRICT_MODE (opt, default true)
+///                  FM_UPKEEP_STRICT_MODE (opt, default true)
 /// @custom:post-deploy 1) Register on Chainlink Automation
 ///                     2) No additional vault grants needed -- upkeep reads public FM state
 contract DeployFixedMaturityVaultUpkeep is Script {
@@ -32,7 +32,6 @@ contract DeployFixedMaturityVaultUpkeep is Script {
         address deployer   = vm.addr(deployerPk);
 
         address fmVault       = vm.envAddress("FM_VAULT_ADDRESS");
-        uint32  maxClaims     = uint32(vm.envOr("FM_MAX_SETTLE_CLAIMS",   uint256(15)));
         bool    strictMode    = vm.envOr("FM_UPKEEP_STRICT_MODE",         true);
 
         require(fmVault != address(0), "FM_VAULT_ADDRESS required");
@@ -42,13 +41,12 @@ contract DeployFixedMaturityVaultUpkeep is Script {
         console.log("================================================================");
         console.log("Deployer:      ", deployer);
         console.log("FM Vault:      ", fmVault);
-        console.log("Max Claims:    ", maxClaims);
         console.log("Strict Mode:   ", strictMode);
         console.log("================================================================");
 
         vm.startBroadcast(deployerPk);
 
-        fmUpkeep = new FixedMaturityVaultUpkeep(fmVault, maxClaims, strictMode);
+        fmUpkeep = new FixedMaturityVaultUpkeep(fmVault, strictMode);
 
         vm.stopBroadcast();
 

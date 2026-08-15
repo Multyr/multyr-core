@@ -7,7 +7,7 @@ import { CoreVault } from "../../../src/core/CoreVault.sol";
 import { CoreHarness } from "../../helpers/CoreHarness.sol";
 import { ERC20Mock } from "../../../src/mocks/ERC20Mock.sol";
 import { MockParamsProvider } from "../../helpers/MockParamsProvider.sol";
-import { QueueModule } from "../../../src/core/modules/QueueModule.sol";
+import { EpochedQueueModule } from "../../../src/core/modules/EpochedQueueModule.sol";
 import { AdminModule } from "../../../src/core/modules/AdminModule.sol";
 import { IQueueModule } from "../../../src/interfaces/IQueueModule.sol";
 import { IAdminModule } from "../../../src/interfaces/IAdminModule.sol";
@@ -29,7 +29,7 @@ contract CoreVaultSecuritySuite is Test {
     CoreHarness internal vault;
     ERC20Mock internal usdc;
     MockParamsProvider internal params;
-    QueueModule internal queueModule;
+    EpochedQueueModule internal queueModule;
     AdminModule internal adminModule;
 
     address internal owner = address(0xA11CE);
@@ -53,7 +53,7 @@ contract CoreVaultSecuritySuite is Test {
         params = new MockParamsProvider();
 
         // Deploy modules
-        queueModule = new QueueModule();
+        queueModule = new EpochedQueueModule();
         adminModule = new AdminModule();
 
         // Deploy CoreHarness (wires all modules + unpauses automatically)
@@ -91,23 +91,22 @@ contract CoreVaultSecuritySuite is Test {
     }
 
     function _wireModules() internal {
-        // QueueModule selectors (PUBLIC)
+        // EpochedQueueModule selectors (PUBLIC)
         vault.setModule(
-            QueueModule.requestClaim.selector, address(queueModule), vault.ROLE_PUBLIC()
+            EpochedQueueModule.requestEpochWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
-        vault.setModule(QueueModule.cancelClaim.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.cancelEpochWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.closeCurrentEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.fundEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.claimEpochAssets.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.batchClaimEpochAssets.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(
-            QueueModule.processQueuedRedemptions.selector, address(queueModule), vault.ROLE_PUBLIC()
+            EpochedQueueModule.requestInstantWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
         vault.setModule(
-            QueueModule.settleFeesAndProcessQueue.selector,
-            address(queueModule),
-            vault.ROLE_PUBLIC()
+            EpochedQueueModule.totalEscrowedShares.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
-        vault.setModule(
-            QueueModule.pendingShares.selector, address(queueModule), vault.ROLE_PUBLIC()
-        );
-        vault.setModule(QueueModule.queueLength.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.outstandingClaimCount.selector, address(queueModule), vault.ROLE_PUBLIC());
 
         // AdminModule selectors (OWNER)
         vault.setModule(
@@ -137,9 +136,8 @@ contract CoreVaultSecuritySuite is Test {
 
         vm.startPrank(attacker);
         uint256 shares = vault.deposit(amount, attacker);
-        IQueueModule(address(vault)).requestClaim(true, shares);
+        IQueueModule(address(vault)).requestInstantWithdrawal(shares);
         vm.stopPrank();
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(1);
 
         uint256 endBalance = usdc.balanceOf(attacker);
         assertLe(endBalance, startBalance, "flash loan never profitable");
@@ -165,8 +163,7 @@ contract CoreVaultSecuritySuite is Test {
 
         uint256 sharesToWithdraw = vault.previewWithdraw(withdraw1);
         vm.prank(attacker);
-        IQueueModule(address(vault)).requestClaim(true, sharesToWithdraw);
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(1);
+        IQueueModule(address(vault)).requestInstantWithdrawal(sharesToWithdraw);
 
         uint256 priceAfter = vault.convertToAssets(1e6);
 
@@ -189,9 +186,8 @@ contract CoreVaultSecuritySuite is Test {
         // Whale enters and exits
         vm.startPrank(attacker);
         uint256 whaleShares = vault.deposit(whaleSize, attacker);
-        IQueueModule(address(vault)).requestClaim(true, whaleShares);
+        IQueueModule(address(vault)).requestInstantWithdrawal(whaleShares);
         vm.stopPrank();
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(1);
 
         // Retail value unchanged
         uint256 retailValueAfter = vault.convertToAssets(retailShares);
@@ -219,8 +215,7 @@ contract CoreVaultSecuritySuite is Test {
 
         // Back-run
         vm.prank(attacker);
-        IQueueModule(address(vault)).requestClaim(true, attackerShares);
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(1);
+        IQueueModule(address(vault)).requestInstantWithdrawal(attackerShares);
 
         uint256 attackerEnd = usdc.balanceOf(attacker);
         assertLe(attackerEnd, attackerStart + 1, "no sandwich profit");
@@ -373,9 +368,8 @@ contract CoreVaultSecuritySuite is Test {
 
         vm.startPrank(attacker);
         uint256 shares = vault.deposit(amount, attacker);
-        IQueueModule(address(vault)).requestClaim(true, shares);
+        IQueueModule(address(vault)).requestInstantWithdrawal(shares);
         vm.stopPrank();
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(1);
 
         uint256 balanceAfter = usdc.balanceOf(attacker);
 
@@ -403,9 +397,8 @@ contract CoreVaultSecuritySuite is Test {
 
         uint256 shares = vault.balanceOf(user1);
         uint256 usdcBefore = usdc.balanceOf(user1);
-        IQueueModule(address(vault)).requestClaim(true, shares);
+        IQueueModule(address(vault)).requestInstantWithdrawal(shares);
         vm.stopPrank();
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(1);
         uint256 received = usdc.balanceOf(user1) - usdcBefore;
 
         // Allow 0.1% tolerance for rounding across many operations
@@ -487,8 +480,7 @@ contract CoreVaultSecuritySuite is Test {
         uint256 shares = vault.previewWithdraw(500_000e6);
         vm.prank(attacker);
         uint256 gasStart = gasleft();
-        IQueueModule(address(vault)).requestClaim(true, shares);
-        IQueueModule(address(vault)).settleFeesAndProcessQueue(1);
+        IQueueModule(address(vault)).requestInstantWithdrawal(shares);
         uint256 gasUsed = gasStart - gasleft();
 
         assertLt(gasUsed, 2_000_000, "withdraw gas bounded");
@@ -507,12 +499,9 @@ contract CoreVaultSecuritySuite is Test {
 
             if (i % 2 == 0) {
                 uint256 sh = vault.previewWithdraw(50_000e6);
-                IQueueModule(address(vault)).requestClaim(false, sh);
+                IQueueModule(address(vault)).requestEpochWithdrawal(sh);
             }
             vm.stopPrank();
-            if (i % 2 == 0) {
-                IQueueModule(address(vault)).settleFeesAndProcessQueue(1);
-            }
         }
 
         uint256 totalSupply = vault.totalSupply();
