@@ -213,6 +213,12 @@ contract EpochedQueueModule {
     // =========================================================================
     uint256 public constant MAX_WARM_NAV_AGE = 15 minutes;
 
+    /// @notice Upper bound on how far one call may advance the
+    ///         oldestUnfundedEpochId cursor, so the scan can never blow the
+    ///         block gas limit. Hitting the bound leaves the cursor lagging,
+    ///         never stuck: see syncOldestUnfundedEpoch().
+    uint256 public constant MAX_CURSOR_SCAN = 50;
+
     // =========================================================================
     // EPOCH QUEUE -- WRITE FUNCTIONS
     // =========================================================================
@@ -423,7 +429,16 @@ contract EpochedQueueModule {
         EpochQueueStorage.EpochData storage epoch = eq.epochs[epochId];
 
         if (epoch.state == EpochQueueStorage.EpochState.Open)   revert EpochNotClosed();
-        if (epoch.state == EpochQueueStorage.EpochState.Funded)  revert EpochAlreadyFunded();
+        // Already funded: no-op rather than revert, matching this function's
+        // documented "safe to call multiple times" contract. Reverting here
+        // made the cursor wedge unrecoverable -- oldestUnfundedEpochId can land
+        // on a Funded epoch when the bounded advance scan below stops early,
+        // and a keeper pointed at it would then revert on every single cycle
+        // with no way back. Syncing the cursor first makes the call self-heal.
+        if (epoch.state == EpochQueueStorage.EpochState.Funded) {
+            _syncOldestUnfunded(eq);
+            return;
+        }
 
         address assetAddr = _asset();
         uint256 hot       = IERC20(assetAddr).balanceOf(address(this));
@@ -486,20 +501,36 @@ contract EpochedQueueModule {
             // can happen out of order, so a later epoch being funded first must
             // not move the cursor past an still-unfunded earlier one.
             if (epochId == eq.oldestUnfundedEpochId) {
-                uint256 next = epochId + 1;
-                uint256 scanned = 0;
-                while (
-                    next < eq.currentEpochId &&
-                    eq.epochs[next].state == EpochQueueStorage.EpochState.Funded &&
-                    scanned < 50
-                ) {
-                    unchecked { ++next; ++scanned; }
-                }
-                eq.oldestUnfundedEpochId = next;
+                _syncOldestUnfunded(eq);
             }
         }
         // If still underfunded the epoch remains CLOSED;
         // fundEpoch() can be retried as more liquidity becomes available.
+    }
+
+    /// @notice Advance oldestUnfundedEpochId past any leading FUNDED epochs.
+    ///         Permissionless and idempotent.
+    /// @dev The scan is bounded, so a long run of out-of-order-funded epochs
+    ///      may leave the cursor short of the true oldest unfunded epoch. That
+    ///      is a lag, not a wedge: every further call advances it another
+    ///      bounded step, and fundEpoch() on an already-funded target syncs it
+    ///      too instead of reverting. A cursor pointing at a FUNDED epoch is
+    ///      therefore always recoverable without governance.
+    function syncOldestUnfundedEpoch() external {
+        _syncOldestUnfunded(EpochQueueStorage.layout());
+    }
+
+    function _syncOldestUnfunded(EpochQueueStorage.Layout storage eq) internal {
+        uint256 next = eq.oldestUnfundedEpochId;
+        uint256 scanned = 0;
+        while (
+            next < eq.currentEpochId &&
+            eq.epochs[next].state == EpochQueueStorage.EpochState.Funded &&
+            scanned < MAX_CURSOR_SCAN
+        ) {
+            unchecked { ++next; ++scanned; }
+        }
+        if (next != eq.oldestUnfundedEpochId) eq.oldestUnfundedEpochId = next;
     }
 
     /// @notice User self-claims their assets from a FUNDED epoch.

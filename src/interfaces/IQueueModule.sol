@@ -35,6 +35,9 @@ interface IQueueModule {
         external
         returns (bool settledImmediately, uint256 epochId, uint256 claimId);
 
+    /// @notice Advance the oldest-unfunded epoch cursor past any leading FUNDED epochs
+    function syncOldestUnfundedEpoch() external;
+
     /// @notice End epoch and crystallize performance fee
     /// @dev Calls performance fee crystallization and updates NAV smoothing
     function endEpochCrystallize() external;

@@ -23,7 +23,7 @@ library SelectorLib {
     // SELECTOR COUNTS (for validation)
     // ═══════════════════════════════════════════════════════════════════════════════
     // "Queue module" = EpochedQueueModule (the sole queue-settlement mechanism).
-    uint256 internal constant QUEUE_MODULE_SELECTORS = 8;
+    uint256 internal constant QUEUE_MODULE_SELECTORS = 9; // +1: syncOldestUnfundedEpoch
     uint256 internal constant QUEUE_MODULE_VIEW_SELECTORS = 12; // +1: reservedForClaims, +1: closedPendingAssets
     uint256 internal constant ADMIN_MODULE_OWNER_SELECTORS = 35; // +1: setRewardsTreasury
     uint256 internal constant ADMIN_MODULE_VIEW_SELECTORS = 15; // +1: getForceExitPenalty, +1: isPerfInitialized
@@ -48,6 +48,7 @@ library SelectorLib {
         selectors[5] = EpochedQueueModule.batchClaimEpochAssets.selector;
         selectors[6] = EpochedQueueModule.requestInstantWithdrawal.selector;
         selectors[7] = EpochedQueueModule.endEpochCrystallize.selector;
+        selectors[8] = EpochedQueueModule.syncOldestUnfundedEpoch.selector;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════

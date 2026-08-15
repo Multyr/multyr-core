@@ -438,4 +438,77 @@ contract EpochedQueueModule_Test is Test {
         uint256 assets = EpochedQueueModule(address(core)).claimEpochAssets(epoch0Id, aliceClaimId);
         assertEq(assets, 1_000_000e6);
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // BUG FIX (PR #13 review): the oldestUnfundedEpochId cursor could wedge.
+    // The bounded advance scan can leave the cursor parked on an epoch that is
+    // already FUNDED; fundEpoch() used to revert EpochAlreadyFunded on it,
+    // every cycle, with no administrative reset. It now syncs the cursor and
+    // returns, so the state is always recoverable permissionlessly.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    function test_fundEpoch_onAlreadyFundedEpoch_syncsCursorInsteadOfReverting() public {
+        uint256 t = block.timestamp;
+        _deposit(user, 1_000_000e6);
+
+        vm.prank(user);
+        (uint256 epoch0Id, uint256 claim0Id) =
+            EpochedQueueModule(address(core)).requestEpochWithdrawal(100_000e6);
+        t += 7 days + 1;
+        vm.warp(t);
+        EpochedQueueModule(address(core)).closeCurrentEpoch();
+        EpochedQueueModule(address(core)).fundEpoch(epoch0Id);
+
+        // Force the cursor back onto the now-FUNDED epoch, reproducing the
+        // state the bounded scan can leave behind.
+        _forceCursor(epoch0Id);
+        assertEq(EpochedQueueModule(address(core)).oldestUnfundedEpochId(), epoch0Id);
+
+        // Must not revert, and must leave the cursor past the funded epoch.
+        EpochedQueueModule(address(core)).fundEpoch(epoch0Id);
+        assertEq(
+            EpochedQueueModule(address(core)).oldestUnfundedEpochId(),
+            EpochedQueueModule(address(core)).currentEpochId(),
+            "cursor self-healed past the already-funded epoch"
+        );
+
+        // And the claim behind it is still payable.
+        vm.prank(user);
+        uint256 assets = EpochedQueueModule(address(core)).claimEpochAssets(epoch0Id, claim0Id);
+        assertGt(assets, 0, "claimant unaffected by the cursor repair");
+    }
+
+    function test_syncOldestUnfundedEpoch_isPermissionlessAndIdempotent() public {
+        uint256 t = block.timestamp;
+        _deposit(user, 1_000_000e6);
+
+        vm.prank(user);
+        (uint256 epoch0Id,) =
+            EpochedQueueModule(address(core)).requestEpochWithdrawal(100_000e6);
+        t += 7 days + 1;
+        vm.warp(t);
+        EpochedQueueModule(address(core)).closeCurrentEpoch();
+        EpochedQueueModule(address(core)).fundEpoch(epoch0Id);
+
+        _forceCursor(epoch0Id);
+
+        vm.prank(makeAddr("anyone"));
+        EpochedQueueModule(address(core)).syncOldestUnfundedEpoch();
+        uint256 healed = EpochedQueueModule(address(core)).oldestUnfundedEpochId();
+        assertEq(healed, EpochedQueueModule(address(core)).currentEpochId(), "cursor advanced");
+
+        vm.prank(makeAddr("anyone"));
+        EpochedQueueModule(address(core)).syncOldestUnfundedEpoch();
+        assertEq(
+            EpochedQueueModule(address(core)).oldestUnfundedEpochId(), healed,
+            "second call is a no-op"
+        );
+    }
+
+    /// @dev Write oldestUnfundedEpochId directly. The field sits at offset 6 of
+    ///      EpochQueueStorage.Layout (currentEpochId, three mappings,
+    ///      escrowedShares, outstandingClaimCount, then this one).
+    function _forceCursor(uint256 value) internal {
+        vm.store(address(core), bytes32(uint256(EpochQueueStorage.SLOT) + 6), bytes32(value));
+    }
 }
