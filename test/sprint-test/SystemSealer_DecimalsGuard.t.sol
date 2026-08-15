@@ -40,7 +40,6 @@ import { IAdminModule } from "../../src/interfaces/IAdminModule.sol";
 import { IBufferManager } from "../../src/interfaces/IBufferManager.sol";
 import { IncentivesTimelock } from "../../src/governance/IncentivesTimelock.sol";
 import { ERC20Mock } from "../../src/mocks/ERC20Mock.sol";
-import { MockParamsProvider } from "../helpers/MockParamsProvider.sol";
 
 contract SystemSealer_DecimalsGuard_Test is Test {
     uint256 constant TIMELOCK_DELAY = 2 days;
@@ -71,8 +70,6 @@ contract SystemSealer_DecimalsGuard_Test is Test {
         vm.startPrank(deployer);
 
         weth = new ERC20Mock("Wrapped Ether", "WETH", 18);
-        MockParamsProvider params = new MockParamsProvider();
-        params.setLockPeriod(0);
 
         address[] memory proposers = new address[](1);
         address[] memory executors = new address[](1);
@@ -81,13 +78,16 @@ contract SystemSealer_DecimalsGuard_Test is Test {
         rootTimelock = new IncentivesTimelock(TIMELOCK_DELAY, proposers, executors, deployer);
 
         feeCollector = new FeeCollector(address(rootTimelock), treasury, treasury, treasury, 7000, 200, 3000);
-        globalConfig = new GlobalConfig(address(rootTimelock), 50, 100, 2000, 86400, 10, 500, 3600, 3600);
+        globalConfig = new GlobalConfig(address(rootTimelock), 50, 100, 2000, 0, 10, 500, 3600, 3600);
 
         systemSealer = new SystemSealer();
         SelectorRegistry selectorRegistry = new SelectorRegistry();
 
+        // The vault must resolve its params from the SAME contract the seal config names:
+        // SystemSealer requires config.globalConfig == vault.params(), and the decimals
+        // override check is only meaningful against the provider the vault actually reads.
         vault = new CoreVault(
-            IERC20Metadata(address(weth)), "Vault", "V", deployer, address(feeCollector), address(params)
+            IERC20Metadata(address(weth)), "Vault", "V", deployer, address(feeCollector), address(globalConfig)
         );
 
         _wireModules(address(selectorRegistry));
@@ -219,6 +219,50 @@ contract SystemSealer_DecimalsGuard_Test is Test {
         rootTimelock.executeBatch(targets, values, payloads, bytes32(0), keccak256("18dp-good-salt"));
 
         assertTrue(vault.isSystemSealed(), "18dp vault must seal once all decimals overrides are set");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // Decoy GlobalConfig: overrides set on a provider the vault does not read
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /// @dev config.globalConfig is caller-supplied. A second, correctly governed
+    ///      GlobalConfig carrying all three overrides satisfies the decimals check on
+    ///      its own terms while the vault keeps resolving its params from the real one,
+    ///      still on 6dp-shaped defaults. Sealing against it must be rejected.
+    function test_verifyAndSeal_reverts_whenGlobalConfigIsNotTheVaultsProvider() public {
+        GlobalConfig decoy = new GlobalConfig(address(rootTimelock), 50, 100, 2000, 0, 10, 500, 3600, 3600);
+
+        vm.startPrank(address(rootTimelock));
+        decoy.setVaultDepositLimits(address(vault), 1_000e18, 100e18, 0.01e18);
+        decoy.setVaultWithdrawalOverride(
+            address(vault),
+            GlobalConfig.WithdrawalConfig({
+                capPerEpochBps: 1000,
+                maxWithdrawalPerBlock: 0,
+                maxWithdrawalPerTx: 0,
+                minClaimAmount: 0.01e18,
+                lockPeriod: 0
+            })
+        );
+        decoy.setVaultGovCaps(address(vault), 2 days, 5e17, 500, 200, 200, 7 days, 0.001e18, 1_000_000, 3000);
+        vm.stopPrank();
+
+        // The decoy passes every check the vault's real provider would fail.
+        assertTrue(decoy.hasOverride(address(vault), GlobalConfig.ParamType.VAULT_CAP));
+        assertTrue(decoy.hasOverride(address(vault), GlobalConfig.ParamType.WITHDRAWAL));
+        assertTrue(decoy.hasOverride(address(vault), GlobalConfig.ParamType.GOV_CAPS));
+        assertFalse(globalConfig.hasOverride(address(vault), GlobalConfig.ParamType.VAULT_CAP));
+        assertEq(address(vault.params()), address(globalConfig), "vault still reads the real provider");
+
+        SystemSealer.SealConfig memory decoyConfig = sealConfig;
+        decoyConfig.globalConfig = address(decoy);
+
+        (bool ok, string memory reason) = systemSealer.canSeal(decoyConfig);
+        assertFalse(ok, "canSeal must reject a globalConfig the vault does not resolve");
+        assertEq(reason, "GlobalConfig not bound to vault");
+
+        _scheduleAndExpectRevert(decoyConfig, "decoy-global-config-salt");
+        assertFalse(vault.isSystemSealed(), "vault must not seal against a decoy globalConfig");
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────

@@ -60,6 +60,8 @@ import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/I
  * [x] Strategy: CORE_ROLE -> CoreVault
  * [x] No deployer retains any admin roles
  * [x] Dead deposit seeded (inflation attack hardening)
+ * [x] config.globalConfig == vault.params() (the override check must read the
+ *     provider the vault actually resolves at runtime)
  * [x] Non-6dp vault asset has VAULT_CAP/WITHDRAWAL/GOV_CAPS overrides set
  *     (GlobalConfig defaults are 6dp/USDC-shaped and would brick the vault)
  */
@@ -294,7 +296,18 @@ contract SystemSealer {
         }
 
         // ─────────────────────────────────────────────────────────────────────────
-        // INVARIANT 12: Non-6dp vault asset has required GlobalConfig overrides
+        // INVARIANT 12: config.globalConfig IS the vault's live params provider
+        // ─────────────────────────────────────────────────────────────────────────
+        // config.globalConfig is caller-supplied. The vault resolves its own params
+        // from CoreStorage (see CoreVault.params()), so without this equality the
+        // override check below proves nothing about the configuration the vault
+        // actually reads at runtime.
+        if (address(vault.params()) != config.globalConfig) {
+            revert InvariantViolation("GlobalConfig not bound to vault");
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────
+        // INVARIANT 13: Non-6dp vault asset has required GlobalConfig overrides
         // ─────────────────────────────────────────────────────────────────────────
         // GlobalConfig's defaults (defaultVaultDepositCap, defaultMinDeployAmount, etc.)
         // are 6dp/USDC-shaped. An 18dp vault (e.g. WETH) sealed without the per-vault
@@ -490,6 +503,12 @@ contract SystemSealer {
         // Dead deposit (inflation attack hardening)
         if (!IAdminModule(config.vault).isDeadDepositDone()) {
             return (false, "Dead deposit not seeded");
+        }
+
+        // config.globalConfig must be the vault's live params provider, otherwise the
+        // override check below reads a config the vault never consults.
+        if (address(vault.params()) != config.globalConfig) {
+            return (false, "GlobalConfig not bound to vault");
         }
 
         // Non-6dp vault asset must have VAULT_CAP/WITHDRAWAL/GOV_CAPS overrides set —
