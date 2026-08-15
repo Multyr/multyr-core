@@ -16,6 +16,7 @@ import { IIncentives } from "../../interfaces/IIncentives.sol";
 import { IIncentivesEngine } from "../../interfaces/IIncentivesEngine.sol";
 import { ICoreVault } from "../../interfaces/ICoreVault.sol";
 import { ExitEngineLib } from "../libraries/ExitEngineLib.sol";
+import { EpochQueueStorage } from "./EpochedQueueModule.sol";
 import {
     FixedMaturityStorage, VaultMode, VaultState,
     _checkDepositsAllowed, _checkForceExitAllowed
@@ -61,6 +62,10 @@ contract ERC4626Module {
     error VaultDepositCapExceeded(uint256 totalAssetsAfter, uint256 cap);
     error UserDepositCapExceeded(uint256 userAssetsAfter, uint256 cap);
     error SlippageExceeded();
+    /// @dev Raised when a force exit would spend hot cash already reserved for
+    ///      FUNDED-but-unclaimed epoch claims. Replaces the bare ERC20
+    ///      "transfer amount exceeds balance" that this path used to hit.
+    error InsufficientFreeLiquidity();
     error ReentrancyGuardLocked();
     error NavStale();
     error NavInvalid();
@@ -231,6 +236,12 @@ contract ERC4626Module {
         // Source liquidity with user plan
         _sourceLiquidityForForceWithdraw(assetAddr, assets, plan, core);
 
+        // A force exit is a consumer of hot cash like any other: it may only
+        // spend what is NOT already reserved for FUNDED-but-unclaimed epoch
+        // claims. Checked after sourcing, so a pull that closes the gap still
+        // lets the exit through.
+        if (_freeLiquidity(assetAddr) < assets) revert InsufficientFreeLiquidity();
+
         // Transfer fee shares to feeCollector (NO mint — anti-dilution)
         if (totalFeeShares > 0) {
             _processorTransfer(owner_, core.feeCollector, totalFeeShares);
@@ -328,7 +339,11 @@ contract ERC4626Module {
         // determines how much of the caller's shares are actually consumed.
         _forcePullAllLiquidity(assetAddr, targetAssets, core);
 
-        uint256 hot = IERC20(assetAddr).balanceOf(address(this));
+        // Free liquidity, not raw hot: cash reserved for FUNDED-but-unclaimed
+        // epoch claims is off-limits here exactly as it is to instant exits and
+        // strategy deploys. A shortfall degrades into a partial fill via the
+        // proportional-burn logic below, so no new revert path is introduced.
+        uint256 hot = _freeLiquidity(assetAddr);
         assetsReceived = hot >= targetAssets ? targetAssets : hot;
 
         // F-03: hard floor on the fill. Proportional burn already makes a partial
@@ -766,6 +781,16 @@ contract ERC4626Module {
 
     function _asset() internal view returns (address) {
         return IERC4626(address(this)).asset();
+    }
+
+    /// @dev Hot balance net of assets earmarked for FUNDED-but-unclaimed epoch
+    ///      claims. EpochQueueStorage is EIP-7201 namespaced and every module
+    ///      shares the vault's storage under delegatecall, so this reads the
+    ///      same slot EpochedQueueModule writes.
+    function _freeLiquidity(address assetAddr) internal view returns (uint256) {
+        uint256 hot = IERC20(assetAddr).balanceOf(address(this));
+        uint256 reserved = EpochQueueStorage.layout().reservedForClaims;
+        return hot > reserved ? hot - reserved : 0;
     }
 
     /// @dev Raw asset-to-share conversion WITHOUT deposit fee.

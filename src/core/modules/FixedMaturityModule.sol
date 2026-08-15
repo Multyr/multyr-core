@@ -14,6 +14,7 @@ import { IBufferManager } from "../../interfaces/IBufferManager.sol";
 import { IStrategyRouter } from "../../interfaces/IStrategyRouter.sol";
 import { ICoreVault } from "../../interfaces/ICoreVault.sol";
 import { FixedPoint } from "../../libs/FixedPoint.sol";
+import { EpochQueueStorage } from "./EpochedQueueModule.sol";
 
 // Errors from FixedMaturityStorage.sol (imported via transitive import):
 // DepositsClosedForVaultState, StandardExitNotAvailablePreMaturity,
@@ -56,6 +57,15 @@ contract FixedMaturityModule {
         CoreStorage.Layout storage core = CoreStorage.layout();
         if (fm.vaultMode != VaultMode.OpenEnded) revert InvalidVaultMode();
         if (core.packedFlags & CoreStorage.FLAG_ROUTING_FROZEN != 0) revert InvalidVaultMode();
+        // The FixedMaturity lifecycle moves capital out of the vault in states
+        // where the epoch queue is gated off (activateFixedMaturityCycle in
+        // Starting, refundClaim in FundingFailed), so neither consults
+        // reservedForClaims. That is only sound while no epoch claim can be
+        // outstanding across the switch -- claimEpochAssets has no FixedMaturity
+        // gate and would otherwise race the cycle deployment for the same cash.
+        if (EpochQueueStorage.layout().outstandingClaimCount != 0) {
+            revert CloseNotAllowedWithPendingShares();
+        }
         fm.vaultMode = VaultMode.FixedMaturity;
         fm.vaultState = VaultState.Funding;
         emit Events.VaultModeConfigured(1);
