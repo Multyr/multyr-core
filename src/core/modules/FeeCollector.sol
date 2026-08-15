@@ -73,10 +73,19 @@ contract FeeCollector is ReentrancyGuard, Pausable {
     ///      escrow permanently.
     mapping(address => PendingHarvestClaim[]) private _pendingHarvestClaims;
 
-    /// @dev Backstop only. A fallback claim is created only when an instant
-    ///      harvest cannot settle, so in normal operation this list holds zero
-    ///      or one entry; the bound exists so an indefinitely unfunded epoch
-    ///      cannot grow it without limit.
+    /// @dev Storage backstop, not a functional limit: reaching it defers a
+    ///      harvest, it does not revert one.
+    ///
+    ///      An entry is appended only when an instant harvest cannot settle AND
+    ///      the epoch it falls into never funds before the next distribute().
+    ///      One entry therefore costs one full epoch (a day or more) of
+    ///      simultaneous cap exhaustion and funding failure, and any single
+    ///      successful harvestQueued() drains every ready entry at once. Sixty
+    ///      four is roughly two months of that at a daily cadence, which is far
+    ///      beyond the point at which the funding failure itself -- visible via
+    ///      EpochFundingShortfall -- would have been dealt with. It exists so an
+    ///      indefinitely stalled queue cannot grow the array without bound, not
+    ///      because the workload is expected to approach it.
     uint256 public constant MAX_PENDING_HARVEST_CLAIMS = 64;
 
     // Events
@@ -237,10 +246,21 @@ contract FeeCollector is ReentrancyGuard, Pausable {
             }
             if (sc.mode == ShareMode.AUTO_HARVEST) {
                 require(sc.underlying != address(0), "FeeCollector: no underlying");
-                require(
-                    _pendingHarvestClaims[token].length < MAX_PENDING_HARVEST_CLAIMS,
-                    "FeeCollector: too many pending harvests"
-                );
+
+                // Queue full: defer rather than revert. Checked BEFORE calling
+                // the vault, deliberately -- deferring afterwards would mean the
+                // claim already exists in vault escrow with nowhere to record
+                // its coordinates, which is the untracked-escrow failure the
+                // single-slot bookkeeping was originally guarding against. The
+                // cost of checking first is that a harvest which would have
+                // settled inline is also deferred; the shares simply stay here
+                // and are picked up by the next distribute() once harvestQueued
+                // has drained the list.
+                if (_pendingHarvestClaims[token].length >= MAX_PENDING_HARVEST_CLAIMS) {
+                    emit HarvestDeferred(token, bal, "pending harvest queue full");
+                    return;
+                }
+
 
                 // Snapshot underlying balance before the call
                 uint256 underBefore = IERC20(sc.underlying).balanceOf(address(this));

@@ -233,4 +233,39 @@ contract FeeCollectorHarvestQueue is Test {
         );
     }
 
+    /// @notice A full pending list defers too, and the shares are never handed
+    ///         to the vault -- an untracked claim in escrow is the failure the
+    ///         single-slot bookkeeping was guarding against in the first place.
+    function test_fullPendingList_defersAndNeverStrandsShares() public {
+        vm.prank(alice);
+        vault.deposit(50_000_000e6, alice);
+        params.setCapPerEpochBps(1);
+
+        uint256 cap = collector.MAX_PENDING_HARVEST_CLAIMS();
+        for (uint256 i = 0; i < cap; i++) {
+            _accrueFeeShares(200_000e6);
+            collector.distribute(address(vault));
+        }
+        assertEq(collector.pendingHarvestClaimCount(address(vault)), cap, "list is full");
+
+        _accrueFeeShares(200_000e6);
+        uint256 sharesBefore = vault.balanceOf(address(collector));
+        uint256 escrowBefore = vault.balanceOf(address(vault));
+
+        // Does not revert.
+        collector.distribute(address(vault));
+
+        assertEq(
+            collector.pendingHarvestClaimCount(address(vault)), cap,
+            "nothing appended past the cap"
+        );
+        assertEq(
+            vault.balanceOf(address(collector)), sharesBefore,
+            "shares stayed with the collector"
+        );
+        assertEq(
+            vault.balanceOf(address(vault)), escrowBefore,
+            "and never entered vault escrow untracked"
+        );
+    }
 }
