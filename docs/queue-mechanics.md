@@ -191,9 +191,17 @@ claim — this is the core structural difference from `QueueModule`'s per-claim 
 13. emit EpochWithdrawalRequested(epochId, claimId, user, shares, netShares, feeShares)
 ```
 
-Unlike `QueueModule.requestClaim`, there is no per-user cooldown/anti-spam gate on this path —
-anti-spam is enforced upstream via `IParamsProvider.QueueParams.maxClaimsPerUserPerEpoch` /
-`cooldownPerClaim` where applicable to the deployment.
+Anti-spam on this path is `IParamsProvider.WithdrawalParams.minClaimAmount`, enforced in
+`_requestEpochWithdrawal` and, so the outcome depends on the caller's input rather than on vault
+state, also up front in `requestInstantWithdrawal`. `core.feeCollector` is exempt: it is a single
+trusted address whose own bookkeeping caps its outstanding claims, and applying the floor to it
+would strand fee accruals smaller than the floor with no route to distribution.
+
+The per-user `QueueParams.maxClaimsPerUserPerEpoch` / `cooldownPerClaim` throttles are NOT enforced
+by this module. `minClaimAmount` is the only per-claim gate, so the cost of driving
+`outstandingClaimCount` past `DynamicCapParams.queueStressThreshold` is roughly
+`threshold * minClaimAmount` in capital, refundable, plus gas. Size the threshold against the
+vault's deposit cap, not against a fixed claim count.
 
 ### 3.3 cancelEpochWithdrawal
 

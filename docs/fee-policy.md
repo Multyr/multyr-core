@@ -23,12 +23,12 @@ Fee parameters live in `FeeStorage.Layout` (EIP-7201 namespaced, `src/core/stora
 
 Fee computation lives in two libraries:
 - `src/core/libraries/ExitFeeLib.sol:29` — on-exit fee calculation
-- `src/core/modules/QueueModule.sol:763` (`_crystallize`) — performance fee crystallization
+- `src/core/modules/EpochedQueueModule.sol` (`_crystallize`) — performance fee crystallization
 
 ```mermaid
 flowchart LR
     A[FeeStorage.Layout\nwitBps\nimmediateExitPenaltyBps\nforceExitPenaltyBps\ndepBps\nperfRateX\nhighWaterMark] -->|read by| EFL[ExitFeeLib\ncomputeExitFee]
-    A -->|read by| QM[QueueModule\n_crystallize]
+    A -->|read by| QM[EpochedQueueModule\n_crystallize]
 
     EFL -->|feeShares transferred| FC[feeCollector]
     QM -->|feeShares minted| FC
@@ -223,7 +223,9 @@ newHwm = totalAssets / (totalSupply + 1_980_198e12)  ≈ 1.0078 USDC/share
 
 ### 5.2 Crystallization trigger
 
-`_crystallize()` is called at the end of every `settleFeesAndProcessQueue` call (`src/core/modules/QueueModule.sol:238`). It is NOT called on INSTANT exits or FORCE exits — only during the scheduled batch settle.
+`_crystallize()` is reached only through `endEpochCrystallize()`, which is permissionless and independent of the queue lifecycle. It is NOT called by `closeCurrentEpoch()`, `fundEpoch()`, instant exits or force exits.
+
+Consequence worth stating plainly: `ppsAtClose` is snapshotted gross of any pending performance fee, and nothing orders `endEpochCrystallize()` against `closeCurrentEpoch()`. Both are public, so whoever calls first decides whether an epoch's claimants exit before or after the crystallization dilutes the price. The keeper schedules CRYSTALLIZE below the queue ops, so under continuous exit flow it can be deferred.
 
 Pre-conditions for fee to be minted:
 1. `totalSupply > 0`
@@ -242,7 +244,7 @@ Branch behavior when the interval guard (condition 3) blocks a would-be-profitab
 
 ### 5.4 PerfFeeMixin (legacy)
 
-`src/core/mixins/PerfFeeMixin.sol:73` contains an older `_crystallize()` using a `Perf` struct stored in contract storage (not EIP-7201 namespaced). This mixin is **not imported by any active module** on `c39f9462`. The active perf fee logic is in `QueueModule._crystallize()` (`src/core/modules/QueueModule.sol:763`), which uses `FeeStorage.Layout`. See Footer §Discrepancies.
+`src/core/mixins/PerfFeeMixin.sol:73` contains an older `_crystallize()` using a `Perf` struct stored in contract storage (not EIP-7201 namespaced). This mixin is **not imported by any active module** on `c39f9462`. The active perf fee logic is in `EpochedQueueModule._crystallize()`, which uses `FeeStorage.Layout`. See Footer §Discrepancies.
 
 This branch applied the same HWM-monotonicity and min-interval-enforcement fixes (§5.2, §5.3) to `PerfFeeMixin._crystallize()` for consistency, even though it remains dead code with no active caller.
 
@@ -292,9 +294,9 @@ totalForceBps = witBps + forceExitPenaltyBps + preMaturityForceExitPenaltyBps
 | `FeeParamsRevoked()` | AdminModule | `revokeFeeParams` |
 | `PerfParamsSubmitted(rateX, minInterval, eta)` | AdminModule | `submitPerfParams` |
 | `PerfParamsAccepted(rateX, minInterval)` | AdminModule | `acceptPerfParams` |
-| `FeePaid(user, feeCollector, feeShares)` | QueueModule | Exit fee transfer in settle loop |
-| `Crystallized(oldHwm, newHwm, feeAssets)` | QueueModule | Crystallization (fee or not) |
-| `PerfFeeMinted(oldHwm, ppsBefore, feeShares, ppsAfter)` | QueueModule | When perf fee > 0 |
+| `FeePaid(user, feeCollector, feeShares)` | EpochedQueueModule | Batch fee transfer at epoch close, and on the instant exit path |
+| `Crystallized(oldHwm, newHwm, feeAssets)` | EpochedQueueModule | Crystallization (fee or not) |
+| `PerfFeeMinted(oldHwm, ppsBefore, feeShares, ppsAfter)` | EpochedQueueModule | When perf fee > 0 |
 
 ---
 
@@ -397,7 +399,7 @@ Day 3, 14:00: owner calls acceptFeeParams()
 | `revokeFeeParams` | `src/core/modules/AdminModule.sol:141` | L141 |
 | `_validateEta` | `src/core/modules/AdminModule.sol:812` | L812 |
 | `MAX_WINDOW` constant | `src/core/modules/AdminModule.sol:45` | L45 |
-| `_crystallize` (active) | `src/core/modules/QueueModule.sol:763` | L763 |
+| `_crystallize` (active) | `src/core/modules/EpochedQueueModule.sol` | — |
 | `computeExitFee` | `src/core/libraries/ExitFeeLib.sol:29` | L20 |
 | `exitFeeBps` | `src/core/libraries/ExitFeeLib.sol:61` | L10 |
 | `preMaturityForceExitPenaltyBps` | `src/core/storage/FixedMaturityStorage.sol:47` | L80 |
@@ -418,14 +420,14 @@ Day 3, 14:00: owner calls acceptFeeParams()
 |------|-------|-------|
 | `src/core/storage/FeeStorage.sol:55` | 79 | Full read |
 | `src/core/modules/AdminModule.sol:73` | partial | submitFeeParams, acceptFeeParams, revokeFeeParams, _validateEta |
-| `src/core/modules/QueueModule.sol:763` | 841 | Full read — `_crystallize()` section |
+| `src/core/modules/EpochedQueueModule.sol` | — | Full read — `_crystallize()` section |
 | `src/core/mixins/PerfFeeMixin.sol:73` | 108 | Full read (legacy) |
 | `src/core/libraries/ExitFeeLib.sol:29` | 77 | Full read |
 | `src/core/storage/FixedMaturityStorage.sol:47` | 123 | Full read — `preMaturityForceExitPenaltyBps` |
 
 **Discrepancies** (ADR-015 §5):
 
-1. `PerfFeeMixin.sol` (pragma `0.8.24`) implements `_crystallize()` using a struct `Perf { hwm, rateX, minInterval, last, init }` stored in contract storage (not EIP-7201). The active implementation is `QueueModule._crystallize()` using `FeeStorage.Layout.perfRateX` and `FeeStorage.Layout.highWaterMark`. `PerfFeeMixin` is not imported by any active module.
+1. `PerfFeeMixin.sol` (pragma `0.8.24`) implements `_crystallize()` using a struct `Perf { hwm, rateX, minInterval, last, init }` stored in contract storage (not EIP-7201). The active implementation is `EpochedQueueModule._crystallize()` using `FeeStorage.Layout.perfRateX` and `FeeStorage.Layout.highWaterMark`. `PerfFeeMixin` is not imported by any active module.
 
 2. `FeeMixin.sol` (pragma `0.8.24`) uses a 3-field `InternalFeeParams { depBps, witBps, treasury }` — missing `immediateExitPenaltyBps` and `forceExitPenaltyBps`. This is a superseded design. `FeeMixin` is not imported by any active module.
 
@@ -470,7 +472,7 @@ Design rationale: without a penalty, all users would prefer INSTANT over STANDAR
 
 Performance fee uses a High Water Mark (HWM) model. Fee is charged only on profits above the last peak PPS.
 
-Formula (active implementation in `QueueModule._crystallize()`, `src/core/modules/QueueModule.sol:763`):
+Formula (active implementation in `EpochedQueueModule._crystallize()`):
 
 ```
 pps = totalAssets / totalSupply     (WAD-scaled, 1e18)

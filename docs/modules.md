@@ -538,7 +538,7 @@ Receives vault share fees and distributes them to configured sinks: treasury, op
 
 ### 8.2 AUTO_HARVEST Mode
 
-In `AUTO_HARVEST` mode, `FeeCollector` calls `IQueueModule.requestInstantWithdrawal(bal)` on the vault to convert shares to USDC. If the instant exit falls back to the epoch queue (cap exhausted), `pendingHarvestShares[token]`/`pendingHarvestEpochId[token]`/`pendingHarvestClaimId[token]` are recorded. A subsequent `harvestQueued()` call pulls the claim via `claimEpochAssets()` once the epoch is funded and credits the underlying.
+In `AUTO_HARVEST` mode, `FeeCollector` calls `IQueueModule.requestInstantWithdrawal(bal)` on the vault to convert shares to USDC. If the instant exit falls back to the epoch queue (cap exhausted, or free liquidity below the ask), `pendingHarvestShares[token]` is incremented and the claim's `(epochId, claimId)` is appended to a per-token list. `harvestQueued()` walks that list and settles whichever claims sit in a funded epoch, leaving the rest queued, so one epoch that never funds delays only its own claim instead of blocking the token. An instant harvest whose payout rounds down to zero emits `HarvestDustBurned` and records nothing, since the inline-settlement path returns `(0, 0)` for the claim handle.
 
 Source: `src/core/modules/FeeCollector.sol:55-58`.
 

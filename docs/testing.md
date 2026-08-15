@@ -151,7 +151,7 @@ All profiles defined in `foundry.toml`. Default EVM version: `shanghai`. Fork te
 
 Tests use `test/helpers/MockParamsProvider.sol` to provide controllable `IParamsProvider` implementation. This allows setting `lockPeriod`, `maxClaimsPerEpoch`, `cooldownPerClaim`, fee params in isolation without a live `GlobalConfig`.
 
-**Source**: `src/core/modules/AdminModule.sol:73`, `src/core/modules/QueueModule.sol:207`, `src/core/storage/CoreStorage.sol:38`.
+**Source**: `src/core/modules/AdminModule.sol`, `src/core/modules/EpochedQueueModule.sol`, `src/core/storage/CoreStorage.sol`.
 
 ### 4.3 Key Test Patterns
 
@@ -371,7 +371,8 @@ forge test --fork-url $ARBITRUM_ARCHIVE_RPC_URL --fork-retry-backoff 1000 --fork
 **EIP7201 namespaces tested**:
 - `dsf.core.main.storage.v1` → `CoreStorage.SLOT`
 - `dsf.core.fee.storage.v1` → `FeeStorage.SLOT`
-- `dsf.core.queue.storage.v1` → `QueueStorage.SLOT`
+- `multyr.storage.EpochQueue.v1` → `EpochQueueStorage.SLOT`
+- `dsf.core.queue.storage.v1` → `QueueStorage.SLOT` (reserved, unused)
 - `dsf.core.fixedmaturity.storage.v1` → `FixedMaturityStorage.SLOT`
 
 **Source**: `test/security/EIP7201Compliance.t.sol`, `src/core/storage/CoreStorage.sol:16`.
@@ -462,7 +463,8 @@ Minimum coverage targets (not enforced in CI at this time):
 | `MockParamsProvider` | `test/helpers/MockParamsProvider.sol` | Controlled IParamsProvider for isolation |
 | `CoreStorage.SLOT` | `src/core/storage/CoreStorage.sol:16` | `dsf.core.main.storage.v1` |
 | `FeeStorage.SLOT` | `src/core/storage/FeeStorage.sol:9` | `dsf.core.fee.storage.v1` |
-| `QueueStorage.SLOT` | `src/core/storage/QueueStorage.sol:9` | `dsf.core.queue.storage.v1` |
+| `EpochQueueStorage.SLOT` | `src/core/modules/EpochedQueueModule.sol` | `multyr.storage.EpochQueue.v1` |
+| `QueueStorage.SLOT` | `src/core/storage/QueueStorage.sol` | `dsf.core.queue.storage.v1` (reserved, unused) |
 | `FixedMaturityStorage.SLOT` | `src/core/storage/FixedMaturityStorage.sol:27` | `dsf.core.fixedmaturity.storage.v1` |
 
 ---

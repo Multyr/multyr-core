@@ -83,7 +83,7 @@ bytes32 public constant KEEPER_ROLE   = keccak256("KEEPER_ROLE");
 bytes32 public constant PARAM_ROLE    = keccak256("PARAM_ROLE");
 ```
 
-This contract uses a `governor` address + OpenZeppelin `AccessControl`-style `bytes32` role constants. It is **NOT** imported by `AdminModule`, `QueueModule`, `ERC4626Module`, or any active module on branch `reorg/runbook-docs-consolidate-01a.3`. The production role system is the `roleOf[selector]` mapping described above.
+This contract uses a `governor` address + OpenZeppelin `AccessControl`-style `bytes32` role constants. It is **NOT** imported by `AdminModule`, `EpochedQueueModule`, `ERC4626Module`, or any active module. The production role system is the `roleOf[selector]` mapping described above.
 
 ---
 
@@ -184,9 +184,13 @@ Key permissionless functions:
 | Function | Module | Notes |
 |----------|--------|-------|
 | `deposit` | ERC4626Module | Subject to pause checks |
-| `requestClaim` | QueueModule | Subject to pause + anti-spam checks |
-| `settleFeesAndProcessQueue` | QueueModule | Callable by anyone (keeper pattern) |
-| `compactQueue` | QueueModule | Cleanup, always callable |
+| `requestEpochWithdrawal` | EpochedQueueModule | Subject to pause + `minClaimAmount` floor |
+| `requestInstantWithdrawal` | EpochedQueueModule | Same floor; falls back to the queue when the cap or free liquidity blocks it |
+| `cancelEpochWithdrawal` | EpochedQueueModule | Claim owner only, and only while the epoch is `Open` |
+| `closeCurrentEpoch` | EpochedQueueModule | Callable by anyone once the epoch duration has elapsed (keeper pattern) |
+| `fundEpoch` | EpochedQueueModule | Callable by anyone; no-op when the epoch is already funded |
+| `claimEpochAssets` / `batchClaimEpochAssets` | EpochedQueueModule | Claim owner only, self-service, no keeper required |
+| `syncOldestUnfundedEpoch` | EpochedQueueModule | Cursor maintenance, always callable |
 | `acceptOwnership` | AdminModule | Must be `pendingOwner` (checked internally) |
 | `markMatured` | FixedMaturityModule | Any address, once maturityTs reached |
 | `markFundingFailed` | FixedMaturityModule | Any address, once deadline + net < min |
@@ -245,7 +249,7 @@ struct Layout {
 
 These functions bypass normal ERC-20 transfer logic and directly adjust share balances. They are used by:
 
-- **QueueModule** — burns user shares during queue settlement, mints fee shares to `feeCollector`
+- **EpochedQueueModule** — burns escrowed shares as each claim is paid, transfers fee shares to `feeCollector` in one batch at epoch close, mints perf-fee shares on crystallization
 - **FixedMaturityModule** — mints/burns during lifecycle transitions (e.g., `_applyFinalPerformanceFee`)
 
 Access check:
