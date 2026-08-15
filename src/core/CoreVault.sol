@@ -811,11 +811,29 @@ contract CoreVault is ERC4626, ICoreVault {
     // WARM ADAPTER APPROVALS
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    function approveWarmAdapters(address[] calldata adapters) external onlyOwner {
+    /// @notice Grant each warm adapter a BOUNDED allowance to pull the vault's
+    ///         underlying. Warm adapters pull with transferFrom rather than
+    ///         receiving a push, so they need standing allowance; an unbounded
+    ///         one meant a single compromised or buggy adapter could drain the
+    ///         vault outright, and reservedForClaims cannot defend against that
+    ///         because it is enforced when sizing a deploy, not when the token
+    ///         moves.
+    /// @dev The allowance depletes as it is spent and is not self-renewing:
+    ///      once an adapter has pulled `cap` in total, warm deploys through it
+    ///      stop until governance tops it up. That is the intended trade -- a
+    ///      visible, deliberate budget per adapter instead of an open tap. Size
+    ///      it against the vault's deposit cap and expected warm cycling, not
+    ///      against a single deploy.
+    ///
+    ///      Pairs with the adapter-list guard on the BufferManager side: this
+    ///      bounds what each adapter can take, that bounds who can become an
+    ///      adapter. Neither alone is sufficient.
+    function approveWarmAdapters(address[] calldata adapters, uint256 cap) external onlyOwner {
+        if (cap == 0) revert ZeroAmount();
         address assetAddr = asset();
         for (uint256 i; i < adapters.length;) {
-            IERC20(assetAddr).forceApprove(adapters[i], type(uint256).max);
-            emit Events.WarmAdapterApproved(adapters[i]);
+            IERC20(assetAddr).forceApprove(adapters[i], cap);
+            emit Events.WarmAdapterApproved(adapters[i], cap);
             unchecked { ++i; }
         }
     }

@@ -484,7 +484,13 @@ contract DeployCoreSystem is Script {
             address[] memory warmAdapters = new address[](2);
             warmAdapters[0] = address(result.aaveWarmAdapter);
             warmAdapters[1] = address(result.morphoWarmAdapter);
-            result.vault.approveWarmAdapters(warmAdapters);
+            // Bounded, not unlimited: each adapter may pull at most this much in
+            // total before governance has to top it up. Sized off the vault
+            // deposit cap; see docs/deployment.md for the post-deploy tuning
+            // this and the other manual parameters need.
+            uint256 warmAdapterCap = vm.envOr("WARM_ADAPTER_ALLOWANCE_CAP", uint256(1_000_000e6));
+            result.vault.approveWarmAdapters(warmAdapters, warmAdapterCap);
+            console.log("  Warm adapter allowance cap:", warmAdapterCap);
         }
 
         // 5.5 HealthRegistry

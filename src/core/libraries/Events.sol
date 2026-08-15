@@ -194,7 +194,7 @@ library Events {
     event RouterRevoked();
 
     // --- Warm adapter approval events ---
-    event WarmAdapterApproved(address indexed adapter);
+    event WarmAdapterApproved(address indexed adapter, uint256 cap);
     event WarmAdapterRevoked(address indexed adapter);
 
     // --- Selector Registry & System Seal events ---

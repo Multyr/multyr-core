@@ -32,6 +32,7 @@ import { EpochedQueueModule, EpochQueueStorage } from "../../../src/core/modules
 import { IStrategyRouter } from "../../../src/interfaces/IStrategyRouter.sol";
 import { BufferManager } from "../../../src/core/modules/BufferManager.sol";
 import { IBufferManager } from "../../../src/interfaces/IBufferManager.sol";
+import { CoreVault } from "../../../src/core/CoreVault.sol";
 
 interface IReservationQueue {
     function requestInstantWithdrawal(uint256 shares)
@@ -421,4 +422,81 @@ contract ReservationConsumers is Test {
 
 interface IFixedMaturityMode {
     function setVaultModeFixedMaturity() external;
+}
+
+/// @notice The warm-adapter allowance is the one channel that moves the
+///         underlying without any module-level check: adapters pull with
+///         transferFrom under a standing grant. It must be bounded.
+contract WarmAdapterAllowance is Test {
+    CoreHarness public vault;
+    ERC20Mock public usdc;
+    MockParamsProvider public params;
+
+    address public feeCollector = address(0xFEE);
+    address public adapterA = address(0xADA1);
+    address public adapterB = address(0xADA2);
+
+    function setUp() public {
+        usdc = new ERC20Mock("USDC", "USDC", 6);
+        params = new MockParamsProvider();
+        vault = new CoreHarness(
+            IERC20Metadata(address(usdc)), "Vault", "vUSDC",
+            address(this), feeCollector, address(params)
+        );
+        vault.unpause();
+        usdc._mint(address(vault), 10_000_000e6);
+    }
+
+    function test_allowanceIsCappedNotUnlimited() public {
+        address[] memory adapters = new address[](2);
+        adapters[0] = adapterA;
+        adapters[1] = adapterB;
+
+        vault.approveWarmAdapters(adapters, 1_000e6);
+
+        assertEq(usdc.allowance(address(vault), adapterA), 1_000e6, "adapter A capped");
+        assertEq(usdc.allowance(address(vault), adapterB), 1_000e6, "adapter B capped");
+        assertLt(
+            usdc.allowance(address(vault), adapterA), type(uint256).max,
+            "no adapter holds an unbounded allowance"
+        );
+    }
+
+    /// @notice A rogue adapter can take at most the cap, not the vault.
+    function test_cappedAdapterCannotDrainTheVault() public {
+        address[] memory adapters = new address[](1);
+        adapters[0] = adapterA;
+        vault.approveWarmAdapters(adapters, 1_000e6);
+
+        uint256 vaultBefore = usdc.balanceOf(address(vault));
+
+        vm.prank(adapterA);
+        usdc.transferFrom(address(vault), adapterA, 1_000e6);
+        assertEq(usdc.balanceOf(adapterA), 1_000e6, "pulled up to the cap");
+
+        // Anything beyond the cap fails: the allowance is spent, not renewed.
+        vm.prank(adapterA);
+        vm.expectRevert();
+        usdc.transferFrom(address(vault), adapterA, 1);
+
+        assertEq(
+            usdc.balanceOf(address(vault)), vaultBefore - 1_000e6,
+            "vault lost exactly the budgeted amount and no more"
+        );
+    }
+
+    function test_zeroCapIsRejected() public {
+        address[] memory adapters = new address[](1);
+        adapters[0] = adapterA;
+        vm.expectRevert(CoreVault.ZeroAmount.selector);
+        vault.approveWarmAdapters(adapters, 0);
+    }
+
+    function test_revokeStillZeroesTheAllowance() public {
+        address[] memory adapters = new address[](1);
+        adapters[0] = adapterA;
+        vault.approveWarmAdapters(adapters, 1_000e6);
+        vault.revokeWarmAdapters(adapters);
+        assertEq(usdc.allowance(address(vault), adapterA), 0, "revoked to zero");
+    }
 }
