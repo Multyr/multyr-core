@@ -449,6 +449,65 @@ contract EpochedQueueModule_Test is Test {
     // returns, so the state is always recoverable permissionlessly.
     // ═══════════════════════════════════════════════════════════════════════
 
+    event EpochFundSkipped(uint256 indexed epochId, uint256 cursorBefore, uint256 cursorAfter);
+
+    /// @notice The no-op must stay observable: a moved cursor means the
+    ///         self-heal fired, an unmoved one means the caller picked the
+    ///         wrong epoch. Both are silent without this event.
+    function test_fundEpoch_onAlreadyFundedEpoch_emitsSkippedWithCursorDelta() public {
+        uint256 t = block.timestamp;
+        _deposit(user, 1_000_000e6);
+
+        vm.prank(user);
+        (uint256 epoch0Id,) =
+            EpochedQueueModule(address(core)).requestEpochWithdrawal(100_000e6);
+        t += 7 days + 1;
+        vm.warp(t);
+        EpochedQueueModule(address(core)).closeCurrentEpoch();
+        EpochedQueueModule(address(core)).fundEpoch(epoch0Id);
+
+        uint256 healthy = EpochedQueueModule(address(core)).oldestUnfundedEpochId();
+
+        // Caller picked the wrong epoch: cursor does not move.
+        vm.expectEmit(true, false, false, true, address(core));
+        emit EpochFundSkipped(epoch0Id, healthy, healthy);
+        EpochedQueueModule(address(core)).fundEpoch(epoch0Id);
+
+        // Cursor stale on a funded epoch: the same call repairs it, and says so.
+        _forceCursor(epoch0Id);
+        vm.expectEmit(true, false, false, true, address(core));
+        emit EpochFundSkipped(epoch0Id, epoch0Id, healthy);
+        EpochedQueueModule(address(core)).fundEpoch(epoch0Id);
+    }
+
+    /// @notice And it must NOT fire on the keeper's normal path, or it is noise.
+    function test_fundEpoch_normalKeeperCycle_emitsNoSkip() public {
+        uint256 t = block.timestamp;
+        _deposit(user, 1_000_000e6);
+
+        vm.prank(user);
+        (uint256 epochId,) =
+            EpochedQueueModule(address(core)).requestEpochWithdrawal(100_000e6);
+        t += 7 days + 1;
+        vm.warp(t);
+        EpochedQueueModule(address(core)).closeCurrentEpoch();
+
+        // Exactly what the keeper does: read the cursor, fund what it points at.
+        uint256 cursor = EpochedQueueModule(address(core)).oldestUnfundedEpochId();
+        assertEq(cursor, epochId, "cursor points at the closed epoch");
+
+        vm.recordLogs();
+        EpochedQueueModule(address(core)).fundEpoch(cursor);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        bytes32 sig = keccak256("EpochFundSkipped(uint256,uint256,uint256)");
+        uint256 seen;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics.length > 0 && logs[i].topics[0] == sig) seen++;
+        }
+        assertEq(seen, 0, "no skip event on the normal keeper cycle");
+    }
+
     function test_fundEpoch_onAlreadyFundedEpoch_syncsCursorInsteadOfReverting() public {
         uint256 t = block.timestamp;
         _deposit(user, 1_000_000e6);

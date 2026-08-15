@@ -220,6 +220,21 @@ contract EpochedQueueModule {
         uint256 hotAfter
     );
     event EpochFunded(uint256 indexed epochId, uint256 totalNetAssets);
+    /// @notice fundEpoch() was called on an epoch that is already FUNDED, so
+    ///         there was nothing to do beyond syncing the keeper cursor.
+    /// @dev Not emitted on the keeper's normal path: it targets
+    ///      oldestUnfundedEpochId, which points at a CLOSED epoch whenever a
+    ///      backlog exists and equals currentEpochId when it does not, and
+    ///      checkUpkeep only schedules EPOCH_FUND in the former case. Seeing
+    ///      this event means the cursor was stale (cursorAfter > cursorBefore,
+    ///      now repaired) or the caller picked the wrong epoch (cursor
+    ///      unchanged).
+    event EpochFundSkipped(
+        uint256 indexed epochId,
+        uint256 cursorBefore,
+        uint256 cursorAfter
+    );
+
     /// @notice A fundEpoch() attempt left the epoch CLOSED. Emitted on every
     ///         failed or partial attempt so a stalled epoch is visible to
     ///         monitoring without waiting for a user complaint.
@@ -309,8 +324,8 @@ contract EpochedQueueModule {
         // Unconditional, and here rather than at the entry points, because this
         // is the single choke point where a claim enters the queue: no future
         // entry point can create one without passing through it. The instant
-        // path checks the same thing up front as well, so its outcome depends
-        // on the caller's input rather than on vault state; the resulting double
+        // path checks the same thing up front as well, so its outcome depends on
+        // the caller's input rather than on vault state; the resulting double
         // check on the fallback route is idempotent and costs one extra
         // conversion on the rare branch. That is the intended trade -- there is
         // deliberately no way to signal "already checked" and skip it.
@@ -357,8 +372,8 @@ contract EpochedQueueModule {
     ///      outstandingClaimCount. Applies to every caller without exception:
     ///      an address-based carve-out inside a security check is a standing
     ///      invitation to widen it. Callers that cannot tolerate a revert --
-    ///      FeeCollector's AUTO_HARVEST is the one in-protocol case -- absorb
-    ///      the failure on their own side instead of being special-cased here.
+    ///      FeeCollector's AUTO_HARVEST is the one in-protocol case -- handle
+    ///      the failure on their own side rather than being special-cased here.
     function _checkMinClaimAmount(CoreStorage.Layout storage core, uint256 shares)
         internal
         view
@@ -502,7 +517,15 @@ contract EpochedQueueModule {
         // and a keeper pointed at it would then revert on every single cycle
         // with no way back. Syncing the cursor first makes the call self-heal.
         if (epoch.state == EpochQueueStorage.EpochState.Funded) {
+            uint256 cursorBefore = eq.oldestUnfundedEpochId;
             _syncOldestUnfunded(eq);
+            // Turning the old EpochAlreadyFunded revert into a no-op kept the
+            // keeper alive but cost the diagnostic: an integrator targeting the
+            // wrong epoch got silence. Emitting the cursor either side of the
+            // sync keeps the case observable and tells the two apart -- a moved
+            // cursor is the self-heal doing its job, an unmoved one is a caller
+            // that had nothing to do here.
+            emit EpochFundSkipped(epochId, cursorBefore, eq.oldestUnfundedEpochId);
             _exitNonReentrant();
             return;
         }
