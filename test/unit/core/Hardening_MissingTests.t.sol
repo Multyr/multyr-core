@@ -336,6 +336,32 @@ contract Hardening_MissingTests is Test {
     // CRYSTALLIZE/REBALANCE/DEPLOY/REALIZE/RECONCILE forever.
     // ═══════════════════════════════════════════════════════════════════════════
 
+    /// @notice A fundEpoch that REVERTS must still register as a stall. The
+    ///         accounting used to sit inside the success branch, so a target
+    ///         that reverts every cycle left the counters untouched, the
+    ///         stalled-check unreachable, and EPOCH_FUND holding unconditional
+    ///         priority forever. Driven against a stub core so the revert is
+    ///         deterministic and independent of queue-module internals.
+    function test_epochFund_revertingAttempt_stillRecordsAStall() public {
+        RevertingFundCore stubCore = new RevertingFundCore(7);
+        VaultUpkeep upkeep = new VaultUpkeep(
+            address(stubCore), address(0),
+            address(new StubRouterReader()), address(new StubGlobalConfigReader()),
+            type(uint256).max, type(uint256).max, 10, 10000
+        );
+
+        upkeep.performUpkeep(abi.encode(Op.EPOCH_FUND, uint256(7)));
+
+        assertEq(upkeep.epochFundStallCount(), 1, "a reverting attempt counts as a stall");
+        assertEq(
+            upkeep.lastEpochFundTargetId(), 7,
+            "the stalled target is recorded, so checkUpkeep can yield priority"
+        );
+
+        upkeep.performUpkeep(abi.encode(Op.EPOCH_FUND, uint256(7)));
+        assertEq(upkeep.epochFundStallCount(), 2, "repeat reverts keep accumulating");
+    }
+
     function test_epochFund_yieldsPriorityAfterStall_thenReclaimsAfterBackoff() public {
         // Queue a large claim, then drain hot so it can never be fully funded
         // (no router configured; MockBufferManagerForTests' warm refill is a
@@ -348,6 +374,10 @@ contract Hardening_MissingTests is Test {
 
         vm.prank(address(vault));
         usdc.transfer(makeAddr("elsewhere"), 8_000_000e6);
+
+        // Give the vault a genuinely pending CRYSTALLIZE, so cycle 2 has real
+        // lower-priority work to fall through to.
+        usdc._mint(address(vault), 3_000_000e6);
 
         StubRouterReader stubRouter = new StubRouterReader();
         StubGlobalConfigReader stubConfig = new StubGlobalConfigReader();
@@ -371,12 +401,15 @@ contract Hardening_MissingTests is Test {
         );
 
         // Cycle 2: same epoch still unfundable -- must yield priority instead
-        // of retrying EPOCH_FUND forever.
+        // of retrying EPOCH_FUND forever, AND must schedule real work in its
+        // place. Asserted unconditionally: guarding this behind `if (needed2)`
+        // would let the test pass green on an idle keeper, which is precisely
+        // the failure it is meant to catch.
         (bool needed2, bytes memory data2) = upkeep.checkUpkeep("");
-        if (needed2) {
-            (Op op2,) = abi.decode(data2, (Op, uint256));
-            assertTrue(op2 != Op.EPOCH_FUND, "EPOCH_FUND must yield priority once stalled");
-        }
+        assertTrue(needed2, "keeper must still have work once EPOCH_FUND yields");
+        (Op op2,) = abi.decode(data2, (Op, uint256));
+        assertTrue(op2 != Op.EPOCH_FUND, "EPOCH_FUND must yield priority once stalled");
+        assertTrue(op2 == Op.CRYSTALLIZE, "the pending CRYSTALLIZE becomes schedulable");
 
         // After the backoff window elapses, EPOCH_FUND reclaims priority.
         vm.warp(block.timestamp + upkeep.epochFundStallBackoffSeconds() + 1);
@@ -397,4 +430,29 @@ contract StubRouterReader {
 
 contract StubGlobalConfigReader {
     uint256 public minRebalanceCooldown = 300;
+}
+
+/// @notice Minimal core stub whose fundEpoch always reverts while the cursor
+///         stays parked on the same target — the shape VaultUpkeep must handle
+///         without losing its stall accounting.
+contract RevertingFundCore {
+    uint256 private immutable _oldest;
+
+    constructor(uint256 oldest_) { _oldest = oldest_; }
+
+    error AlwaysReverts();
+
+    function fundEpoch(uint256) external pure { revert AlwaysReverts(); }
+    function oldestUnfundedEpochId() external view returns (uint256) { return _oldest; }
+    function currentEpochId() external view returns (uint256) { return _oldest + 1; }
+
+    function canSettle() external pure returns (bool) { return false; }
+    function canCrystallize() external pure returns (bool) { return false; }
+    function canRealizeWithGap() external pure returns (bool, uint256) { return (false, 0); }
+    function canDeploy() external pure returns (bool) { return false; }
+    function canCloseCurrentEpoch() external pure returns (bool) { return false; }
+    function currentEpochClaimCount() external pure returns (uint256) { return 0; }
+    function canRebalanceStrategies() external pure returns (bool) { return false; }
+    function pendingExitCount() external pure returns (uint256) { return 0; }
+    function totalAssets() external pure returns (uint256) { return 0; }
 }

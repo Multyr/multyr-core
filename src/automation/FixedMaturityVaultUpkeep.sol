@@ -160,10 +160,15 @@ contract FixedMaturityVaultUpkeep is AutomationCompatibleInterface {
         } else if (op == OP_FM_EPOCH_FUND) {
             // fundEpoch() runs its own warm-refill -> strategy-redeem waterfall
             // internally; a partial fund is retried next cycle, not a failure.
-            EpochedQueueModule(vault).fundEpoch(arg);
+            // Swallowed deliberately: a revert here (an already-Funded target,
+            // say) is a stall like any other, and must still be accounted for
+            // below. Leaving it to bubble would skip the bookkeeping entirely
+            // and let EPOCH_FUND keep its unconditional priority forever.
+            try EpochedQueueModule(vault).fundEpoch(arg) { } catch { }
 
             // Track whether this attempt made progress on the SAME target
-            // epoch, so checkUpkeep can yield priority once it stalls.
+            // epoch, so checkUpkeep can yield priority once it stalls. Runs on
+            // both outcomes -- a revert is a stall, not a non-event.
             uint256 stillOldest = _oldestUnfundedEpochId();
             if (stillOldest == arg) {
                 if (lastEpochFundTargetId == arg) {

@@ -351,26 +351,32 @@ contract VaultUpkeep is AutomationCompatibleInterface, Ownable {
                 success = true;
             } catch {}
             emit UpkeepPerformed(Op.EPOCH_FUND, arg, success);
+
+            // Stall accounting runs on BOTH outcomes. A revert is a stall, not
+            // a non-event: if it only ran on success, a target that reverts
+            // every time (fundEpoch on an epoch that is already Funded, say)
+            // would leave the counters untouched forever, checkUpkeep's
+            // stalled-check could never become true, and EPOCH_FUND would keep
+            // its unconditional priority — the exact livelock the backoff
+            // exists to break.
+            uint256 stillOldest = arg;
+            try core.oldestUnfundedEpochId() returns (uint256 id) { stillOldest = id; } catch {}
+            if (stillOldest == arg) {
+                if (lastEpochFundTargetId == arg) {
+                    epochFundStallCount++;
+                } else {
+                    lastEpochFundTargetId = arg;
+                    epochFundStallCount = 1;
+                }
+                lastEpochFundStallTs = uint64(block.timestamp);
+            } else {
+                lastEpochFundTargetId = type(uint256).max;
+                epochFundStallCount = 0;
+            }
+
             if (success) {
                 failureCountByOp[Op.EPOCH_FUND] = 0;
                 _recordSuccess();
-
-                // Track whether this attempt made progress on the SAME target
-                // epoch, so checkUpkeep can yield priority once it stalls.
-                uint256 stillOldest = arg;
-                try core.oldestUnfundedEpochId() returns (uint256 id) { stillOldest = id; } catch {}
-                if (stillOldest == arg) {
-                    if (lastEpochFundTargetId == arg) {
-                        epochFundStallCount++;
-                    } else {
-                        lastEpochFundTargetId = arg;
-                        epochFundStallCount = 1;
-                    }
-                    lastEpochFundStallTs = uint64(block.timestamp);
-                } else {
-                    lastEpochFundTargetId = type(uint256).max;
-                    epochFundStallCount = 0;
-                }
             } else {
                 failureCountByOp[Op.EPOCH_FUND]++;
                 _recordRealFailure();
