@@ -117,17 +117,20 @@ The following functions are NOT routed via the module dispatch — they are impl
 | `maxRedeem(address)` | Always returns 0 (queued protocol) |
 | `previewDeposit(uint256)` | Fee-aware shares preview |
 | `previewMint(uint256)` | Fee-aware assets-in preview |
-| `owner()`, `guardian()` | Role reads |
-| `paused()`, `pausedDeposits()`, `pausedWithdrawals()` | State reads |
+| `owner()`, `guardian()`, `recoveryGate()` | Role reads |
+| `paused()`, `pausedDeposits()`, `pausedWithdrawals()`, `pausedInstantWithdrawal()`, `pausedQueuedRequest()`, `pausedEpochCloseFund()`, `pausedFundedClaim()`, `pausedForceExit()` | State reads — see §11.3 |
 | `moduleOf(bytes4)`, `roleOf(bytes4)` | Routing table reads |
-| `setModule()`, `setModulesBatch()` | Routing table writes (onlyOwner) |
+| `setModule()`, `setModulesBatch()` | Routing table writes (onlyOwner, blocked once `FLAG_ROUTING_FROZEN` is set) |
 | `freezeRouting()` | Freeze routing table (irreversible) |
-| `setSelectorRegistry()` | One-shot registry binding |
-| `pauseAll()`, `unpauseAll()`, `guardianPause()` | Pause control |
+| `setSelectorRegistry()` | One-shot registry binding (onlyOwner, blocked post-seal) |
+| `setGuardian()` | Update guardian address (onlyOwner, blocked post-seal — matches `AdminModule.setVetoer()`'s existing `_requireNotSealed()` guard; **not** the `AdminModule.setEcosystem()`-era table entry that used to appear under §4 AdminModule in modules.md — this is a direct CoreVault function) |
+| `setRecoveryGate()` | One-shot Emergency Module Recovery gate binding (onlyOwner, blocked post-seal — see [recovery.md](recovery.md)) |
+| `recoverModuleGroup()` | Emergency Module Recovery entry point (onlyRecoveryGate only — see [recovery.md](recovery.md)) |
+| `pauseAll()`, `unpauseAll()`, `pauseDepositsOnly()`, `pauseWithdrawalsOnly()`, `pauseInstantWithdrawalOnly()`, `pauseEpochCloseFundOnly()`, `pauseQueuedRequestOnly()`, `pauseFundedClaimOnly()`, `pauseForceExitOnly()`, `guardianPause()` | Pause control — full breaker table in §11.3 |
 | `beginOwnerTransfer()`, `acceptOwnerTransfer()` | Ownership transfer |
 | `processorMint()`, `processorBurn()`, `processorTransfer()`, `processorSpendAllowance()` | Module callbacks for share accounting |
-| `authorizeModule()`, `isModuleAuthorized()` | Module authorization for processor functions |
-| `setAuthorizedSealer()`, `sealBySealer()` | System sealing |
+| `authorizeModule()`, `isModuleAuthorized()` | Module authorization for processor functions (onlyOwner, blocked post-seal) |
+| `setAuthorizedSealer()`, `sealBySealer()` | System sealing (onlyOwner, blocked post-seal) |
 | `payRewardShares()` | Dedicated reward payout (via RewardsPayoutManager) — transfers from a pre-funded rewards treasury, never mints; non-dilutive by construction |
 
 ---

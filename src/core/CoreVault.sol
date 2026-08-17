@@ -273,8 +273,17 @@ contract CoreVault is ERC4626, ICoreVault {
     // MODULE ROUTING ADMIN
     // ═══════════════════════════════════════════════════════════════════════════════
 
+    /// @dev Set-once, and explicitly blocked post-seal — matching
+    ///      authorizeModule()/setAuthorizedSealer()/setRecoveryGate(). The
+    ///      set-once check alone already makes this unreachable in practice
+    ///      today (SystemSealer's INVARIANT 2 requires selectorRegistry !=
+    ///      address(0) to seal at all, so it can never be zero post-seal) —
+    ///      the seal check is added for defense-in-depth consistency with
+    ///      the other set-once admin functions, not because a live gap was
+    ///      found here.
     function setSelectorRegistry(address registry) external onlyOwner {
         CoreStorage.Layout storage core = CoreStorage.layout();
+        if (core.packedFlags & CoreStorage.FLAG_SYSTEM_SEALED != 0) revert SystemSealed();
         if (core.selectorRegistry != address(0)) revert SelectorRegistryAlreadySet();
         core.selectorRegistry = registry;
         emit Events.SelectorRegistrySet(registry);
@@ -284,8 +293,19 @@ contract CoreVault is ERC4626, ICoreVault {
     ///         thereafter — same pattern as setSelectorRegistry() (review §8:
     ///         the recovery policy, including which contract enforces it,
     ///         must not be administratively changeable post-seal).
+    /// @dev Explicitly blocked post-seal (matching authorizeModule() /
+    ///      setAuthorizedSealer()): SystemSealer's INVARIANT 8e allows a
+    ///      vault to seal with no recovery gate wired at all
+    ///      (config.recoveryGate == address(0) is a valid, documented "no
+    ///      recovery" configuration). Without this check, the owner could
+    ///      seal without recovery, then call this afterward to install an
+    ///      arbitrary contract with immediate, unrestricted
+    ///      recoverModuleGroup() access — no delay, no independent
+    ///      approval, no veto — defeating the entire point of the recovery
+    ///      mechanism's immutable, pre-seal-only policy.
     function setRecoveryGate(address gate) external onlyOwner {
         CoreStorage.Layout storage core = CoreStorage.layout();
+        if (core.packedFlags & CoreStorage.FLAG_SYSTEM_SEALED != 0) revert SystemSealed();
         if (core.recoveryGate != address(0)) revert RecoveryGateAlreadySet();
         if (gate == address(0)) revert ZeroAddress();
         core.recoveryGate = gate;
@@ -659,8 +679,18 @@ contract CoreVault is ERC4626, ICoreVault {
         return CoreStorage.layout().guardian;
     }
 
+    /// @dev Blocked post-seal, matching AdminModule.setVetoer()'s existing
+    ///      _requireNotSealed() guard. Unlike setSelectorRegistry() above,
+    ///      this one had no protection at all pre-fix — SystemSealer locks
+    ///      in and verifies vault.guardian() == config.guardian at seal
+    ///      time, and review §11 explicitly lists "Guardian modification"
+    ///      as something the system must never permit, but nothing in code
+    ///      stopped the owner from calling this freely at any time,
+    ///      including after sealing.
     function setGuardian(address newGuardian) external onlyOwner {
-        CoreStorage.layout().guardian = newGuardian;
+        CoreStorage.Layout storage core = CoreStorage.layout();
+        if (core.packedFlags & CoreStorage.FLAG_SYSTEM_SEALED != 0) revert SystemSealed();
+        core.guardian = newGuardian;
         emit Events.GuardianUpdated(newGuardian);
     }
 
