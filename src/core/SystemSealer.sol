@@ -59,10 +59,16 @@ import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/I
  * [x] CoreVault.isComponentsTimelocked == true
  * [x] CoreVault.selectorRegistry is set
  * [x] All AdminModule owner selectors have roleOf == ROLE_OWNER
+ * [x] CoreVault.feeCollector == config.feeCollector (live-wiring bind — a
+ *     correctly governed FeeCollector the vault does not read from must not
+ *     satisfy the seal)
  * [x] FeeCollector.governor == ROOT_TIMELOCK (immutable)
  * [x] GlobalConfig.governor == ROOT_TIMELOCK
+ * [x] CoreVault.router() == config.strategyRouter (live-wiring bind)
  * [x] StrategyRouter.owner == ROOT_TIMELOCK
+ * [x] CoreVault.bufferManager() == config.bufferManager (live-wiring bind)
  * [x] BufferManager.owner == ROOT_TIMELOCK
+ * [x] CoreVault.healthRegistry() == config.healthRegistry (live-wiring bind)
  * [x] StrategyHealthRegistry.owner == ROOT_TIMELOCK
  * [x] StrategyHealthRegistry.guardian == SAFE_GUARDIAN
  * [x] Incentives.owner == ROOT_TIMELOCK (if deployed)
@@ -282,8 +288,17 @@ contract SystemSealer {
         }
 
         // ─────────────────────────────────────────────────────────────────────────
-        // INVARIANT 3: FeeCollector governor (IMMUTABLE - most critical check)
+        // INVARIANT 3: FeeCollector is bound to the vault, and its governor
         // ─────────────────────────────────────────────────────────────────────────
+        // Live-wiring bind (review §24) — same narrow-fix pattern already
+        // applied to GlobalConfig on PR #11: without this, a correctly
+        // governed FeeCollector that the vault does NOT actually read from
+        // still satisfies the governance check below, so a decoy address
+        // passes the seal even though CoreVault.feeCollector() points
+        // somewhere else entirely.
+        if (vault.feeCollector() != config.feeCollector) {
+            return (false, "FeeCollector not bound to vault");
+        }
         FeeCollector fc = FeeCollector(config.feeCollector);
         if (fc.governor() != config.rootTimelock) {
             return (false, "FeeCollector.governor != ROOT_TIMELOCK (IMMUTABLE!)");
@@ -298,22 +313,32 @@ contract SystemSealer {
         }
 
         // ─────────────────────────────────────────────────────────────────────────
-        // INVARIANT 5: StrategyRouter ownership
+        // INVARIANT 5: StrategyRouter is bound to the vault, and its ownership
         // ─────────────────────────────────────────────────────────────────────────
+        if (address(vault.router()) != config.strategyRouter) {
+            return (false, "StrategyRouter not bound to vault");
+        }
         if (StrategyRouter(config.strategyRouter).owner() != config.rootTimelock) {
             return (false, "StrategyRouter.owner != ROOT_TIMELOCK");
         }
 
         // ─────────────────────────────────────────────────────────────────────────
-        // INVARIANT 6: BufferManager ownership
+        // INVARIANT 6: BufferManager is bound to the vault, and its ownership
         // ─────────────────────────────────────────────────────────────────────────
+        if (address(vault.bufferManager()) != config.bufferManager) {
+            return (false, "BufferManager not bound to vault");
+        }
         if (BufferManager(config.bufferManager).owner() != config.rootTimelock) {
             return (false, "BufferManager.owner != ROOT_TIMELOCK");
         }
 
         // ─────────────────────────────────────────────────────────────────────────
-        // INVARIANT 7: StrategyHealthRegistry ownership and guardian
+        // INVARIANT 7: StrategyHealthRegistry is bound to the vault, its
+        // ownership, and its guardian
         // ─────────────────────────────────────────────────────────────────────────
+        if (address(vault.healthRegistry()) != config.healthRegistry) {
+            return (false, "HealthRegistry not bound to vault");
+        }
         StrategyHealthRegistry hr = StrategyHealthRegistry(config.healthRegistry);
         if (hr.owner() != config.rootTimelock) {
             return (false, "HealthRegistry.owner != ROOT_TIMELOCK");
