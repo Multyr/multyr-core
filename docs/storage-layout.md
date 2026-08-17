@@ -152,7 +152,7 @@ This is the primary namespace. All modules share this storage. Access via `CoreS
 | `incentives` | `IIncentives` | Legacy incentives (v1) | Updatable via AdminModule |
 | `feeCollector` | `address` | Fee recipient | Updatable via AdminModule |
 | `vetoer` | `address` | Can veto pending param changes | Updatable via AdminModule |
-| `guardian` | `address` | Limited pause authority | Updatable via `setGuardian()` (onlyOwner) |
+| `guardian` | `address` | Limited pause authority | Updatable via `setGuardian()` (onlyOwner, blocked post-seal) |
 | `owner` | `address` | Full admin authority | Updatable via 2-step transfer |
 | `pendingOwner` | `address` | Transfer target | Set by `beginOwnerTransfer()` |
 
@@ -218,7 +218,8 @@ Source: `src/core/storage/CoreStorage.sol:79-80`. Populated by `setModule()` / `
 
 | Field | Type | Purpose |
 |---|---|---|
-| `selectorRegistry` | `address` | SelectorRegistry address (set once, immutable) |
+| `selectorRegistry` | `address` | SelectorRegistry address (set once, blocked post-seal — see `setSelectorRegistry()`) |
+| `recoveryGate` | `address` | Emergency Module Recovery gate (set once, blocked post-seal — see `setRecoveryGate()`, [recovery.md](recovery.md)) |
 | `pendingSealHash` | `bytes32` | Hash commitment for system sealing |
 | `authorizedSealer` | `address` | SystemSealer contract address (set once) |
 | `isAuthorizedModule[address]` | `mapping(address => bool)` | Module → processorMint/Burn/Transfer authorized |

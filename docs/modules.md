@@ -329,6 +329,8 @@ revoke*():
 
 ### 4.3 Key Functions
 
+> **Correction**: `setGuardian(address)` previously appeared in this table but is not an `AdminModule` function — it's implemented directly on `CoreVault` (see [architecture.md §2.3](architecture.md#23-functions-implemented-directly-on-corevault)). It is now `onlyOwner` and blocked post-seal, matching `setVetoer()` below.
+
 | Function | Role | Timelock | Description |
 |---|---|---|---|
 | `submitFeeParams(dep,wit,immExit,forceExit,treasury)` | OWNER | yes | Queue fee change |
@@ -342,8 +344,7 @@ revoke*():
 | `setBufferManager(address)` | OWNER | conditionally | Set BufferManager |
 | `setRouter(address)` | OWNER | conditionally | Set StrategyRouter |
 | `setFeeCollector(address)` | OWNER | — | Update fee recipient |
-| `setGuardian(address)` | OWNER | — | Update guardian |
-| `setVetoer(address)` | OWNER | — | Update vetoer |
+| `setVetoer(address)` | OWNER | — | Update vetoer (blocked post-seal via `_requireNotSealed()`) |
 | `enableComponentsTimelock()` | OWNER | — | Enable timelock for setParams/setRouter/setBM |
 | `submitBufferManager(address)` | OWNER | yes | Queue BM change (if componentsTl) |
 | `acceptBufferManager()` | OWNER | ETA check | Apply queued BM |
