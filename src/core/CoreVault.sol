@@ -18,6 +18,7 @@ import { FeeStorage } from "./storage/FeeStorage.sol";
 import { Events } from "./libraries/Events.sol";
 import { Percentage } from "../libs/Percentage.sol";
 import { SelectorRegistry } from "./libraries/SelectorRegistry.sol";
+import { SelectorLib } from "./libraries/SelectorLib.sol";
 
 /// @title CoreVault v8 (Diamond-lite Thin Proxy)
 /// @notice ERC-4626 vault that delegates ALL economic logic to modules via delegatecall.
@@ -45,6 +46,10 @@ contract CoreVault is ERC4626, ICoreVault {
     error Paused();
     error DepositsPaused();
     error WithdrawalsPaused();
+    error QueuedRequestPaused();
+    error EpochCloseFundPaused();
+    error FundedClaimPaused();
+    error ForceExitPaused();
     error ZeroAmount();
     error ZeroAddress();
     error RoutingFrozen();
@@ -55,6 +60,10 @@ contract CoreVault is ERC4626, ICoreVault {
     error ReentrancyGuardLocked();
     error InvalidRoleForSelector(bytes4 selector, uint8 attemptedRole, uint8 requiredRole);
     error SelectorRegistryAlreadySet();
+    error RecoveryGateAlreadySet();
+    error NotRecoveryGate();
+    error InvalidRecoveryGroup();
+    error WrongRecoveryModuleCount();
     error SystemSealed();
     error SealerAlreadySet();
     error NotAuthorizedSealer();
@@ -116,6 +125,20 @@ contract CoreVault is ERC4626, ICoreVault {
 
     modifier onlyGuardian() {
         if (msg.sender != CoreStorage.layout().guardian) revert NotGuardian();
+        _;
+    }
+
+    modifier onlyOwnerOrGuardian() {
+        CoreStorage.Layout storage core = CoreStorage.layout();
+        if (msg.sender != core.owner && msg.sender != core.guardian) revert NotOwnerOrGuardian();
+        _;
+    }
+
+    /// @dev Emergency Module Recovery (review §7) — the sole caller of
+    ///      recoverModuleGroup(). Set once via setRecoveryGate(), never
+    ///      changed afterward (review §8: recovery policy is immutable).
+    modifier onlyRecoveryGate() {
+        if (msg.sender != CoreStorage.layout().recoveryGate) revert NotRecoveryGate();
         _;
     }
 
@@ -257,6 +280,18 @@ contract CoreVault is ERC4626, ICoreVault {
         emit Events.SelectorRegistrySet(registry);
     }
 
+    /// @notice Bind the Emergency Module Recovery gate. Set-once, immutable
+    ///         thereafter — same pattern as setSelectorRegistry() (review §8:
+    ///         the recovery policy, including which contract enforces it,
+    ///         must not be administratively changeable post-seal).
+    function setRecoveryGate(address gate) external onlyOwner {
+        CoreStorage.Layout storage core = CoreStorage.layout();
+        if (core.recoveryGate != address(0)) revert RecoveryGateAlreadySet();
+        if (gate == address(0)) revert ZeroAddress();
+        core.recoveryGate = gate;
+        emit Events.RecoveryGateSet(gate);
+    }
+
     function setModule(bytes4 selector, address module, uint8 role) external onlyOwner {
         CoreStorage.Layout storage core = CoreStorage.layout();
         if (core.packedFlags & CoreStorage.FLAG_ROUTING_FROZEN != 0) revert RoutingFrozen();
@@ -319,6 +354,58 @@ contract CoreVault is ERC4626, ICoreVault {
 
     function selectorRegistry() external view returns (address) {
         return CoreStorage.layout().selectorRegistry;
+    }
+
+    function recoveryGate() external view returns (address) {
+        return CoreStorage.layout().recoveryGate;
+    }
+
+    /// @notice Emergency Module Recovery entry point (review §7) — completely
+    ///         separate from setModule()/setModulesBatch(), which remain
+    ///         permanently disabled once FLAG_ROUTING_FROZEN is set. Only
+    ///         callable by the immutable recoveryGate.
+    /// @dev Deliberately takes no role parameter: it only ever rewrites
+    ///      moduleOf[selector] for the group's fixed, SelectorLib-derived
+    ///      selector set and never touches roleOf, which structurally
+    ///      forecloses role relaxation (review §11) rather than relying on a
+    ///      runtime check. Selectors are derived here from SelectorLib
+    ///      directly — the same source of truth CoreVault's own deployment
+    ///      wiring uses — not trusted from the caller, so RecoveryGate
+    ///      cannot mis-specify which selectors a group covers. All-or-
+    ///      nothing: `newModules.length` must match the group's selector
+    ///      count exactly or the whole call reverts (review §10, atomic
+    ///      module-group replacement).
+    function recoverModuleGroup(uint8 groupId, address[] calldata newModules)
+        external
+        onlyRecoveryGate
+    {
+        bytes4[] memory selectors = _recoverySelectorsForGroup(groupId);
+        if (newModules.length != selectors.length) revert WrongRecoveryModuleCount();
+
+        CoreStorage.Layout storage core = CoreStorage.layout();
+        for (uint256 i; i < selectors.length; ++i) {
+            core.moduleOf[selectors[i]] = newModules[i];
+        }
+
+        emit Events.ModuleGroupRecovered(groupId, newModules);
+    }
+
+    /// @dev Mirrors RecoveryGate._selectorsForGroup() exactly — kept in sync
+    ///      because both read the same underlying SelectorLib getters, not
+    ///      because either trusts the other's definition.
+    function _recoverySelectorsForGroup(uint8 groupId) internal pure returns (bytes4[] memory) {
+        if (groupId == 0) {
+            bytes4[] memory writeSel = SelectorLib.getQueueModuleSelectors();
+            bytes4[] memory viewSel = SelectorLib.getQueueModuleViewSelectors();
+            bytes4[] memory combined = new bytes4[](writeSel.length + viewSel.length);
+            for (uint256 i; i < writeSel.length; ++i) combined[i] = writeSel[i];
+            for (uint256 i; i < viewSel.length; ++i) combined[writeSel.length + i] = viewSel[i];
+            return combined;
+        }
+        if (groupId == 1) return SelectorLib.getERC4626ModuleSelectors();
+        if (groupId == 2) return SelectorLib.getLiquidityOpsModuleSelectors();
+        if (groupId == 3) return SelectorLib.getFixedMaturityModuleSelectors();
+        revert InvalidRecoveryGroup();
     }
 
     function authorizedSealer() external view returns (address) {
@@ -419,15 +506,115 @@ contract CoreVault is ERC4626, ICoreVault {
         return CoreStorage.layout().packedFlags & CoreStorage.FLAG_PAUSED_WITHDRAWALS != 0;
     }
 
+    // --- Granular withdrawal circuit breakers (review §20/§21) ---
+    // FLAG_PAUSED_WITHDRAWALS (above) is honored, in addition to the specific
+    // flag below, ONLY by instant settlement and epoch close/fund — the two
+    // breakers Guardian may also trip via guardianPause(). It deliberately does
+    // NOT reach queued-request creation or funded claims: exit intent must stay
+    // recordable even while settlement is paused (review §19), and funded
+    // claims must never be blockable by any general administrative flag
+    // (review §20 — only the dedicated pauseFundedClaimOnly()/
+    // pauseQueuedRequestOnly() can reach those). Force exit reads neither this
+    // flag nor FLAG_PAUSED: it has its own dedicated breaker so it can never be
+    // blocked as a side effect of a generic emergency pause (review §20).
+    function pausedInstantWithdrawal() external view returns (bool) {
+        return CoreStorage.layout().packedFlags & CoreStorage.FLAG_INSTANT_WITHDRAWAL_PAUSED != 0;
+    }
+
+    function pausedQueuedRequest() external view returns (bool) {
+        return CoreStorage.layout().packedFlags & CoreStorage.FLAG_QUEUED_REQUEST_PAUSED != 0;
+    }
+
+    function pausedEpochCloseFund() external view returns (bool) {
+        return CoreStorage.layout().packedFlags & CoreStorage.FLAG_EPOCH_CLOSE_FUND_PAUSED != 0;
+    }
+
+    function pausedFundedClaim() external view returns (bool) {
+        return CoreStorage.layout().packedFlags & CoreStorage.FLAG_FUNDED_CLAIM_PAUSED != 0;
+    }
+
+    function pausedForceExit() external view returns (bool) {
+        return CoreStorage.layout().packedFlags & CoreStorage.FLAG_FORCE_EXIT_PAUSED != 0;
+    }
+
     function pauseAll() external onlyOwner {
         CoreStorage.layout().packedFlags |= CoreStorage.FLAG_PAUSED;
         emit Events.AllPaused();
     }
 
     function unpauseAll() external onlyOwner {
-        CoreStorage.layout().packedFlags &=
-            ~(CoreStorage.FLAG_PAUSED | CoreStorage.FLAG_PAUSED_DEPOSITS | CoreStorage.FLAG_PAUSED_WITHDRAWALS);
+        CoreStorage.layout().packedFlags &= ~(
+            CoreStorage.FLAG_PAUSED | CoreStorage.FLAG_PAUSED_DEPOSITS
+                | CoreStorage.FLAG_PAUSED_WITHDRAWALS | CoreStorage.FLAG_INSTANT_WITHDRAWAL_PAUSED
+                | CoreStorage.FLAG_QUEUED_REQUEST_PAUSED | CoreStorage.FLAG_EPOCH_CLOSE_FUND_PAUSED
+                | CoreStorage.FLAG_FUNDED_CLAIM_PAUSED | CoreStorage.FLAG_FORCE_EXIT_PAUSED
+        );
         emit Events.AllUnpaused();
+    }
+
+    /// @notice Guardian-eligible instant-settlement breaker (review §20: approved
+    ///         as a narrow circuit breaker Guardian may trip immediately).
+    function pauseInstantWithdrawalOnly(bool p) external onlyOwnerOrGuardian {
+        if (p) {
+            CoreStorage.layout().packedFlags |= CoreStorage.FLAG_INSTANT_WITHDRAWAL_PAUSED;
+            emit Events.InstantWithdrawalPaused();
+        } else {
+            CoreStorage.layout().packedFlags &= ~CoreStorage.FLAG_INSTANT_WITHDRAWAL_PAUSED;
+            emit Events.InstantWithdrawalUnpaused();
+        }
+    }
+
+    /// @notice Guardian-eligible epoch close/fund breaker (review §20: "may be
+    ///         temporarily restricted where the affected accounting or
+    ///         settlement path is implicated"; separate from exit-intent
+    ///         recording, which is pauseQueuedRequestOnly below).
+    function pauseEpochCloseFundOnly(bool p) external onlyOwnerOrGuardian {
+        if (p) {
+            CoreStorage.layout().packedFlags |= CoreStorage.FLAG_EPOCH_CLOSE_FUND_PAUSED;
+            emit Events.EpochCloseFundPaused();
+        } else {
+            CoreStorage.layout().packedFlags &= ~CoreStorage.FLAG_EPOCH_CLOSE_FUND_PAUSED;
+            emit Events.EpochCloseFundUnpaused();
+        }
+    }
+
+    /// @notice Owner-only, exceptional: blocking NEW queued-exit requests is
+    ///         explicitly NOT approved as a routine Guardian tool (review §20).
+    ///         Existing requests can still be cancelled regardless of this flag.
+    function pauseQueuedRequestOnly(bool p) external onlyOwner {
+        if (p) {
+            CoreStorage.layout().packedFlags |= CoreStorage.FLAG_QUEUED_REQUEST_PAUSED;
+            emit Events.QueuedRequestPaused();
+        } else {
+            CoreStorage.layout().packedFlags &= ~CoreStorage.FLAG_QUEUED_REQUEST_PAUSED;
+            emit Events.QueuedRequestUnpaused();
+        }
+    }
+
+    /// @notice Owner-only, exceptional: funded claims are permissionless by
+    ///         default and must never be stoppable by ordinary/Guardian action
+    ///         (review §20 — only if the claim execution path itself is unsafe).
+    function pauseFundedClaimOnly(bool p) external onlyOwner {
+        if (p) {
+            CoreStorage.layout().packedFlags |= CoreStorage.FLAG_FUNDED_CLAIM_PAUSED;
+            emit Events.FundedClaimPaused();
+        } else {
+            CoreStorage.layout().packedFlags &= ~CoreStorage.FLAG_FUNDED_CLAIM_PAUSED;
+            emit Events.FundedClaimUnpaused();
+        }
+    }
+
+    /// @notice Owner-only, exceptional: force exit's own dedicated breaker.
+    ///         Never touched by pauseAll()/guardianPause() — its behavior must
+    ///         be a deliberate, separate governance action (review §20).
+    function pauseForceExitOnly(bool p) external onlyOwner {
+        if (p) {
+            CoreStorage.layout().packedFlags |= CoreStorage.FLAG_FORCE_EXIT_PAUSED;
+            emit Events.ForceExitPaused();
+        } else {
+            CoreStorage.layout().packedFlags &= ~CoreStorage.FLAG_FORCE_EXIT_PAUSED;
+            emit Events.ForceExitUnpaused();
+        }
     }
 
     function pauseDepositsOnly(bool p) external onlyOwner {
@@ -460,7 +647,11 @@ contract CoreVault is ERC4626, ICoreVault {
             revert GuardianCooldownActive();
         }
         core.lastGuardianPause = uint64(block.timestamp);
-        core.packedFlags |= CoreStorage.FLAG_PAUSED;
+        // Deposits (unchanged), plus the two withdrawal breakers review §20
+        // approves for Guardian's immediate use. Queued-request, funded-claim,
+        // and force-exit stay owner-only/exceptional and are never touched here.
+        core.packedFlags |= CoreStorage.FLAG_PAUSED | CoreStorage.FLAG_INSTANT_WITHDRAWAL_PAUSED
+            | CoreStorage.FLAG_EPOCH_CLOSE_FUND_PAUSED;
         emit Events.GuardianPauseActivated(msg.sender, block.timestamp);
     }
 

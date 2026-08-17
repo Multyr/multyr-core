@@ -35,6 +35,15 @@ library CoreStorage {
     uint256 internal constant FLAG_FEES_INITIALIZED = 1 << 11;
     uint256 internal constant FLAG_PERF_INITIALIZED = 1 << 12;
 
+    // Granular withdrawal circuit breakers (review §20/§21: FLAG_PAUSED_WITHDRAWALS is too
+    // coarse — it must not be able to block funded claims or new queued-exit requests, and
+    // force exit must never be gated by a generic emergency flag at all).
+    uint256 internal constant FLAG_INSTANT_WITHDRAWAL_PAUSED = 1 << 13;
+    uint256 internal constant FLAG_QUEUED_REQUEST_PAUSED = 1 << 14;
+    uint256 internal constant FLAG_EPOCH_CLOSE_FUND_PAUSED = 1 << 15;
+    uint256 internal constant FLAG_FUNDED_CLAIM_PAUSED = 1 << 16;
+    uint256 internal constant FLAG_FORCE_EXIT_PAUSED = 1 << 17;
+
     struct Layout {
         // Addresses (each 20 bytes, separate slots for simplicity)
         IParamsProvider params;
@@ -83,6 +92,10 @@ library CoreStorage {
 
         // Selector registry for role validation (set once, immutable)
         address selectorRegistry;
+
+        // Emergency Module Recovery gate (set once, immutable) — the sole
+        // authorized caller of recoverModuleGroup(). Review §7/§8.
+        address recoveryGate;
 
         // System sealer binding - set atomically by sealBySealer() (called from
         // SystemSealer.verifyAndSeal()) alongside FLAG_SYSTEM_SEALED, in the same call

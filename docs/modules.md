@@ -778,12 +778,26 @@ Source: `src/core/modules/StrategyRouter.sol:235-380`.
 
 Source: `src/core/modules/StrategyRouter.sol:390-1164`.
 
-### 14.6 Key Invariants
+### 14.6 Incident-Response / Emergency Recovery (review Alternative 1, §27)
+
+`withdrawAllToCore(address)` and `emergencyRedeemBatch(Pull[])` are the concrete implementation of the architecture review's recommended incident-response sequence for a compromised strategy — "Guardian quarantine + existing timelocked recovery" — without any new privileged asset-moving contract:
+
+1. Guardian calls `StrategyHealthRegistry.setStrategyState(strategy, BROKEN, reason)` (§16.4) — immediate, stops new deposits into the strategy via `_isHealthy`/`planDeposit` filtering.
+2. Operations stop routing new allocations through the affected strategy.
+3. `ROOT_TIMELOCK` (as `owner`) schedules `withdrawAllToCore(strategy)` (single strategy) or `emergencyRedeemBatch(plan)` (multiple strategies / partial amounts) through the normal governance delay.
+4. Recovered assets land in `core` (the vault); accounting is reconciled before the strategy is re-enabled or removed.
+
+**Both recovery functions are `onlyOwner`-gated only — neither checks `StrategyState` at all.** This is deliberate, not an oversight: review §33 requires that `BROKEN` mean "no new exposure," not "no possible capital recovery" — recovery must never be blocked by the same state flag that stops new deposits. The consequence is that the four-step sequence above is a **procedural** incident-response runbook enforced by governance discipline and the existing timelock delay, not an on-chain precondition chaining `StrategyHealthRegistry` state to `StrategyRouter`'s recovery functions. `emergencyRedeemBatch` additionally bypasses `lossCap`/`navDelta`/cooldown/oracle-freshness checks for exactly this reason — see the code comment at `src/core/modules/StrategyRouter.sol:1128-1131` referencing the v6 recovery incident this path was built for.
+
+The architecture review rejected a generic `EmergencyExecutor` (§26) specifically because these two functions already cover the recommended first-release incident-response model; a narrower exit-only mechanism (review §28) remains a possible future addition if incident drills show the existing timelock delay is too slow in practice, not a current gap.
+
+### 14.7 Key Invariants
 
 - `planSum ≤ availableSurplus` before any deposit transfer — `planSum > available` reverts with `InvalidPlanSum` (`src/core/modules/StrategyRouter.sol:679-680`).
 - Per-strategy allocation cap uses the `navBefore` snapshot (not live NAV inside the loop), preventing double-counting when `fundsAlreadyTransferred=true` (`src/core/modules/StrategyRouter.sol:712`).
 - `emergencyRedeemBatch` and `forceRedeemForWithdraw` intentionally bypass loss cap — W2 policy: forced exit must never be blocked by loss accounting.
 - `_isHealthy` is FAIL-CLOSED: if `healthRegistry.isHealthyForDeposit()` reverts, the strategy is excluded from the batch (`src/core/modules/StrategyRouter.sol:992-996`).
+- `withdrawAllToCore`/`emergencyRedeemBatch` are intentionally NOT gated by `StrategyState` — see §14.6.
 
 ---
 
@@ -896,14 +910,14 @@ Source: `src/core/modules/StrategyScorer.sol:86-266`.
 | `guardian` | Constructor; hot EOA | DEGRADED, BROKEN only (`GuardianCannotMarkOK`) |
 | `authorizedCallers` | Added by owner | NAV updates only (`updateLastKnownNAV`) |
 
-The guardian restriction enforces that recovery to `OK` always requires owner (Timelock) action — a guardian can quarantine but cannot unquarantine. Source: `src/core/modules/StrategyHealthRegistry.sol:36` (error declaration), `src/core/modules/StrategyHealthRegistry.sol:115` (revert in `setHealthy`), `src/core/modules/StrategyHealthRegistry.sol:140` (revert in `markHealthy`).
+The guardian restriction enforces that recovery to `OK` always requires owner (Timelock) action — a guardian can quarantine but cannot unquarantine (review §3.3 "fast to restrict, slow to restore" / §33 BROKEN semantics). Source: `src/core/modules/StrategyHealthRegistry.sol:36` (`GuardianCannotMarkOK` error declaration), `src/core/modules/StrategyHealthRegistry.sol:113-115` (revert in `setStrategyState`), `src/core/modules/StrategyHealthRegistry.sol:138-140` (revert per-iteration in `batchSetStrategyState`).
 
 ### 16.4 Key Functions
 
 | Function | Access | Description |
 |---|---|---|
 | `setStrategyState(address,StrategyState,string)` | `onlyOwnerOrGuardian` | Set health state with reason string |
-| `batchSetStrategyState(address[],StrategyState[],string[])` | `onlyOwnerOrGuardian` | Batch version |
+| `batchSetStrategyState(address[],StrategyState[],string)` | `onlyOwnerOrGuardian` | Batch version — one reason string applied to every strategy in the batch, not a per-index array |
 | `updateLastKnownNAV(address,uint256)` | `onlyAuthorizedCaller` | Cache last known NAV (called post-deposit/redeem by `StrategyRouter`) |
 | `isHealthyForDeposit(address)` | `view` | Returns `state == OK` |
 | `getStrategyState(address)` | `view` | Returns raw `StrategyState` enum value |
@@ -913,8 +927,9 @@ Source: `src/core/modules/StrategyHealthRegistry.sol:95-185`.
 
 ### 16.5 Key Invariants
 
-- Guardian cannot set `OK` — `GuardianCannotMarkOK` is a hard revert (`src/core/modules/StrategyHealthRegistry.sol:36,115,140`).
+- Guardian cannot set `OK` — `GuardianCannotMarkOK` is a hard revert (`src/core/modules/StrategyHealthRegistry.sol:36,113-115,138-140`).
 - Absence of registry (`address(0)`) in `StrategyRouter` defaults to all strategies healthy — permissive path for bootstrap phase.
+- **`BROKEN`/`DEGRADED` marks inflow prohibition only, never outflow/recovery prohibition** (review §33): marking a strategy `BROKEN` here has no on-chain effect on whether `StrategyRouter.withdrawAllToCore`/`emergencyRedeemBatch` can act on it — see §14.6 below. The state machine in this contract and the recovery functions in `StrategyRouter` are deliberately independent; the link between them is procedural (an incident-response runbook), not enforced by a code-level precondition.
 
 ---
 

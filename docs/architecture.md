@@ -243,8 +243,15 @@ Each library exposes a `layout()` function that returns a storage pointer at the
 | 10 | `FLAG_DEAD_DEPOSIT_DONE` | Dead deposit seeded (inflation attack hardening) |
 | 11 | `FLAG_FEES_INITIALIZED` | Fees initialized via `setInitialFees()` |
 | 12 | `FLAG_PERF_INITIALIZED` | Performance fee initialized via `setInitialPerfParams()` |
+| 13 | `FLAG_INSTANT_WITHDRAWAL_PAUSED` | Instant settlement only paused (queued exits unaffected) |
+| 14 | `FLAG_QUEUED_REQUEST_PAUSED` | New queued-exit requests only paused (cancelling existing ones unaffected) |
+| 15 | `FLAG_EPOCH_CLOSE_FUND_PAUSED` | Epoch close/fund/crystallize only paused |
+| 16 | `FLAG_FUNDED_CLAIM_PAUSED` | Funded-claim settlement only paused |
+| 17 | `FLAG_FORCE_EXIT_PAUSED` | Force exit only paused — the only flag that can gate it; see §4.3 |
 
-Source: `src/core/storage/CoreStorage.sol:24-36`.
+Source: `src/core/storage/CoreStorage.sol:24-41`.
+
+Bits 13-17 (review §20/§21, "Recommended Withdrawal Circuit Breakers" / "Required Pause Matrix") replace the previous all-or-nothing behavior of `FLAG_PAUSED_WITHDRAWALS` on `EpochedQueueModule` — before their introduction, that flag was not read anywhere in `EpochedQueueModule.sol` at all, so `guardianPause()`/`pauseWithdrawalsOnly()` had zero effect on the queue. See §11.3.
 
 ---
 
@@ -635,22 +642,34 @@ Source: `src/core/CoreVault.sol:394-407`.
 
 ### 11.2 Guardian
 
-The guardian is a separate address with limited pause capability. The guardian can pause the vault via `guardianPause()`, subject to a cooldown enforced by `IParamsProvider.guardianPauseCooldown()`. Default cooldown: 7 days (`src/core/CoreVault.sol:459-468`).
+The guardian is a separate address with limited pause capability, matching review §3.3 ("fast to restrict, slow to restore"): guardians cannot unpause, modify routing, or reach the exceptional owner-only breakers (§11.3) — these require owner.
 
-Guardians cannot unpause or modify routing — these require owner.
+`guardianPause()` is the guardian's single rapid action, subject to a cooldown enforced by `IParamsProvider.guardianPauseCooldown()` (default 7 days). It sets three flags together: `FLAG_PAUSED` (deposits), `FLAG_INSTANT_WITHDRAWAL_PAUSED`, and `FLAG_EPOCH_CLOSE_FUND_PAUSED` — the two withdrawal breakers review §20 approves for Guardian use. It deliberately does **not** reach queued-request creation, funded claims, or force exit (`src/core/CoreVault.sol:453-469`).
+
+The guardian may also trip `pauseInstantWithdrawalOnly()` and `pauseEpochCloseFundOnly()` individually (both `onlyOwnerOrGuardian`), for a narrower response than the combined `guardianPause()`.
 
 ### 11.3 Pause Granularity
 
-Three pause levels are available (all set by owner, all stored in `packedFlags`):
+`pauseAll()`/`unpauseAll()`/`pauseDepositsOnly()`/`pauseWithdrawalsOnly()` remain owner-only. Five additional breakers (review §20/§21) give targeted, owner- or guardian-scoped control over the withdrawal surface instead of one all-or-nothing flag:
 
-| Function | Pauses | Flag |
-|---|---|---|
-| `pauseAll()` | All operations | `FLAG_PAUSED` |
-| `pauseDepositsOnly(true)` | Deposits only | `FLAG_PAUSED_DEPOSITS` |
-| `pauseWithdrawalsOnly(true)` | Withdrawals only | `FLAG_PAUSED_WITHDRAWALS` |
-| `guardianPause()` | All (emergency) | `FLAG_PAUSED` |
+| Function | Pauses | Flag | Who |
+|---|---|---|---|
+| `pauseAll()` | Deposits (only — see §11.2) | `FLAG_PAUSED` | Owner |
+| `pauseDepositsOnly(true)` | Deposits only | `FLAG_PAUSED_DEPOSITS` | Owner |
+| `pauseWithdrawalsOnly(true)` | Instant settlement + epoch close/fund (aggregate) | `FLAG_PAUSED_WITHDRAWALS` | Owner |
+| `pauseInstantWithdrawalOnly(true)` | Instant settlement only (falls back to queue, does not revert) | `FLAG_INSTANT_WITHDRAWAL_PAUSED` | Owner or Guardian |
+| `pauseEpochCloseFundOnly(true)` | `closeCurrentEpoch`/`fundEpoch`/`endEpochCrystallize`/`syncOldestUnfundedEpoch` | `FLAG_EPOCH_CLOSE_FUND_PAUSED` | Owner or Guardian |
+| `pauseQueuedRequestOnly(true)` | NEW queued-exit requests only (cancelling an existing one is unaffected) | `FLAG_QUEUED_REQUEST_PAUSED` | Owner only, exceptional |
+| `pauseFundedClaimOnly(true)` | `claimEpochAssets`/`batchClaimEpochAssets` only | `FLAG_FUNDED_CLAIM_PAUSED` | Owner only, exceptional |
+| `pauseForceExitOnly(true)` | `forceWithdraw`/`forceWithdrawAll` only | `FLAG_FORCE_EXIT_PAUSED` | Owner only, dedicated |
+| `guardianPause()` | Deposits + instant settlement + epoch close/fund | `FLAG_PAUSED` + `FLAG_INSTANT_WITHDRAWAL_PAUSED` + `FLAG_EPOCH_CLOSE_FUND_PAUSED` | Guardian |
 
-`unpauseAll()` clears all three flags atomically. Source: `src/core/CoreVault.sol:425-454`.
+Two rules follow directly from review §20 and are enforced structurally, not just by convention:
+
+- **Force exit is read by exactly one flag, `FLAG_FORCE_EXIT_PAUSED`.** It ignores `FLAG_PAUSED`, `FLAG_PAUSED_WITHDRAWALS`, and every other breaker — `pauseAll()`/`guardianPause()`/`pauseWithdrawalsOnly()` can never block it as a side effect.
+- **Queued-request creation and funded claims ignore `FLAG_PAUSED_WITHDRAWALS`.** Exit intent must stay recordable while settlement is paused (review §19), and funded claims must never be blockable by any general administrative flag (review §20) — only their own dedicated, owner-only breaker reaches them.
+
+`unpauseAll()` clears all eight flags atomically. Source: `src/core/CoreVault.sol:410-540`, `src/core/modules/EpochedQueueModule.sol` (queue-side checks), `src/core/modules/ERC4626Module.sol` (force-exit check). Full per-breaker test coverage: `test/invariants/Withdrawal_PauseMatrix_Invariants.t.sol`.
 
 ---
 
@@ -839,6 +858,7 @@ In `FixedMaturity/Active` state, `markMatured()` is callable by anyone once `blo
 - Exit engine + fee policy: cluster 01a.2 (pending)
 - Queue mechanics: cluster 01a.2 (pending)
 - Deployment guide: [deployment.md](deployment.md)
+- Emergency Module Recovery (post-seal): [recovery.md](recovery.md)
 
 ---
 

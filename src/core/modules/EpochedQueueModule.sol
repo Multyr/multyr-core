@@ -187,6 +187,18 @@ contract EpochedQueueModule {
     error EpochAlreadyFunded();
     error InsufficientEscrow();
     error ClaimTooSmall();
+    // Granular withdrawal circuit breakers (review §20/§21) — previously this
+    // module had zero pause protection at all; guardianPause()/pauseAll()
+    // never reached it. FLAG_PAUSED_WITHDRAWALS is honored, in addition to the
+    // specific flag, only by instant settlement and epoch close/fund — NOT by
+    // queued-request creation or funded claims (see _notPausedQueuedRequest /
+    // _notPausedFundedClaim below for why).
+    // No InstantWithdrawalPaused error: requestInstantWithdrawal() treats a
+    // paused instant breaker as "instant unavailable" and silently falls back
+    // to the queue (see the instantAllowed check below), never reverts for it.
+    error QueuedRequestPaused();
+    error EpochCloseFundPaused();
+    error FundedClaimPaused();
 
     // =========================================================================
     // EVENTS (epoch lifecycle + claims)
@@ -283,6 +295,7 @@ contract EpochedQueueModule {
         external
         returns (uint256 epochId, uint256 claimId)
     {
+        _notPausedQueuedRequest();
         _enterNonReentrant();
         (epochId, claimId) = _requestEpochWithdrawal(msg.sender, shares);
         _exitNonReentrant();
@@ -427,6 +440,7 @@ contract EpochedQueueModule {
     ///         feeCollector in a single call (vs. per-claim in QueueModule).
     ///         Opens a fresh epoch immediately so new submissions are not blocked.
     function closeCurrentEpoch() external {
+        _notPausedEpochCloseFund();
         // Guarded for the same reason as the rest: it refreshes warm NAV and
         // batch-transfers fee shares out, both external calls, before writing
         // the epoch's locked price.
@@ -500,6 +514,7 @@ contract EpochedQueueModule {
     ///         Core improvement over QueueModule: a single external-call pull
     ///         covers ALL claims in the epoch, not one pull per settled claim.
     function fundEpoch(uint256 epochId) external {
+        _notPausedEpochCloseFund();
         // Guarded like every other state-changing entry point on this module.
         // This one calls out to the buffer manager and the strategy router
         // mid-body and then re-reads the hot balance to decide whether to mark
@@ -626,6 +641,7 @@ contract EpochedQueueModule {
     ///      too instead of reverting. A cursor pointing at a FUNDED epoch is
     ///      therefore always recoverable without governance.
     function syncOldestUnfundedEpoch() external {
+        _notPausedEpochCloseFund();
         _syncOldestUnfunded(EpochQueueStorage.layout());
     }
 
@@ -651,6 +667,7 @@ contract EpochedQueueModule {
         external
         returns (uint256 assets)
     {
+        _notPausedFundedClaim();
         _enterNonReentrant();
 
         EpochQueueStorage.Layout storage eq = EpochQueueStorage.layout();
@@ -698,6 +715,7 @@ contract EpochedQueueModule {
         external
         returns (uint256 totalAssets)
     {
+        _notPausedFundedClaim();
         _enterNonReentrant();
 
         EpochQueueStorage.Layout storage eq = EpochQueueStorage.layout();
@@ -748,6 +766,7 @@ contract EpochedQueueModule {
 
     /// @notice End epoch and crystallize performance fee. Permissionless.
     function endEpochCrystallize() external {
+        _notPausedEpochCloseFund();
         _crystallize();
         _updateNavSmooth();
     }
@@ -909,7 +928,16 @@ contract EpochedQueueModule {
         // checks pass) and hands it back so a successful settlement reuses it
         // below instead of a second _asset() call; failing fast still costs
         // zero extra calls.
-        (bool instantOk, address assetAddr) = _canInstant(gross, wp, core);
+        //
+        // When the instant-settlement breaker is tripped, treat instant as
+        // unavailable rather than reverting the whole call — this function's
+        // documented contract is "falls back to epoch queue if [instant]
+        // check fails", and review §19/§20 require exit *intent* to remain
+        // recordable even when a specific settlement mechanism is paused.
+        bool instantAllowed = CoreStorage.layout().packedFlags
+            & (CoreStorage.FLAG_PAUSED_WITHDRAWALS | CoreStorage.FLAG_INSTANT_WITHDRAWAL_PAUSED) == 0;
+        (bool instantOk, address assetAddr) =
+            instantAllowed ? _canInstant(gross, wp, core) : (false, address(0));
 
         if (instantOk) {
             // Settle now
@@ -934,7 +962,12 @@ contract EpochedQueueModule {
             epochId            = 0;
             claimId            = 0;
         } else {
-            // Fallback: enqueue in current epoch as standard claim.
+            // Fallback: enqueue in current epoch as standard claim. Gated
+            // separately by the queued-request breaker (owner-only,
+            // exceptional — review §20) so pausing instant settlement alone
+            // never blocks this fallback, and so this entry point can't be
+            // used to route around pauseQueuedRequestOnly() either.
+            _notPausedQueuedRequest();
             // Calls the internal helper directly (never `this.foo()`) so the
             // claim is correctly attributed to msg.sender, not to the vault.
             (epochId, claimId) = _requestEpochWithdrawal(msg.sender, shares);
@@ -1121,6 +1154,48 @@ contract EpochedQueueModule {
 
     function _exitNonReentrant() internal {
         CoreStorage.layout().packedFlags &= ~CoreStorage.FLAG_REENTRANCY_LOCKED;
+    }
+
+    // =========================================================================
+    // INTERNAL: GRANULAR WITHDRAWAL BREAKERS (review §20/§21)
+    // =========================================================================
+    // Note: there is no _notPausedInstantWithdrawal() revert-style helper —
+    // requestInstantWithdrawal() checks FLAG_INSTANT_WITHDRAWAL_PAUSED inline
+    // and treats "paused" as "instant unavailable" (forcing its existing
+    // queue-fallback branch) rather than reverting the whole call. See the
+    // instantAllowed check at the _canInstant() call site.
+
+    /// @dev Gates only the creation of NEW queued-exit requests. Cancelling an
+    ///      existing request is never gated by this — review §20 does not
+    ///      approve blocking new requests as a routine tool, but a user's
+    ///      ability to withdraw an already-submitted request must stay open.
+    ///      Deliberately NOT included under FLAG_PAUSED_WITHDRAWALS: exit
+    ///      *intent* must remain recordable even while settlement is paused
+    ///      (review §19) — only the dedicated, exceptional
+    ///      pauseQueuedRequestOnly()/pauseAll() can reach this.
+    function _notPausedQueuedRequest() internal view {
+        if (CoreStorage.layout().packedFlags & CoreStorage.FLAG_QUEUED_REQUEST_PAUSED != 0) {
+            revert QueuedRequestPaused();
+        }
+    }
+
+    function _notPausedEpochCloseFund() internal view {
+        uint256 flags = CoreStorage.layout().packedFlags;
+        if (flags & (CoreStorage.FLAG_PAUSED_WITHDRAWALS | CoreStorage.FLAG_EPOCH_CLOSE_FUND_PAUSED) != 0) {
+            revert EpochCloseFundPaused();
+        }
+    }
+
+    /// @dev Funded claims are permissionless by default (review §20: "no
+    ///      general administrative capability to arbitrarily prevent funded
+    ///      users from claiming"). Deliberately NOT included under
+    ///      FLAG_PAUSED_WITHDRAWALS or FLAG_PAUSED — only the dedicated,
+    ///      exceptional pauseFundedClaimOnly() can reach this, never
+    ///      pauseAll()/guardianPause()/pauseWithdrawalsOnly().
+    function _notPausedFundedClaim() internal view {
+        if (CoreStorage.layout().packedFlags & CoreStorage.FLAG_FUNDED_CLAIM_PAUSED != 0) {
+            revert FundedClaimPaused();
+        }
     }
 
     // =========================================================================

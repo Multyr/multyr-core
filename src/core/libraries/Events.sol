@@ -63,6 +63,18 @@ library Events {
     event WithdrawalsPaused();
     event WithdrawalsUnpaused();
 
+    // --- Granular withdrawal circuit breakers (review §20/§21) ---
+    event InstantWithdrawalPaused();
+    event InstantWithdrawalUnpaused();
+    event QueuedRequestPaused();
+    event QueuedRequestUnpaused();
+    event EpochCloseFundPaused();
+    event EpochCloseFundUnpaused();
+    event FundedClaimPaused();
+    event FundedClaimUnpaused();
+    event ForceExitPaused();
+    event ForceExitUnpaused();
+
     // --- Withdrawal rate limiting ---
     event MaxWithdrawalPerBlockUpdated(uint256 limit);
     event MaxWithdrawalPerTxUpdated(uint256 limit);
@@ -206,6 +218,10 @@ library Events {
     event SelectorRegistrySet(address indexed registry);
     event AuthorizedSealerSet(address indexed sealer);
     event SystemSealed(address indexed sealer, bytes32 configHash, uint256 timestamp);
+
+    // --- Emergency Module Recovery events (review §7-§14) ---
+    event RecoveryGateSet(address indexed gate);
+    event ModuleGroupRecovered(uint8 indexed groupId, address[] newModules);
 
     // --- Module Authorization events ---
     event ModuleAuthorized(address indexed module, bool authorized);
