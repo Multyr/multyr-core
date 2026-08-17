@@ -190,6 +190,81 @@ contract SystemSealer_CanSealAgreement_Test is Test {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // Live-wiring bind checks (review §24) — a correctly governed decoy
+    // component must not be able to satisfy the seal if it is not the
+    // component actually wired into the vault. Previously only globalConfig
+    // had this check (fixed on PR #11); feeCollector/strategyRouter/
+    // bufferManager/healthRegistry did not.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    function test_canSeal_and_verifyAndSeal_agree_whenFeeCollectorIsADecoy() public {
+        FeeCollector decoy =
+            new FeeCollector(address(rootTimelock), treasury, treasury, treasury, 7000, 200, 3000);
+        SystemSealer.SealConfig memory decoyConfig = sealConfig;
+        decoyConfig.feeCollector = address(decoy);
+
+        (bool ok, string memory reason) = systemSealer.canSeal(decoyConfig);
+        assertFalse(ok, "canSeal must reject a correctly-governed FeeCollector the vault does not read from");
+        assertEq(reason, "FeeCollector not bound to vault");
+
+        _scheduleAndExpectRevert(decoyConfig, "feecollector-decoy-salt");
+        assertFalse(vault.isSystemSealed());
+    }
+
+    function test_canSeal_and_verifyAndSeal_agree_whenStrategyRouterIsADecoy() public {
+        StrategyRouter decoy = new StrategyRouter(deployer, address(vault), address(globalConfig));
+        vm.prank(deployer);
+        decoy.transferOwnership(address(rootTimelock));
+
+        SystemSealer.SealConfig memory decoyConfig = sealConfig;
+        decoyConfig.strategyRouter = address(decoy);
+
+        (bool ok, string memory reason) = systemSealer.canSeal(decoyConfig);
+        assertFalse(ok, "canSeal must reject a correctly-governed StrategyRouter the vault does not read from");
+        assertEq(reason, "StrategyRouter not bound to vault");
+
+        _scheduleAndExpectRevert(decoyConfig, "router-decoy-salt");
+        assertFalse(vault.isSystemSealed());
+    }
+
+    function test_canSeal_and_verifyAndSeal_agree_whenBufferManagerIsADecoy() public {
+        IBufferManager.BufferConfig memory bufCfg = IBufferManager.BufferConfig({
+            targetHotBps: 1000, minHotBps: 500, targetWarmBps: 1000, maxWarmBps: 2000,
+            opsReserveTargetBps: 100, maxWarmSlippageBps: 50, asset: address(usdc),
+            warmAdapter: address(0), twapWindowSec: 0, paused: true
+        });
+        BufferManager decoy = new BufferManager(deployer, address(vault), bufCfg);
+        vm.prank(deployer);
+        decoy.transferOwnership(address(rootTimelock));
+
+        SystemSealer.SealConfig memory decoyConfig = sealConfig;
+        decoyConfig.bufferManager = address(decoy);
+
+        (bool ok, string memory reason) = systemSealer.canSeal(decoyConfig);
+        assertFalse(ok, "canSeal must reject a correctly-governed BufferManager the vault does not read from");
+        assertEq(reason, "BufferManager not bound to vault");
+
+        _scheduleAndExpectRevert(decoyConfig, "buffermanager-decoy-salt");
+        assertFalse(vault.isSystemSealed());
+    }
+
+    function test_canSeal_and_verifyAndSeal_agree_whenHealthRegistryIsADecoy() public {
+        StrategyHealthRegistry decoy = new StrategyHealthRegistry(deployer, guardian);
+        vm.prank(deployer);
+        decoy.transferOwnership(address(rootTimelock));
+
+        SystemSealer.SealConfig memory decoyConfig = sealConfig;
+        decoyConfig.healthRegistry = address(decoy);
+
+        (bool ok, string memory reason) = systemSealer.canSeal(decoyConfig);
+        assertFalse(ok, "canSeal must reject a correctly-governed HealthRegistry the vault does not read from");
+        assertEq(reason, "HealthRegistry not bound to vault");
+
+        _scheduleAndExpectRevert(decoyConfig, "healthregistry-decoy-salt");
+        assertFalse(vault.isSystemSealed());
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // Strategy role invariant — previously checked ONLY in verifyAndSeal().
     // canSeal() used to return (true, "") here; it must now agree with
     // verifyAndSeal() and reject it too.
