@@ -240,6 +240,7 @@ contract DeploymentEquivalence_Test is Test {
         vm.startPrank(rootTimelock);
         result.systemSealer.verifyAndSeal(
             SystemSealer.SealConfig({
+                chainId: block.chainid,
                 vault: address(result.vault),
                 strategyRouter: address(result.strategyRouter),
                 bufferManager: address(result.bufferManager),
@@ -253,6 +254,8 @@ contract DeploymentEquivalence_Test is Test {
                 incentives: address(0),
                 incentivesEngine: address(0),
                 rewardsPayoutManager: address(0),
+                recoveryGate: address(0),
+                recoveryManifestVersion: 0,
                 rewardsTreasury: address(0),
                 deployer: deployer
             })
@@ -399,6 +402,7 @@ contract DeploymentEquivalence_Test is Test {
         vm.startPrank(rootTimelock);
         result.systemSealer.verifyAndSeal(
             SystemSealer.SealConfig({
+                chainId: block.chainid,
                 vault: address(result.vault),
                 strategyRouter: address(result.strategyRouter),
                 bufferManager: address(result.bufferManager),
@@ -412,6 +416,8 @@ contract DeploymentEquivalence_Test is Test {
                 incentives: address(0),
                 incentivesEngine: address(0),
                 rewardsPayoutManager: address(0),
+                recoveryGate: address(0),
+                recoveryManifestVersion: 0,
                 rewardsTreasury: address(0),
                 deployer: deployer
             })

@@ -99,13 +99,12 @@ See `src/core/modules/AdminModule.sol:141` for the revoke functions.
 
 ### 2.4 Guardian
 
-The guardian (`CoreStorage.Layout.guardian`) is a third privileged address with a narrow remit: emergency pause. The guardian can:
+The guardian (`CoreStorage.Layout.guardian`) is a third privileged address with a narrow remit: emergency restriction, never restoration (review §3.3, "fast to restrict, slow to restore"). The guardian can:
 
-- Call `pause()` / `unpause()` — set/clear `FLAG_PAUSED`
-- Call `pauseDeposits()` / `unpauseDeposits()` — set/clear `FLAG_PAUSED_DEPOSITS`
-- Call `pauseWithdrawals()` — set `FLAG_PAUSED_WITHDRAWALS` (but NOT `unpauseWithdrawals()`)
+- Call `guardianPause()` — a single rate-limited action (cooldown via `IParamsProvider.guardianPauseCooldown()`, default 7 days) that sets `FLAG_PAUSED` (deposits), `FLAG_INSTANT_WITHDRAWAL_PAUSED`, and `FLAG_EPOCH_CLOSE_FUND_PAUSED` together.
+- Call `pauseInstantWithdrawalOnly(true)` / `pauseEpochCloseFundOnly(true)` individually — the same two breakers `guardianPause()` sets together, available separately for a narrower response (`onlyOwnerOrGuardian`).
 
-The asymmetry in withdrawals (pause yes, unpause no) is intentional: a compromised guardian can halt withdrawals temporarily but cannot unilaterally lift the hold. The owner must call `unpauseWithdrawals()`.
+The guardian can restrict but never restore: there is no guardian-callable unpause for anything. Only the owner can call `unpauseAll()` or any of the individual `pause*Only(false)` setters. The guardian also cannot reach `pauseQueuedRequestOnly()`, `pauseFundedClaimOnly()`, or `pauseForceExitOnly()` at all — these are owner-only, exceptional levers by design (review §20): new queued-exit requests, funded claims, and force exit must never be blockable by the guardian's single rapid action. See [architecture.md §11.3](architecture.md#113-pause-granularity) for the full breaker table.
 
 `CoreStorage.Layout.lastGuardianPause` is updated each time the guardian pauses to enable off-chain monitoring.
 
@@ -233,26 +232,35 @@ Pause and freeze state are encoded as bit flags in `CoreStorage.Layout.packedFla
 
 | Flag | Bit | Effect |
 |------|-----|--------|
-| `FLAG_PAUSED` | 0 | All user-facing operations blocked |
+| `FLAG_PAUSED` | 0 | Deposits blocked (also set by `guardianPause()`) |
 | `FLAG_PAUSED_DEPOSITS` | 1 | Deposits only blocked |
-| `FLAG_PAUSED_WITHDRAWALS` | 2 | Withdrawals/claims only blocked |
+| `FLAG_PAUSED_WITHDRAWALS` | 2 | Instant settlement + epoch close/fund blocked (aggregate — see §4.2) |
 | `FLAG_PARAMS_FROZEN` | 3 | All timelocked param changes permanently blocked |
 | `FLAG_SYSTEM_SEALED` | 9 | Component changes permanently blocked; min delay floor active |
+| `FLAG_INSTANT_WITHDRAWAL_PAUSED` | 13 | Instant settlement only blocked (queue fallback still works) |
+| `FLAG_QUEUED_REQUEST_PAUSED` | 14 | New queued-exit requests only blocked |
+| `FLAG_EPOCH_CLOSE_FUND_PAUSED` | 15 | Epoch close/fund/crystallize only blocked |
+| `FLAG_FUNDED_CLAIM_PAUSED` | 16 | Funded-claim settlement only blocked |
+| `FLAG_FORCE_EXIT_PAUSED` | 17 | Force exit only blocked — the only flag it ever reads |
 
-See `src/core/storage/CoreStorage.sol:24` for the full flag constant list.
+See `src/core/storage/CoreStorage.sol:24-41` for the full flag constant list.
 
 ### 4.2 Pause Functions
 
 | Function | Who | Effect |
 |----------|-----|--------|
-| `pause()` | GUARDIAN or OWNER | Sets `FLAG_PAUSED` |
-| `unpause()` | GUARDIAN or OWNER | Clears `FLAG_PAUSED` |
-| `pauseDeposits()` | GUARDIAN or OWNER | Sets `FLAG_PAUSED_DEPOSITS` |
-| `unpauseDeposits()` | OWNER | Clears `FLAG_PAUSED_DEPOSITS` |
-| `pauseWithdrawals()` | GUARDIAN or OWNER | Sets `FLAG_PAUSED_WITHDRAWALS` |
-| `unpauseWithdrawals()` | OWNER | Clears `FLAG_PAUSED_WITHDRAWALS` |
+| `pauseAll()` | OWNER | Sets `FLAG_PAUSED` |
+| `unpauseAll()` | OWNER | Clears all 8 pause flags (`FLAG_PAUSED` through `FLAG_FORCE_EXIT_PAUSED`) |
+| `pauseDepositsOnly(bool)` | OWNER | Sets/clears `FLAG_PAUSED_DEPOSITS` |
+| `pauseWithdrawalsOnly(bool)` | OWNER | Sets/clears `FLAG_PAUSED_WITHDRAWALS` |
+| `pauseInstantWithdrawalOnly(bool)` | OWNER or GUARDIAN | Sets/clears `FLAG_INSTANT_WITHDRAWAL_PAUSED` |
+| `pauseEpochCloseFundOnly(bool)` | OWNER or GUARDIAN | Sets/clears `FLAG_EPOCH_CLOSE_FUND_PAUSED` |
+| `pauseQueuedRequestOnly(bool)` | OWNER only | Sets/clears `FLAG_QUEUED_REQUEST_PAUSED` — never Guardian (review §20) |
+| `pauseFundedClaimOnly(bool)` | OWNER only | Sets/clears `FLAG_FUNDED_CLAIM_PAUSED` — never Guardian (review §20) |
+| `pauseForceExitOnly(bool)` | OWNER only | Sets/clears `FLAG_FORCE_EXIT_PAUSED` — the only breaker force exit ever reads |
+| `guardianPause()` | GUARDIAN | Sets `FLAG_PAUSED` + `FLAG_INSTANT_WITHDRAWAL_PAUSED` + `FLAG_EPOCH_CLOSE_FUND_PAUSED` together, subject to a cooldown |
 
-The guardian can pause quickly via any pause function. Unpausing withdrawals requires the owner (higher trust level — cannot be panic-unpaused unilaterally).
+The guardian can restrict (via `guardianPause()` or the two `onlyOwnerOrGuardian` breakers above) but can never unpause anything — every clearing operation, and every owner-only breaker, requires the owner. This is a stronger, structurally-enforced version of the old "guardian can pause, only owner can unpause withdrawals" asymmetry: it now also holds per-breaker, not just for one flag. Full breaker table with rationale: [architecture.md §11.3](architecture.md#113-pause-granularity).
 
 **`CoreStorage.Layout.lastGuardianPause`** records the timestamp of the last guardian pause for audit trails.
 
@@ -506,17 +514,25 @@ Attack is blocked — paramMinDelay cannot be zeroed post-seal.
 ```
 Scenario: oracle reports anomalous NAV spike; guardian acts before owner is reachable.
 
-Guardian calls pauseWithdrawals()
-  → FLAG_PAUSED_WITHDRAWALS set
-  → All requestClaim() + settleFeesAndProcessQueue() revert with Paused()
-  → Deposits still work (FLAG_PAUSED_DEPOSITS not set)
+Guardian calls guardianPause()
+  → FLAG_PAUSED set              (deposits blocked)
+  → FLAG_INSTANT_WITHDRAWAL_PAUSED set  (requestInstantWithdrawal() falls back to
+                                          the queue instead of settling immediately —
+                                          does NOT revert; review §19 exit-intent rule)
+  → FLAG_EPOCH_CLOSE_FUND_PAUSED set    (closeCurrentEpoch()/fundEpoch() revert
+                                          with EpochCloseFundPaused())
+  → New queued exit requests still work (FLAG_QUEUED_REQUEST_PAUSED not set —
+    Guardian cannot reach this breaker at all, review §20)
+  → Funded claims still work (FLAG_FUNDED_CLAIM_PAUSED not set — same reason)
+  → forceWithdraw()/forceWithdrawAll() still work (force exit reads ONLY
+    FLAG_FORCE_EXIT_PAUSED, never FLAG_PAUSED — review §20)
 
 Investigation completes: oracle data verified normal.
-Owner calls unpauseWithdrawals()
-  → FLAG_PAUSED_WITHDRAWALS cleared
-  → Queue processing resumes
+Owner calls unpauseAll()
+  → All eight pause flags cleared
+  → Instant settlement and epoch close/fund resume
 
-Guardian cannot call unpauseWithdrawals() directly — owner-only action.
+Guardian cannot call unpauseAll() or any pause*Only(false) directly — owner-only.
 ```
 
 ### 10.6 Ownership Handoff to Multi-Sig

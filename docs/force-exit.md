@@ -115,7 +115,9 @@ struct Pull {
 
 ```
  1. _checkForceExitAllowed()
- 2. _requireNotPaused()
+ 2. _notPausedForceExit()  — checks ONLY FLAG_FORCE_EXIT_PAUSED (its own dedicated
+    breaker; never FLAG_PAUSED/FLAG_PAUSED_WITHDRAWALS — review §20, force exit must
+    never be blocked as a side effect of a generic emergency pause)
  3. _ensureFreshWarmNav()        — mandatory NAV freshness (hard revert if stale + refresh fails)
  4. baseShares = _previewWithdraw(assets)    — convertToShares(assets)
  5. feeShares = mulBpsUp(baseShares, witBps + forceExitPenaltyBps [+ preMaturityBps])
@@ -200,7 +202,9 @@ No plan — `forceWithdrawAll` pulls all caller shares and sources liquidity aut
 
 ```
  1. _checkForceExitAllowed()
- 2. _requireNotPaused()
+ 2. _notPausedForceExit()  — checks ONLY FLAG_FORCE_EXIT_PAUSED (its own dedicated
+    breaker; never FLAG_PAUSED/FLAG_PAUSED_WITHDRAWALS — review §20, force exit must
+    never be blocked as a side effect of a generic emergency pause)
  3. _ensureFreshWarmNav()
  4. shares = balanceOf(msg.sender)         — ALL caller shares
  5. if shares == 0: revert ZeroShares()

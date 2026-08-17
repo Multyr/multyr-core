@@ -129,6 +129,7 @@ contract SystemSealer_TimestampHash_POC is Test {
         vault.acceptOwnerTransfer();
 
         sealConfig = SystemSealer.SealConfig({
+            chainId:              block.chainid,
             vault:                address(vault),
             strategyRouter:       address(strategyRouter),
             bufferManager:        address(bufferManager),
@@ -142,6 +143,8 @@ contract SystemSealer_TimestampHash_POC is Test {
             incentives:           address(0),
             incentivesEngine:     address(0),
             rewardsPayoutManager: address(0),
+            recoveryGate:         address(0),
+            recoveryManifestVersion: 0,
             rewardsTreasury:      address(0),
             deployer:             deployer
         });
@@ -203,6 +206,7 @@ contract SystemSealer_TimestampHash_POC is Test {
      */
     function test_configHash_is_deterministic_across_timelock_delay() public {
         bytes32 hashAtSchedule = keccak256(abi.encode(
+            sealConfig.chainId,
             sealConfig.vault,
             sealConfig.rootTimelock,
             sealConfig.guardian,
@@ -212,7 +216,9 @@ contract SystemSealer_TimestampHash_POC is Test {
             sealConfig.incentives,
             sealConfig.incentivesEngine,
             sealConfig.rewardsPayoutManager,
-            sealConfig.rewardsTreasury
+            sealConfig.rewardsTreasury,
+            sealConfig.recoveryGate,
+            sealConfig.recoveryManifestVersion
         ));
 
         // Advance past the timelock delay and seal

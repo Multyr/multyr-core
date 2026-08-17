@@ -168,14 +168,9 @@ No mechanism exists to "lock" a principal address permanently (except `sealBySea
 
 | Function | Module | Description |
 |----------|--------|-------------|
-| `pause` | AdminModule | Set FLAG_PAUSED |
-| `unpause` | AdminModule | Clear FLAG_PAUSED |
-| `pauseDeposits` | AdminModule | Set FLAG_PAUSED_DEPOSITS |
-| `unpauseDeposits` | AdminModule | Clear FLAG_PAUSED_DEPOSITS |
-| `pauseWithdrawals` | AdminModule | Set FLAG_PAUSED_WITHDRAWALS |
 | `deployToStrategiesWithPlan` | LiquidityOpsModule | Deploy with a caller-supplied allocation plan. Was `ROLE_PUBLIC`; moved to OWNER_OR_GUARDIAN because a public caller could otherwise steer which registered strategies receive capital and in what proportion. |
 
-> Note: `unpauseWithdrawals` is OWNER-only (roleOf = 1). The guardian can pause withdrawals but not unpause them.
+> **Correction**: pause functions are NOT `moduleOf`/`roleOf`-routed and do not belong in this table — they are direct functions on `CoreVault` itself (like `setModule`/`freezeRouting`), gated by CoreVault's own `onlyOwner`/`onlyGuardian`/`onlyOwnerOrGuardian` modifiers, not the fallback dispatcher's role system. The full, current pause/breaker table (`pauseAll`, `pauseDepositsOnly`, `pauseWithdrawalsOnly`, `pauseInstantWithdrawalOnly`, `pauseEpochCloseFundOnly`, `pauseQueuedRequestOnly`, `pauseFundedClaimOnly`, `pauseForceExitOnly`, `guardianPause`, `unpauseAll`) with per-function access levels is authoritative in [architecture.md §11.3](architecture.md#113-pause-granularity) and [governance.md §4.2](governance.md#42-pause-functions) — not duplicated here to avoid a third copy drifting out of sync.
 
 ### 4.4 PUBLIC Functions (roleOf = 0)
 
@@ -184,13 +179,13 @@ Key permissionless functions:
 | Function | Module | Notes |
 |----------|--------|-------|
 | `deposit` | ERC4626Module | Subject to pause checks |
-| `requestEpochWithdrawal` | EpochedQueueModule | Subject to pause + `minClaimAmount` floor |
-| `requestInstantWithdrawal` | EpochedQueueModule | Same floor; falls back to the queue when the cap or free liquidity blocks it |
-| `cancelEpochWithdrawal` | EpochedQueueModule | Claim owner only, and only while the epoch is `Open` |
-| `closeCurrentEpoch` | EpochedQueueModule | Callable by anyone once the epoch duration has elapsed (keeper pattern) |
-| `fundEpoch` | EpochedQueueModule | Callable by anyone; no-op when the epoch is already funded |
-| `claimEpochAssets` / `batchClaimEpochAssets` | EpochedQueueModule | Claim owner only, self-service, no keeper required |
-| `syncOldestUnfundedEpoch` | EpochedQueueModule | Cursor maintenance, always callable |
+| `requestEpochWithdrawal` | EpochedQueueModule | Subject to `FLAG_QUEUED_REQUEST_PAUSED` (new-request breaker, owner-only) + `minClaimAmount` floor |
+| `requestInstantWithdrawal` | EpochedQueueModule | Same floor; falls back to the queue (subject to the same `FLAG_QUEUED_REQUEST_PAUSED` breaker) when the cap, free liquidity, or `FLAG_INSTANT_WITHDRAWAL_PAUSED` blocks instant settlement — never reverts outright for a paused instant breaker alone |
+| `cancelEpochWithdrawal` | EpochedQueueModule | Claim owner only, and only while the epoch is `Open` — never pause-gated, by design (review §20) |
+| `closeCurrentEpoch` | EpochedQueueModule | Callable by anyone once the epoch duration has elapsed (keeper pattern); subject to `FLAG_EPOCH_CLOSE_FUND_PAUSED` |
+| `fundEpoch` | EpochedQueueModule | Callable by anyone; no-op when the epoch is already funded; subject to `FLAG_EPOCH_CLOSE_FUND_PAUSED` |
+| `claimEpochAssets` / `batchClaimEpochAssets` | EpochedQueueModule | Claim owner only, self-service, no keeper required; subject to `FLAG_FUNDED_CLAIM_PAUSED` (owner-only breaker, never Guardian — review §20) |
+| `syncOldestUnfundedEpoch` | EpochedQueueModule | Cursor maintenance; subject to `FLAG_EPOCH_CLOSE_FUND_PAUSED` |
 | `acceptOwnership` | AdminModule | Must be `pendingOwner` (checked internally) |
 | `markMatured` | FixedMaturityModule | Any address, once maturityTs reached |
 | `markFundingFailed` | FixedMaturityModule | Any address, once deadline + net < min |

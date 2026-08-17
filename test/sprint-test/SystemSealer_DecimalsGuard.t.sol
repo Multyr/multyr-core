@@ -129,6 +129,7 @@ contract SystemSealer_DecimalsGuard_Test is Test {
         vault.acceptOwnerTransfer();
 
         sealConfig = SystemSealer.SealConfig({
+            chainId:              block.chainid,
             vault:                address(vault),
             strategyRouter:       address(strategyRouter),
             bufferManager:        address(bufferManager),
@@ -142,6 +143,8 @@ contract SystemSealer_DecimalsGuard_Test is Test {
             incentives:           address(0),
             incentivesEngine:     address(0),
             rewardsPayoutManager: address(0),
+            recoveryGate:         address(0),
+            recoveryManifestVersion: 0,
             rewardsTreasury:      address(0),
             deployer:             deployer
         });

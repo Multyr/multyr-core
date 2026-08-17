@@ -56,6 +56,10 @@ contract ERC4626Module {
     error Paused();
     error DepositsPaused();
     error WithdrawalsPaused();
+    /// @dev Dedicated force-exit breaker (review §20: force exit must never be
+    ///      blocked as a side effect of a generic emergency flag — it has its
+    ///      own flag and is never touched by pauseAll()/guardianPause()).
+    error ForceExitPaused();
     error ZeroAmount();
     error ZeroAddress();
     error DepositBelowMinimum(uint256 assets, uint256 minimum);
@@ -190,7 +194,7 @@ contract ERC4626Module {
         // Blocked in: Funding, Starting, Matured, Closed, FundingFailed.
         _checkForceExitAllowed(FixedMaturityStorage.layout());
 
-        _notPausedWithdrawals();
+        _notPausedForceExit();
         _enterNonReentrant();
 
         if (assets == 0) revert ZeroAmount();
@@ -303,7 +307,7 @@ contract ERC4626Module {
         // FixedMaturity gate: same as forceWithdraw — only Active state or OpenEnded.
         _checkForceExitAllowed(FixedMaturityStorage.layout());
 
-        _notPausedWithdrawals();
+        _notPausedForceExit();
         _enterNonReentrant();
 
         if (receiver == address(0)) revert ZeroAddress();
@@ -757,10 +761,14 @@ contract ERC4626Module {
         if (flags & CoreStorage.FLAG_PAUSED_DEPOSITS != 0) revert DepositsPaused();
     }
 
-    function _notPausedWithdrawals() internal view {
-        uint256 flags = CoreStorage.layout().packedFlags;
-        if (flags & CoreStorage.FLAG_PAUSED != 0) revert Paused();
-        if (flags & CoreStorage.FLAG_PAUSED_WITHDRAWALS != 0) revert WithdrawalsPaused();
+    /// @dev Force exit has its own dedicated breaker and is deliberately NOT
+    ///      gated by FLAG_PAUSED or FLAG_PAUSED_WITHDRAWALS — review §20:
+    ///      "Force exit ... should therefore not automatically disappear
+    ///      simply because a generic emergency flag is active."
+    function _notPausedForceExit() internal view {
+        if (CoreStorage.layout().packedFlags & CoreStorage.FLAG_FORCE_EXIT_PAUSED != 0) {
+            revert ForceExitPaused();
+        }
     }
 
     function _enterNonReentrant() internal {
