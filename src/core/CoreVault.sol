@@ -64,6 +64,7 @@ contract CoreVault is ERC4626, ICoreVault {
     error NotRecoveryGate();
     error InvalidRecoveryGroup();
     error WrongRecoveryModuleCount();
+    error RecoveryModuleHasNoCode();
     error SystemSealed();
     error SealerAlreadySet();
     error NotAuthorizedSealer();
@@ -404,6 +405,11 @@ contract CoreVault is ERC4626, ICoreVault {
 
         CoreStorage.Layout storage core = CoreStorage.layout();
         for (uint256 i; i < selectors.length; ++i) {
+            // A codeless address (typo, or an undeployed CREATE2 address) would
+            // otherwise wire in silently: the fallback's delegatecall to an
+            // empty address succeeds and returns empty data, bricking the
+            // group into silent no-ops instead of reverting.
+            if (newModules[i].code.length == 0) revert RecoveryModuleHasNoCode();
             core.moduleOf[selectors[i]] = newModules[i];
         }
 
@@ -574,12 +580,18 @@ contract CoreVault is ERC4626, ICoreVault {
 
     /// @notice Guardian-eligible instant-settlement breaker (review §20: approved
     ///         as a narrow circuit breaker Guardian may trip immediately).
+    /// @dev Restrict-only for the Guardian: tripping (p == true) is Owner-or-
+    ///      Guardian, but clearing (p == false) is Owner-only. The Guardian must
+    ///      never be able to reverse its own emergency action — every clearing
+    ///      operation requires the Owner (docs/governance.md §4.2, AC5).
     function pauseInstantWithdrawalOnly(bool p) external onlyOwnerOrGuardian {
+        CoreStorage.Layout storage core = CoreStorage.layout();
         if (p) {
-            CoreStorage.layout().packedFlags |= CoreStorage.FLAG_INSTANT_WITHDRAWAL_PAUSED;
+            core.packedFlags |= CoreStorage.FLAG_INSTANT_WITHDRAWAL_PAUSED;
             emit Events.InstantWithdrawalPaused();
         } else {
-            CoreStorage.layout().packedFlags &= ~CoreStorage.FLAG_INSTANT_WITHDRAWAL_PAUSED;
+            if (msg.sender != core.owner) revert NotOwner();
+            core.packedFlags &= ~CoreStorage.FLAG_INSTANT_WITHDRAWAL_PAUSED;
             emit Events.InstantWithdrawalUnpaused();
         }
     }
@@ -588,12 +600,17 @@ contract CoreVault is ERC4626, ICoreVault {
     ///         temporarily restricted where the affected accounting or
     ///         settlement path is implicated"; separate from exit-intent
     ///         recording, which is pauseQueuedRequestOnly below).
+    /// @dev Restrict-only for the Guardian: tripping (p == true) is Owner-or-
+    ///      Guardian, but clearing (p == false) is Owner-only. Same rationale
+    ///      as pauseInstantWithdrawalOnly above.
     function pauseEpochCloseFundOnly(bool p) external onlyOwnerOrGuardian {
+        CoreStorage.Layout storage core = CoreStorage.layout();
         if (p) {
-            CoreStorage.layout().packedFlags |= CoreStorage.FLAG_EPOCH_CLOSE_FUND_PAUSED;
+            core.packedFlags |= CoreStorage.FLAG_EPOCH_CLOSE_FUND_PAUSED;
             emit Events.EpochCloseFundPaused();
         } else {
-            CoreStorage.layout().packedFlags &= ~CoreStorage.FLAG_EPOCH_CLOSE_FUND_PAUSED;
+            if (msg.sender != core.owner) revert NotOwner();
+            core.packedFlags &= ~CoreStorage.FLAG_EPOCH_CLOSE_FUND_PAUSED;
             emit Events.EpochCloseFundUnpaused();
         }
     }

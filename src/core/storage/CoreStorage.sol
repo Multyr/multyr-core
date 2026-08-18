@@ -93,10 +93,6 @@ library CoreStorage {
         // Selector registry for role validation (set once, immutable)
         address selectorRegistry;
 
-        // Emergency Module Recovery gate (set once, immutable) — the sole
-        // authorized caller of recoverModuleGroup(). Review §7/§8.
-        address recoveryGate;
-
         // System sealer binding - set atomically by sealBySealer() (called from
         // SystemSealer.verifyAndSeal()) alongside FLAG_SYSTEM_SEALED, in the same call
         // that verifies the config hash. Retained post-seal as an audit record.
@@ -125,6 +121,10 @@ library CoreStorage {
         // shares are minted, so PPS is unaffected. Funding this address is a
         // treasury-ops decision outside the vault's scope.
         address rewardsTreasury;
+
+        // Emergency Module Recovery gate (appended, set once, immutable) — the
+        // sole authorized caller of recoverModuleGroup(). Review §7/§8.
+        address recoveryGate;
     }
 
     function layout() internal pure returns (Layout storage l) {

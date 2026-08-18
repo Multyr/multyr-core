@@ -219,7 +219,6 @@ Source: `src/core/storage/CoreStorage.sol:79-80`. Populated by `setModule()` / `
 | Field | Type | Purpose |
 |---|---|---|
 | `selectorRegistry` | `address` | SelectorRegistry address (set once, blocked post-seal — see `setSelectorRegistry()`) |
-| `recoveryGate` | `address` | Emergency Module Recovery gate (set once, blocked post-seal — see `setRecoveryGate()`, [recovery.md](recovery.md)) |
 | `pendingSealHash` | `bytes32` | Hash commitment for system sealing |
 | `authorizedSealer` | `address` | SystemSealer contract address (set once) |
 | `isAuthorizedModule[address]` | `mapping(address => bool)` | Module → processorMint/Burn/Transfer authorized |
@@ -237,8 +236,9 @@ Source: `src/core/storage/CoreStorage.sol:83-93`.
 | `executionMemory` | `address` | Allocation cost tracking | V10 allocation engine |
 | `strictExecutionMemory` | `bool` | Enforce ExecutionMemory on every deploy | V10 allocation engine |
 | `rewardsTreasury` | `address` | Pre-funded share balance `payRewardShares()` transfers from | Post-initial deploy |
+| `recoveryGate` | `address` | Emergency Module Recovery gate (set once, blocked post-seal — see `setRecoveryGate()`, [recovery.md](recovery.md)) | Emergency Module Recovery |
 
-Source: `src/core/storage/CoreStorage.sol:97-114`. These fields were appended to the Layout struct. Appending to EIP-7201 layout structs is safe — the namespace slot is a hash, and struct fields are allocated sequentially from that slot. No collision with earlier fields.
+Source: `src/core/storage/CoreStorage.sol:97-118`. These fields were appended to the Layout struct, in declaration order, after every pre-existing field. Appending to EIP-7201 layout structs is safe — the namespace slot is a hash, and struct fields are allocated sequentially from that slot. No collision with earlier fields.
 
 ---
 

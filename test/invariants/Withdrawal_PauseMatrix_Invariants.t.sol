@@ -105,19 +105,29 @@ contract Withdrawal_PauseMatrix_Invariants is Test {
         assertEq(claim.user, user, "fallback claim correctly attributed to the real user");
     }
 
-    function test_guardian_canTripAndClearInstantWithdrawalBreaker() public {
+    function test_guardian_canTripButNotClearInstantWithdrawalBreaker() public {
         vm.prank(guardian);
         core.pauseInstantWithdrawalOnly(true);
         assertTrue(core.pausedInstantWithdrawal());
 
         vm.prank(guardian);
+        vm.expectRevert(CoreVault.NotOwner.selector);
         core.pauseInstantWithdrawalOnly(false);
-        assertFalse(core.pausedInstantWithdrawal());
+        assertTrue(core.pausedInstantWithdrawal(), "guardian must not be able to clear its own breaker");
     }
 
     function test_owner_canTripInstantWithdrawalBreaker() public {
         core.pauseInstantWithdrawalOnly(true);
         assertTrue(core.pausedInstantWithdrawal());
+    }
+
+    function test_owner_canClearInstantWithdrawalBreaker_evenIfGuardianTrippedIt() public {
+        vm.prank(guardian);
+        core.pauseInstantWithdrawalOnly(true);
+        assertTrue(core.pausedInstantWithdrawal());
+
+        core.pauseInstantWithdrawalOnly(false); // owner, no prank
+        assertFalse(core.pausedInstantWithdrawal());
     }
 
     function test_randomAddress_cannotTripInstantWithdrawalBreaker() public {
@@ -211,14 +221,33 @@ contract Withdrawal_PauseMatrix_Invariants is Test {
         vm.expectRevert(EpochedQueueModule.EpochCloseFundPaused.selector);
         EpochedQueueModule(address(core)).syncOldestUnfundedEpoch();
 
-        vm.prank(guardian);
-        core.pauseEpochCloseFundOnly(false);
+        core.pauseEpochCloseFundOnly(false); // owner, no prank — guardian cannot clear (see below)
         EpochedQueueModule(address(core)).closeCurrentEpoch();
 
         vm.prank(guardian);
         core.pauseEpochCloseFundOnly(true);
         vm.expectRevert(EpochedQueueModule.EpochCloseFundPaused.selector);
         EpochedQueueModule(address(core)).fundEpoch(epochId);
+    }
+
+    function test_guardian_canTripButNotClearEpochCloseFundBreaker() public {
+        vm.prank(guardian);
+        core.pauseEpochCloseFundOnly(true);
+        assertTrue(core.pausedEpochCloseFund());
+
+        vm.prank(guardian);
+        vm.expectRevert(CoreVault.NotOwner.selector);
+        core.pauseEpochCloseFundOnly(false);
+        assertTrue(core.pausedEpochCloseFund(), "guardian must not be able to clear its own breaker");
+    }
+
+    function test_owner_canClearEpochCloseFundBreaker_evenIfGuardianTrippedIt() public {
+        vm.prank(guardian);
+        core.pauseEpochCloseFundOnly(true);
+        assertTrue(core.pausedEpochCloseFund());
+
+        core.pauseEpochCloseFundOnly(false); // owner, no prank
+        assertFalse(core.pausedEpochCloseFund());
     }
 
     function test_guardianPause_blocksEpochCloseFund() public {

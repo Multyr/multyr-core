@@ -114,9 +114,21 @@ contract CoreVaultShellDefect_Unreachable is Test {
         }
     }
 
-    /// @dev Confirms the negative directly, not just by absence-of-overlap:
-    ///      the vault's actual live AdminModule routing is completely
-    ///      unaffected by recovering every other group.
+    /// @dev NOTE ON SCOPE: this only re-confirms, end-to-end for one group
+    ///      instead of by selector-set comparison, that recoverModuleGroup()
+    ///      never WRITES to an AdminModule selector's moduleOf entry — the
+    ///      same fact test_noRecoveryGroup_coversAnyAdminModuleOwnerSelector
+    ///      above already establishes by construction. It is NOT evidence
+    ///      that AdminModule's governance/sealing surface is unreachable
+    ///      through a *malicious recovered module's code* — a module
+    ///      installed via recoverModuleGroup runs via delegatecall and
+    ///      therefore has full read/write access to all of CoreStorage,
+    ///      including roleOf and owner, regardless of which selectors it was
+    ///      recovered under. Whether that constitutes a live "role relaxation"
+    ///      gap is tracked separately (see docs/recovery.md and the caveat in
+    ///      RecoveryGate.sol's own NatSpec: "restricting recovery to existing
+    ///      selectors ... does not mathematically prove a replacement module
+    ///      only repairs a bug"). Do not cite this test as disproving that.
     function test_adminModuleRouting_survivesRecoveryOfEveryOtherGroup() public {
         bytes4[] memory adminSelectors = SelectorLib.getAdminModuleOwnerSelectors();
         address adminModuleBefore = vault.moduleOf(adminSelectors[0]);
@@ -124,7 +136,10 @@ contract CoreVaultShellDefect_Unreachable is Test {
         // Recover EPOCH_QUEUE_GROUP (unwired in this minimal fixture —
         // recovering an unwired group is still valid: it just sets moduleOf
         // from address(0) to the new address, same as normal) and confirm
-        // AdminModule's routing is completely untouched.
+        // AdminModule's *routing table entry* is untouched. The replacement
+        // module here (EpochedQueueModule) is never actually invoked through
+        // the recovered selectors in this test, so this says nothing about
+        // what a malicious module's code could do once installed.
         EpochedQueueModule qm = new EpochedQueueModule();
         bytes4[] memory queueSelectors = gate.selectorsForGroup(0);
         address[] memory queueModules = new address[](queueSelectors.length);

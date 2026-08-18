@@ -25,11 +25,17 @@ import { SelectorLib } from "../core/libraries/SelectorLib.sol";
  *      exact digest (review §13), and subject to cancellation by CoreVault's
  *      vetoer at any point before execution (review §14).
  *
- * RECOVERABLE GROUPS (review §9 — economically isolated execution modules;
- * AdminModule's governance/sealing/authorization surface and every direct
- * CoreVault function are permanently out of scope, not merely excluded from
- * a whitelist — they are not moduleOf-routed selectors and this contract has
- * no path to reach them):
+ * RECOVERABLE GROUPS (review §9 — economically isolated execution modules).
+ * Two different reasons keep everything else permanently out of scope:
+ *   - AdminModule's governance/sealing/authorization selectors ARE
+ *     moduleOf-routed (same dispatcher as every recoverable group), but no
+ *     group here enumerates them — exclusion is definitional (a fixed,
+ *     closed whitelist), not structural. A fifth group could theoretically
+ *     be added in a future contract; this one has none.
+ *   - CoreVault's own direct functions (setModule*, freezeRouting, pause*,
+ *     setSelectorRegistry, authorizeModule, etc.) are NOT moduleOf-routed at
+ *     all — there is no selector for recoverModuleGroup() to touch them
+ *     with, regardless of group ID. This exclusion IS structural.
  *      0 = EPOCH_QUEUE_GROUP     — EpochedQueueModule (write + view selectors)
  *      1 = ERC4626_GROUP         — ERC4626Module
  *      2 = LIQUIDITY_GROUP       — LiquidityOpsModule

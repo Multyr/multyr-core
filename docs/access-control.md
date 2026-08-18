@@ -99,7 +99,7 @@ All three named principals are set during deployment:
 | `vetoer` | Owner | `setVetoer(addr)` | Immediate setter; no timelock |
 | `guardian` | Owner via batch | `setEcosystem(cfg)` or `setHealthRegistry`-area setters | `cfg.guardian` required non-zero in `setEcosystem` |
 
-The `guardian` field in `CoreStorage.Layout` is set either directly (owner-only setter) or via `setEcosystem`. It can be updated by the owner at any time post-deploy (no timelock).
+The `guardian` field in `CoreStorage.Layout` is set either directly (owner-only setter) or via `setEcosystem`. It can be updated by the owner at any time pre-seal (no timelock) — but `setGuardian()` reverts with `SystemSealed()` once `FLAG_SYSTEM_SEALED` is set, same as `setVetoer()`. Post-seal, neither principal is rotatable at all.
 
 ### 3.2 How to Change Roles
 
@@ -109,7 +109,7 @@ The `guardian` field in `CoreStorage.Layout` is set either directly (owner-only 
 | `vetoer` | `setVetoer(addr)` (owner-only, immediate) | None | `NotOwner()` if non-owner |
 | `guardian` | Direct setter or `setEcosystem` (owner-only, immediate) | None | `NotOwner()` if non-owner |
 
-No mechanism exists to "lock" a principal address permanently (except `sealBySealer` which locks `bufferManager`/`router` only). The owner retains ability to rotate vetoer and guardian indefinitely.
+Both `setVetoer()` (`AdminModule.sol`) and `setGuardian()` (`CoreVault.sol`) revert with `SystemSealed()` once the vault is sealed — sealing does lock these principals permanently, alongside `bufferManager`/`router`. Pre-seal, the owner can rotate vetoer and guardian at will.
 
 ### 3.3 `roleOf[selector]` Management
 
@@ -328,12 +328,21 @@ Risk: if newFixedMaturityModule has a reentrancy bug or is malicious,
 ```
 Scenario: Current guardian key suspected compromised.
 
-owner calls setVetoer(0xNewSecure)  ← same call for vetoer rotation
-owner calls (guardian setter)(0xNewGuardian)  ← replace guardian
+PRE-SEAL ONLY — both setters revert with SystemSealed() once sealed:
 
-Both changes are immediate (no timelock).
+owner calls setVetoer(0xNewSecure)  ← same call for vetoer rotation
+owner calls setGuardian(0xNewGuardian)  ← replace guardian
+
+Both changes are immediate (no timelock) while unsealed.
 Old guardian key immediately loses all pause authority.
 No delay — enables fast rotation in incident response.
+
+POST-SEAL: rotation is permanently unavailable. A compromised guardian
+post-seal can still be neutralized operationally (it can only ever trip
+pauseInstantWithdrawalOnly/pauseEpochCloseFundOnly/guardianPause — see
+§9.4/architecture.md §11.3 — and cannot clear its own breakers), but the
+key itself cannot be replaced. This is the tradeoff sealing makes deliberately:
+see docs/architecture.md §10 for the immutability rationale.
 ```
 
 ### 9.4 Per-Function Role Inspection at Deploy

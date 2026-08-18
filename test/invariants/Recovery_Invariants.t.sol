@@ -25,6 +25,11 @@ import { IAdminModule } from "../../src/interfaces/IAdminModule.sol";
 import { IncentivesTimelock } from "../../src/governance/IncentivesTimelock.sol";
 import { ERC20Mock } from "../../src/mocks/ERC20Mock.sol";
 
+/// @dev Trivial code-bearing placeholder — recoverModuleGroup() only requires
+///      code.length > 0, so any deployed contract qualifies as a "module" for
+///      ordering-agreement tests that never actually call into it.
+contract _RecoveryOrderingDummy {}
+
 contract Recovery_Invariants is Test {
     uint256 constant TIMELOCK_DELAY = 2 days;
     uint64 constant MIN_DELAY = 14 days;
@@ -399,6 +404,66 @@ contract Recovery_Invariants is Test {
     // ══════════════════════════════════════════════════════════════════════════
     // Happy path — end to end, and the structural role-relaxation guarantee
     // ══════════════════════════════════════════════════════════════════════════
+
+    function test_execute_reverts_whenReplacementModuleHasNoCode() public {
+        // A codeless address (typo, or a CREATE2 address that was never
+        // actually deployed to) must not be silently wired in — the
+        // fallback's delegatecall to an empty address succeeds and returns
+        // empty data, which would brick the group into silent no-ops instead
+        // of a loud revert.
+        bytes4[] memory groupSelectors = gate.selectorsForGroup(EPOCH_QUEUE_GROUP);
+        address[] memory badModules = new address[](groupSelectors.length);
+        for (uint256 i; i < groupSelectors.length; ++i) {
+            badModules[i] = address(queueModuleV2);
+        }
+        badModules[0] = makeAddr("codelessReplacement"); // no code deployed here
+
+        vm.prank(address(rootTimelock));
+        gate.propose(EPOCH_QUEUE_GROUP, badModules, "codeless-module-attempt");
+        (bytes32 digest,,,) = gate.pendingProposal(EPOCH_QUEUE_GROUP);
+
+        vm.prank(securityApprover);
+        gate.approve(EPOCH_QUEUE_GROUP, digest);
+
+        vm.warp(block.timestamp + MIN_DELAY + 1);
+        vm.expectRevert(CoreVault.RecoveryModuleHasNoCode.selector);
+        gate.execute(EPOCH_QUEUE_GROUP);
+    }
+
+    function test_recoverModuleGroup_selectorOrdering_matchesRecoveryGate() public {
+        // RecoveryGate.selectorsForGroup() and CoreVault's own internal
+        // _recoverySelectorsForGroup() are two independently-maintained
+        // definitions of the same group (CoreVault.sol's own comment: "kept
+        // in sync because both read the same underlying SelectorLib getters,
+        // not because either trusts the other's definition"). A distinct
+        // module address per selector must land on that exact selector after
+        // recovery — proving index-for-index agreement, not just matching
+        // lengths, which the "same module for every selector" happy-path
+        // test above cannot distinguish from a silently reordered group.
+        bytes4[] memory groupSelectors = gate.selectorsForGroup(EPOCH_QUEUE_GROUP);
+        address[] memory distinctModules = new address[](groupSelectors.length);
+        for (uint256 i; i < groupSelectors.length; ++i) {
+            distinctModules[i] = address(new _RecoveryOrderingDummy());
+        }
+
+        vm.prank(address(rootTimelock));
+        gate.propose(EPOCH_QUEUE_GROUP, distinctModules, "ordering-check");
+        (bytes32 digest,,,) = gate.pendingProposal(EPOCH_QUEUE_GROUP);
+
+        vm.prank(securityApprover);
+        gate.approve(EPOCH_QUEUE_GROUP, digest);
+
+        vm.warp(block.timestamp + MIN_DELAY + 1);
+        gate.execute(EPOCH_QUEUE_GROUP);
+
+        for (uint256 i; i < groupSelectors.length; ++i) {
+            assertEq(
+                vault.moduleOf(groupSelectors[i]),
+                distinctModules[i],
+                "CoreVault's internal selector ordering must match RecoveryGate.selectorsForGroup() index-for-index"
+            );
+        }
+    }
 
     function test_happyPath_recoversEntireGroupAtomically() public {
         bytes4[] memory selectors = gate.selectorsForGroup(EPOCH_QUEUE_GROUP);

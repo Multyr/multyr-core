@@ -197,6 +197,37 @@ contract SystemSealer_CanSealAgreement_Test is Test {
     // bufferManager/healthRegistry did not.
     // ══════════════════════════════════════════════════════════════════════════
 
+    function test_canSeal_and_verifyAndSeal_agree_whenSystemSealerIsNotAuthorizedOnVault() public {
+        // A second, otherwise-identical SystemSealer that the vault never
+        // authorized via setAuthorizedSealer(). canSeal() on THIS instance
+        // must reject, even though every other invariant in sealConfig is
+        // satisfied — otherwise a deploy-day dry run against the wrong
+        // SystemSealer address could report "ready to seal" when
+        // verifyAndSeal() would actually revert with NotAuthorizedSealer.
+        SystemSealer unauthorizedSealer = new SystemSealer();
+
+        (bool ok, string memory reason) = unauthorizedSealer.canSeal(sealConfig);
+        assertFalse(ok, "canSeal must reject a SystemSealer the vault did not authorize");
+        assertEq(reason, "SystemSealer not authorized on vault");
+
+        address[] memory targets = new address[](1);
+        uint256[] memory values = new uint256[](1);
+        bytes[] memory payloads = new bytes[](1);
+        targets[0] = address(unauthorizedSealer);
+        payloads[0] = abi.encodeCall(SystemSealer.verifyAndSeal, (sealConfig));
+
+        bytes32 salt = keccak256(abi.encode("unauthorized-sealer-salt"));
+
+        vm.prank(deployer);
+        rootTimelock.scheduleBatch(targets, values, payloads, bytes32(0), salt, TIMELOCK_DELAY);
+        vm.warp(block.timestamp + TIMELOCK_DELAY + 1);
+
+        vm.prank(deployer);
+        vm.expectRevert();
+        rootTimelock.executeBatch(targets, values, payloads, bytes32(0), salt);
+        assertFalse(vault.isSystemSealed());
+    }
+
     function test_canSeal_and_verifyAndSeal_agree_whenFeeCollectorIsADecoy() public {
         FeeCollector decoy =
             new FeeCollector(address(rootTimelock), treasury, treasury, treasury, 7000, 200, 3000);
