@@ -245,6 +245,28 @@ contract GovernanceCompromise_BlastRadius is Test {
         vm.stopPrank();
     }
 
+    function test_compromisedGuardian_cannotSelfReverseItsOwnEmergencyBrake() public {
+        // Worst-case scenario a compromised Guardian could attempt: trip
+        // guardianPause(), then immediately try to clear the two breakers it
+        // reaches, reopening instant settlement and epoch close/fund with no
+        // owner involvement at all. Must be impossible — restrict-only.
+        vm.prank(guardian);
+        vault.guardianPause();
+        assertTrue(vault.pausedInstantWithdrawal());
+        assertTrue(vault.pausedEpochCloseFund());
+
+        vm.prank(guardian);
+        vm.expectRevert(CoreVault.NotOwner.selector);
+        vault.pauseInstantWithdrawalOnly(false);
+
+        vm.prank(guardian);
+        vm.expectRevert(CoreVault.NotOwner.selector);
+        vault.pauseEpochCloseFundOnly(false);
+
+        assertTrue(vault.pausedInstantWithdrawal(), "guardian must not be able to self-reverse the brake");
+        assertTrue(vault.pausedEpochCloseFund(), "guardian must not be able to self-reverse the brake");
+    }
+
     function test_compromisedGuardian_isRateLimitedByCooldown() public {
         vm.prank(guardian);
         vault.guardianPause();

@@ -252,6 +252,16 @@ contract SystemSealer {
 
         if (vault.isSystemSealed()) return (false, "Already sealed");
 
+        // This specific SystemSealer instance must be the one CoreVault will
+        // actually accept a seal from — otherwise canSeal() can return
+        // (true, "") for a config where verifyAndSeal() would still revert
+        // with NotAuthorizedSealer inside vault.sealBySealer(), reintroducing
+        // exactly the canSeal()/verifyAndSeal() divergence this file exists
+        // to eliminate (review §25/§42).
+        if (vault.authorizedSealer() != address(this)) {
+            return (false, "SystemSealer not authorized on vault");
+        }
+
         // ─────────────────────────────────────────────────────────────────────────
         // INVARIANT 1: CoreVault ownership and state
         // ─────────────────────────────────────────────────────────────────────────

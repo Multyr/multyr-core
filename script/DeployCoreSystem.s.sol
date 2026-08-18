@@ -37,6 +37,7 @@ import { IIncentives } from "@multyr-core/interfaces/IIncentives.sol";
 // Security
 import { SelectorRegistry } from "@multyr-core/core/libraries/SelectorRegistry.sol";
 import { SystemSealer } from "@multyr-core/core/SystemSealer.sol";
+import { RecoveryGate } from "@multyr-core/governance/RecoveryGate.sol";
 
 // Factory
 import { VaultFactory } from "@multyr-core/factory/VaultFactory.sol";
@@ -53,7 +54,8 @@ import { DeployTypes } from "@multyr-core/libs/DeployTypes.sol";
 ///      have dedicated standalone scripts: DeployWarmAdapters.s.sol, DeployVaultUpkeep.s.sol.
 /// @custom:chain-id 42161 (Arbitrum One -- enforced at runtime)
 /// @custom:env-vars DEPLOYER_PRIVATE_KEY, GOVERNOR_ADDRESS, GUARDIAN_ADDRESS, TREASURY_ADDRESS,
-///                  OPS_ADDRESS, SAFETY_RESERVE_ADDRESS, TIMELOCK_ADDRESS (opt), VETOER_ADDRESS (opt),
+///                  OPS_ADDRESS, SAFETY_RESERVE_ADDRESS, SECURITY_APPROVER_ADDRESS,
+///                  TIMELOCK_ADDRESS (opt), VETOER_ADDRESS (opt),
 ///                  DEPLOY_INCENTIVES (opt), DEPLOY_UPKEEP (opt), DEPLOY_WARM_ADAPTERS (opt),
 ///                  CHAINLINK_USDC_FEED (opt), OUTPUT_JSON (opt)
 /// @custom:post-deploy 1) Run DeployUsdcLendingStrategy.s.sol with vault+ecosystem addresses
@@ -70,6 +72,12 @@ contract DeployCoreSystem is Script {
     address constant USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
     address constant MORPHO_GAUNTLET_CORE = 0x7e97fa6893871A2751B5fE961978DCCb2c201E65;
 
+    // RecoveryGate policy (approved values — see docs/recovery.md). The contract's
+    // own constructor only enforces a 14-day floor on minDelay; these are the
+    // actual configured values for this deployment.
+    uint64 constant RECOVERY_MIN_DELAY = 21 days;
+    uint64 constant RECOVERY_COOLDOWN = 30 days;
+
     // ═══════════════════════════════════════════════════════════════════════════════
     // DEPLOYMENT RESULT
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -85,6 +93,7 @@ contract DeployCoreSystem is Script {
         // Phase 2: Security
         SelectorRegistry selectorRegistry;
         SystemSealer systemSealer;
+        RecoveryGate recoveryGate; // deployed/wired in Phase 5 (needs `vault` to exist first)
 
         // Phase 3: Core + Modules
         CoreVault vault;
@@ -118,6 +127,7 @@ contract DeployCoreSystem is Script {
         address safetyReserve;
         address timelock; // Final owner (usually same as governor)
         address vetoer; // SAFE_VETO
+        address securityApprover; // RecoveryGate's independent approver (should be distinct from governor/guardian/vetoer)
         address chainlinkUsdcFeed;
         bool deployIncentives;
         bool deployUpkeep;
@@ -152,6 +162,7 @@ contract DeployCoreSystem is Script {
         console.log("Guardian (SAFE_GUARDIAN):", cfg.guardian);
         console.log("Vetoer (SAFE_VETO):", cfg.vetoer);
         console.log("Timelock:", cfg.timelock);
+        console.log("Security Approver:", cfg.securityApprover);
         console.log("");
         console.log("Feature Flags:");
         console.log("  Deploy Warm Adapters:", cfg.deployWarmAdapters);
@@ -197,6 +208,7 @@ contract DeployCoreSystem is Script {
         require(IAdminModule(address(result.vault)).getImmediateExitPenalty() == 100, "FINAL: immediateExitPenalty != 100");
         require(!result.vault.isRoutingFrozen(), "FINAL: routing should NOT be frozen yet");
         require(result.vault.paused(), "FINAL: vault must still be paused");
+        require(result.vault.recoveryGate() != address(0), "FINAL: recoveryGate not wired, sealing without it makes recovery permanently unavailable");
         console.log("  [OK] All critical assertions passed");
 
         vm.stopBroadcast();
@@ -527,6 +539,21 @@ contract DeployCoreSystem is Script {
         result.vault.setSelectorRegistry(address(result.selectorRegistry));
         console.log("  SelectorRegistry set (guardrail NOW active)");
 
+        // 5.8b RecoveryGate (Emergency Module Recovery — must be wired before seal,
+        // since setRecoveryGate() is blocked post-seal and address(0) is otherwise
+        // accepted by SystemSealer as a silent "no recovery" configuration)
+        console.log("[5.8b] Deploying and wiring RecoveryGate...");
+        result.recoveryGate = new RecoveryGate(
+            address(result.vault),
+            cfg.timelock, // ROOT_TIMELOCK
+            cfg.securityApprover,
+            RECOVERY_MIN_DELAY,
+            RECOVERY_COOLDOWN
+        );
+        result.vault.setRecoveryGate(address(result.recoveryGate));
+        require(result.vault.recoveryGate() == address(result.recoveryGate), "DEPLOY_BUG: recoveryGate not wired");
+        console.log("  RecoveryGate:", address(result.recoveryGate));
+
         // 5.9 Initial fees
         console.log("[5.9] Setting initial fees...");
         if (!IAdminModule(address(result.vault)).isFeesInitialized()) {
@@ -675,6 +702,7 @@ contract DeployCoreSystem is Script {
         cfg.treasury = vm.envAddress("TREASURY_ADDRESS");
         cfg.ops = vm.envAddress("OPS_ADDRESS");
         cfg.safetyReserve = vm.envAddress("SAFETY_RESERVE_ADDRESS");
+        cfg.securityApprover = vm.envAddress("SECURITY_APPROVER_ADDRESS");
 
         try vm.envAddress("TIMELOCK_ADDRESS") returns (address t) { cfg.timelock = t; }
         catch { cfg.timelock = cfg.governor; }
@@ -720,6 +748,7 @@ contract DeployCoreSystem is Script {
 
         vm.serializeAddress(json, "selectorRegistry", address(result.selectorRegistry));
         vm.serializeAddress(json, "systemSealer", address(result.systemSealer));
+        vm.serializeAddress(json, "recoveryGate", address(result.recoveryGate));
 
         vm.serializeAddress(json, "vault", address(result.vault));
         vm.serializeAddress(json, "queueModule", address(result.queueModule));
@@ -740,7 +769,8 @@ contract DeployCoreSystem is Script {
         vm.serializeAddress(json, "ops", cfg.ops);
         vm.serializeAddress(json, "safetyReserve", cfg.safetyReserve);
         vm.serializeAddress(json, "timelock", cfg.timelock);
-        string memory finalJson = vm.serializeAddress(json, "vetoer", cfg.vetoer);
+        vm.serializeAddress(json, "vetoer", cfg.vetoer);
+        string memory finalJson = vm.serializeAddress(json, "securityApprover", cfg.securityApprover);
 
         vm.writeJson(finalJson, cfg.outputJsonPath);
         console.log("Address book written to:", cfg.outputJsonPath);
@@ -758,6 +788,7 @@ contract DeployCoreSystem is Script {
         console.log("Security:");
         console.log("  SelectorRegistry:    ", address(result.selectorRegistry));
         console.log("  SystemSealer:        ", address(result.systemSealer));
+        console.log("  RecoveryGate:        ", address(result.recoveryGate));
         console.log("Core:");
         console.log("  CoreVault:           ", address(result.vault));
         console.log("  EpochedQueueModule:  ", address(result.queueModule));
@@ -797,6 +828,7 @@ contract DeployCoreSystem is Script {
         console.log("   FEE_COLLECTOR_ADDRESS=", address(result.feeCollector));
         console.log("   SELECTOR_REGISTRY_ADDRESS=", address(result.selectorRegistry));
         console.log("   SYSTEM_SEALER_ADDRESS=", address(result.systemSealer));
+        console.log("   RECOVERY_GATE_ADDRESS=", address(result.recoveryGate));
         console.log("   GUARDIAN_ADDRESS=", cfg.guardian);
         console.log("   TIMELOCK_ADDRESS=", cfg.timelock);
         console.log("2. Timelock: acceptOwnerTransfer + setAuthorizedSealer + systemSealer.verifyAndSeal(config)");
