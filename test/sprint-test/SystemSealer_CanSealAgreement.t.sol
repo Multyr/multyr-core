@@ -38,6 +38,8 @@ import { GlobalConfig } from "../../src/core/config/GlobalConfig.sol";
 import { SelectorRegistry } from "../../src/core/libraries/SelectorRegistry.sol";
 import { SelectorLib } from "../../src/core/libraries/SelectorLib.sol";
 import { SystemSealer } from "../../src/core/SystemSealer.sol";
+import { Incentives } from "../../src/core/modules/Incentives.sol";
+import { IIncentives } from "../../src/interfaces/IIncentives.sol";
 import { IAdminModule } from "../../src/interfaces/IAdminModule.sol";
 import { IBufferManager } from "../../src/interfaces/IBufferManager.sol";
 import { IncentivesTimelock } from "../../src/governance/IncentivesTimelock.sol";
@@ -225,6 +227,27 @@ contract SystemSealer_CanSealAgreement_Test is Test {
         vm.prank(deployer);
         vm.expectRevert();
         rootTimelock.executeBatch(targets, values, payloads, bytes32(0), salt);
+        assertFalse(vault.isSystemSealed());
+    }
+
+    function test_canSeal_and_verifyAndSeal_agree_whenIncentivesIsADecoy() public {
+        IIncentives.Params memory p =
+            IIncentives.Params({ cliffDays: 30, fullDays: 180, bmaxWad: 3e16, vestingDays: 180 });
+
+        Incentives realIncentives = new Incentives(address(rootTimelock), address(vault), treasury, p);
+        vm.prank(address(rootTimelock));
+        IAdminModule(address(vault)).setIncentives(address(realIncentives));
+
+        Incentives decoy = new Incentives(address(rootTimelock), address(vault), treasury, p);
+
+        SystemSealer.SealConfig memory decoyConfig = sealConfig;
+        decoyConfig.incentives = address(decoy);
+
+        (bool ok, string memory reason) = systemSealer.canSeal(decoyConfig);
+        assertFalse(ok, "canSeal must reject a correctly-governed Incentives the vault does not read from");
+        assertEq(reason, "Incentives not bound to vault");
+
+        _scheduleAndExpectRevert(decoyConfig, "incentives-decoy-salt");
         assertFalse(vault.isSystemSealed());
     }
 
