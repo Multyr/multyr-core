@@ -358,9 +358,16 @@ contract SystemSealer {
         }
 
         // ─────────────────────────────────────────────────────────────────────────
-        // INVARIANT 8: Incentives ownership (if deployed)
+        // INVARIANT 8: Incentives is bound to the vault, and its ownership (if deployed)
         // ─────────────────────────────────────────────────────────────────────────
+        // Live-wiring bind (review §24), same pattern as feeCollector/router/
+        // bufferManager/healthRegistry above: without this, a correctly-owned
+        // decoy Incentives contract the vault does not actually read from
+        // still satisfies the ownership check below and passes the seal.
         if (config.incentives != address(0)) {
+            if (address(vault.incentives()) != config.incentives) {
+                return (false, "Incentives not bound to vault");
+            }
             if (Incentives(config.incentives).owner() != config.rootTimelock) {
                 return (false, "Incentives.owner != ROOT_TIMELOCK");
             }
