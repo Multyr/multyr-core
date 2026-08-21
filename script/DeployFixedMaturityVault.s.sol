@@ -28,6 +28,7 @@ import { IFixedMaturityModule } from "@multyr-core/interfaces/IFixedMaturityModu
 import { VaultMode, VaultState } from "@multyr-core/core/storage/FixedMaturityStorage.sol";
 import { IAdminModule } from "@multyr-core/interfaces/IAdminModule.sol";
 import { IBufferManager } from "@multyr-core/interfaces/IBufferManager.sol";
+import { ChainConfig } from "./config/ChainConfig.sol";
 
 /// @title DeployFixedMaturityVault -- FM pure core deploy (10-phase standalone)
 /// @notice Deploys a CoreVault pre-configured for FixedMaturity mode.
@@ -35,24 +36,19 @@ import { IBufferManager } from "@multyr-core/interfaces/IBufferManager.sol";
 ///         No upkeep -- deploy separately via DeployFixedMaturityVaultUpkeep.s.sol.
 /// @dev Phase order is critical and must not be reordered (see phases 1-9 below).
 ///      FM vault does not include warm adapters in V1 -- BufferManager is hot-only.
-/// @custom:chain-id 42161 (Arbitrum One -- enforced at runtime)
+/// @custom:chain-id Arbitrum One (42161), Base (8453), Ethereum Mainnet (1) -- see script/config/ChainConfig.sol
 /// @custom:env-vars DEPLOYER_PRIVATE_KEY, GOVERNOR_ADDRESS, GUARDIAN_ADDRESS, TREASURY_ADDRESS,
 ///                  OPS_ADDRESS, SAFETY_RESERVE_ADDRESS, FIXED_TERM_STRATEGY, FM_MATURITY_TS,
 ///                  FM_FUNDING_DEADLINE_TS, FM_MIN_FUNDING_ASSETS, FM_TARGET_FUNDING_ASSETS,
-///                  TIMELOCK_ADDRESS (opt), CHAINLINK_USDC_FEED (opt), FM_AUTO_CLOSE (opt),
-///                  FM_INSTANT_EXIT (opt), FM_FORCE_PENALTY_BPS (opt), VAULT_NAME (opt), VAULT_SYMBOL (opt)
+///                  TIMELOCK_ADDRESS (opt), CHAINLINK_USDC_FEED (opt, default from ChainConfig),
+///                  FM_AUTO_CLOSE (opt), FM_INSTANT_EXIT (opt), FM_FORCE_PENALTY_BPS (opt),
+///                  VAULT_NAME (opt), VAULT_SYMBOL (opt)
 /// @custom:post-deploy 1) Deploy upkeep: DeployFixedMaturityVaultUpkeep.s.sol FM_VAULT_ADDRESS=<vault>
 ///                     2) Register FixedMaturityVaultUpkeep on Chainlink Automation
 ///                     3) Unpause vault after final safety check
 ///                     4) Transfer vault ownership to timelock
 /// @custom:replaces script/DeployFixedMaturityVault.s.sol (legacy monorepo path -- periphery extracted)
 contract DeployFixedMaturityVault is Script {
-
-    uint256 constant ARBITRUM_ONE_CHAIN_ID = 42161;
-
-    // Arbitrum One canonical addresses
-    address constant USDC               = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
-    address constant CHAINLINK_USDC_ARB = 0x50834F3163758fcC1Df9973b6e91f0F0F0434aD3;
 
     // =========================================================================
     // RESULT STRUCT
@@ -79,6 +75,7 @@ contract DeployFixedMaturityVault is Script {
     // =========================================================================
 
     struct FMConfig {
+        ChainConfig.Config chain;
         uint256 deployerPk;
         address deployer;
         address governor;
@@ -106,11 +103,6 @@ contract DeployFixedMaturityVault is Script {
     // =========================================================================
 
     function run() external returns (FMDeploymentResult memory result) {
-        require(
-            block.chainid == ARBITRUM_ONE_CHAIN_ID,
-            "WRONG_CHAIN: DeployFixedMaturityVault is Arbitrum One only (chainId 42161)"
-        );
-
         FMConfig memory cfg = _loadConfig();
         _printConfig(cfg);
 
@@ -166,7 +158,7 @@ contract DeployFixedMaturityVault is Script {
             25,     // maxActions = 25
             500,    // maxNavDeltaBps = 5%
             3600,   // minCooldown = 1h
-            86400   // maxStaleness = 24h (Chainlink heartbeat)
+            cfg.chain.oracleStaleness // maxStaleness (Chainlink heartbeat)
         );
         console.log("[1.1] GlobalConfig:", address(result.globalConfig));
 
@@ -205,7 +197,7 @@ contract DeployFixedMaturityVault is Script {
         internal returns (FMDeploymentResult memory)
     {
         result.vault = new CoreVault(
-            IERC20Metadata(USDC),
+            IERC20Metadata(cfg.chain.usdc),
             cfg.vaultName,
             cfg.vaultSymbol,
             cfg.deployer,
@@ -245,7 +237,7 @@ contract DeployFixedMaturityVault is Script {
             maxWarmBps:          800, // 8% cap = 1000 - minHot
             opsReserveTargetBps: 400, // MUST equal targetHotBps
             maxWarmSlippageBps:   50, // 0.5%
-            asset:              USDC,
+            asset:              cfg.chain.usdc,
             warmAdapter:        address(0), // deprecated field
             twapWindowSec:      0,
             paused:             false
@@ -377,11 +369,12 @@ contract DeployFixedMaturityVault is Script {
         console.log("  [OK] BufferManager warm NAV refreshed");
 
         if (cfg.chainlinkFeed != address(0)) {
-            result.priceOracle.setOracleFeed(USDC, cfg.chainlinkFeed, 86400);
-            result.globalConfig.setDefaultOracleConfig(address(result.priceOracle), 86400);
-            result.globalConfig.setAssetOracleConfig(USDC, address(result.priceOracle), 86400);
-            (address o, uint256 s) = result.globalConfig.oracleConfigFor(USDC, address(result.vault));
-            require(o == address(result.priceOracle) && s == 86400, "DEPLOY_BUG: oracle mismatch");
+            uint256 staleness = cfg.chain.oracleStaleness;
+            result.priceOracle.setOracleFeed(cfg.chain.usdc, cfg.chainlinkFeed, staleness);
+            result.globalConfig.setDefaultOracleConfig(address(result.priceOracle), staleness);
+            result.globalConfig.setAssetOracleConfig(cfg.chain.usdc, address(result.priceOracle), staleness);
+            (address o, uint256 s) = result.globalConfig.oracleConfigFor(cfg.chain.usdc, address(result.vault));
+            require(o == address(result.priceOracle) && s == staleness, "DEPLOY_BUG: oracle mismatch");
             console.log("  [OK] Oracle configured:", cfg.chainlinkFeed);
         }
 
@@ -461,6 +454,7 @@ contract DeployFixedMaturityVault is Script {
     // =========================================================================
 
     function _loadConfig() internal view returns (FMConfig memory cfg) {
+        cfg.chain            = ChainConfig.current();
         cfg.deployerPk       = vm.envUint("DEPLOYER_PRIVATE_KEY");
         cfg.deployer         = vm.addr(cfg.deployerPk);
         cfg.governor         = vm.envAddress("GOVERNOR_ADDRESS");
@@ -469,7 +463,7 @@ contract DeployFixedMaturityVault is Script {
         cfg.ops              = vm.envAddress("OPS_ADDRESS");
         cfg.safetyReserve    = vm.envAddress("SAFETY_RESERVE_ADDRESS");
         cfg.timelock         = vm.envOr("TIMELOCK_ADDRESS", cfg.governor);
-        cfg.chainlinkFeed    = vm.envOr("CHAINLINK_USDC_FEED", CHAINLINK_USDC_ARB);
+        cfg.chainlinkFeed    = vm.envOr("CHAINLINK_USDC_FEED", cfg.chain.chainlinkUsdcUsdFeed);
         cfg.vaultName        = vm.envOr("VAULT_NAME",   string("Multyr Fixed Maturity USDC"));
         cfg.vaultSymbol      = vm.envOr("VAULT_SYMBOL", string("mFM-USDC"));
 

@@ -68,7 +68,7 @@ contract BufferManagerFlowTest is Test {
         bm = new BufferManager(address(this), address(vault), cfg);
 
         // Deploy warm adapter with controller = buffer manager, coreVault = vault (now that bm exists)
-        warm = new AaveV3WarmAdapter_USDC(address(bm), address(vault), address(pool), address(data));
+        warm = new AaveV3WarmAdapter_USDC(address(bm), address(vault), USDC_UNDERLYING, address(pool), address(data));
 
         // Wire buffer manager into core
         vault.setBufferManagerUnsafe(address(bm));

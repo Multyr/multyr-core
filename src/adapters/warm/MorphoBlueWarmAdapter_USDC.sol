@@ -22,15 +22,14 @@ interface IERC4626 {
 }
 
 /// @title MorphoVaultWarmAdapter_USDC
-/// @notice Adapter T+0 su Morpho **Vault ERC-4626** (loan token = USDC nativo).
+/// @notice Adapter T+0 su Morpho **Vault ERC-4626** (loan token = USDC nativo). Chain-agnostic:
+///         underlying is supplied at construction (see script/config/ChainConfig.sol).
 /// @dev L'adapter pulla USDC dal CoreVault via transferFrom. Per uscire, withdraw(amount,to).
 contract MorphoVaultWarmAdapter_USDC is IWarmAdapter {
-    // -------- Costanti --------
-    address public constant UNDERLYING_USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
-
     // -------- Immutable --------
     address public immutable controller; // BufferManager
     address public immutable coreVault; // CoreVault (source of funds)
+    address public immutable UNDERLYING_USDC;
     IERC20 public immutable USDC;
     IERC4626 public immutable VAULT;
 
@@ -46,6 +45,7 @@ contract MorphoVaultWarmAdapter_USDC is IWarmAdapter {
     error NotController();
     error ZeroAmount();
     error ZeroCoreVault();
+    error ZeroUnderlying();
     error WrongAsset();
     error ApproveFailed();
     error TransferFromFailed();
@@ -58,22 +58,25 @@ contract MorphoVaultWarmAdapter_USDC is IWarmAdapter {
     constructor(
         address _controller,
         address _coreVault,
+        address _underlying,
         address _vault,
         uint16 _withdrawSlippageBps
     ) {
         if (_coreVault == address(0)) revert ZeroCoreVault();
+        if (_underlying == address(0)) revert ZeroUnderlying();
         controller = _controller;
         coreVault = _coreVault;
+        UNDERLYING_USDC = _underlying;
         VAULT = IERC4626(_vault);
-        USDC = IERC20(UNDERLYING_USDC);
+        USDC = IERC20(_underlying);
         withdrawSlippageBps = _withdrawSlippageBps;
 
-        if (VAULT.asset() != UNDERLYING_USDC) revert WrongAsset();
+        if (VAULT.asset() != _underlying) revert WrongAsset();
         if (!USDC.approve(_vault, type(uint256).max)) revert ApproveFailed();
     }
 
     // -------- IWarmAdapter --------
-    function asset() external pure returns (address) {
+    function asset() external view returns (address) {
         return UNDERLYING_USDC;
     }
 

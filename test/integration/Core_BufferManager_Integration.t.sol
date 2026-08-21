@@ -58,7 +58,7 @@ contract Core_BufferManager_Integration is Test {
         bm = new BufferManager(address(this), address(core), cfg);
 
         // Deploy warm adapter with controller=bm, coreVault=core
-        warm = new AaveV3WarmAdapter_USDC(address(bm), address(core), address(pool), address(data));
+        warm = new AaveV3WarmAdapter_USDC(address(bm), address(core), USDC_UNDERLYING, address(pool), address(data));
         cfg.warmAdapter = address(warm);
         bm.updateConfig(cfg);
 
@@ -141,7 +141,7 @@ contract Core_BufferManager_Integration is Test {
 
         // Deploy a new adapter with controller=freshBm (no approval from core yet)
         AaveV3WarmAdapter_USDC newWarm = new AaveV3WarmAdapter_USDC(
-            address(freshBm), address(core), address(pool), address(data)
+            address(freshBm), address(core), USDC_UNDERLYING, address(pool), address(data)
         );
         cfg.warmAdapter = address(newWarm);
         freshBm.updateConfig(cfg);

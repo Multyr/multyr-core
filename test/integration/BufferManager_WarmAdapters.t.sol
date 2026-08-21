@@ -269,7 +269,7 @@ contract BufferManager_WarmAdapters_Test is Test {
 
         // Deploy Aave adapter with controller = BufferManager, coreVault = coreVault
         aaveAdapter = new AaveV3WarmAdapter_USDC(
-            address(bufferManager), address(coreVault), address(aavePool), address(aaveDataProvider)
+            address(bufferManager), address(coreVault), address(usdc), address(aavePool), address(aaveDataProvider)
         );
 
         // Update config with correct adapter
@@ -304,6 +304,7 @@ contract BufferManager_WarmAdapters_Test is Test {
         morphoAdapter = new MorphoVaultWarmAdapter_USDC(
             address(bufferManager),
             address(coreVault),
+            address(usdc),
             address(morphoVault),
             5 // 5 bps slippage
         );

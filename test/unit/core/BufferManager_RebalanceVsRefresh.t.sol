@@ -57,7 +57,7 @@ contract BufferManager_RebalanceVsRefresh_Test is Test {
         cfg.paused = false;
         bm = new BufferManager(address(this), address(vault), cfg);
 
-        warm = new AaveV3WarmAdapter_USDC(address(bm), address(vault), address(pool), address(data));
+        warm = new AaveV3WarmAdapter_USDC(address(bm), address(vault), USDC_UNDERLYING, address(pool), address(data));
         cfg.warmAdapter = address(warm);
         bm.updateConfig(cfg);
         vault.setBufferManagerUnsafe(address(bm));

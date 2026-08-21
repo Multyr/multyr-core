@@ -1,18 +1,20 @@
 # multyr-core — Deployment Guide
 
 > **Repo**: `Multyr/multyr-core` (public, BUSL-1.1)
-> **Chain**: Arbitrum One (chainId 42161) — enforced at runtime in every script
+> **Chains**: Arbitrum One (42161), Base (8453), Ethereum Mainnet (1) — resolved at runtime from
+> `multyr-core/script/config/ChainConfig.sol`, the single source of truth for chain-specific
+> addresses/params. Deploying to an unsupported chain reverts.
 > **Modular Path B**: canonical reference per `docs/09-audit/deployment-flow.md §147-242`
-> **Last updated**: 2026-05-20 · branch `reorg/runbook-deploy-docs-01`
+> **Last updated**: 2026-08-21 · multi-chain config added
 
 ---
 
 ## Overview
 
 `multyr-core` deploys the Multyr vault protocol core: an ERC-4626-compatible, module-routing
-vault supporting **Open-Ended (OE)** and **Fixed-Maturity (FM)** vault modes. All scripts enforce
-Arbitrum One chain guard (`multyr-core/script/DeployCoreSystem.s.sol:133`) and require a
-pre-deployed `ROOT_TIMELOCK` as final owner.
+vault supporting **Open-Ended (OE)** and **Fixed-Maturity (FM)** vault modes. All scripts resolve
+`ChainConfig.current()` from `block.chainid` (Arbitrum One, Base, or Ethereum Mainnet; anything
+else reverts) and require a pre-deployed `ROOT_TIMELOCK` as final owner.
 
 ### Vault modes
 
@@ -36,7 +38,8 @@ pre-deployed `ROOT_TIMELOCK` as final owner.
 | `TREASURY_ADDRESS` | `multyr-core/script/DeployCoreSystem.s.sol:657` | Fee treasury wallet |
 | `OPS_ADDRESS` | `multyr-core/script/DeployCoreSystem.s.sol:658` | Ops wallet |
 | `SAFETY_RESERVE_ADDRESS` | `multyr-core/script/DeployCoreSystem.s.sol:659` | Safety reserve wallet |
-| `CHAINLINK_USDC_FEED` | `multyr-core/script/DeployCoreSystem.s.sol:667` | Optional; sets oracle on Chainlink USDC/USD feed |
+| `CHAINLINK_USDC_FEED` | `multyr-core/script/DeployCoreSystem.s.sol` | Optional; defaults to the current chain's feed in `ChainConfig` |
+| `MORPHO_VAULT` | `multyr-core/script/DeployCoreSystem.s.sol` | Required when `DEPLOY_WARM_ADAPTERS=true` on a chain with no vetted default (Base, Ethereum) |
 
 ### Environment variables (optional / post-deploy)
 
@@ -47,20 +50,24 @@ pre-deployed `ROOT_TIMELOCK` as final owner.
 | `DEPLOY_INCENTIVES` | `false` | Deploy `Incentives` module inline |
 | `DEPLOY_UPKEEP` | `false` | Deploy `VaultUpkeep` inline |
 | `DEPLOY_WARM_ADAPTERS` | `true` | Deploy Aave + Morpho warm adapters |
+| `SKIP_ORACLE_CONFIG` | `false` | Intentionally leave the oracle unconfigured (PRE-SEAL phase) instead of using the chain default |
 | `OUTPUT_JSON` | `broadcast/core-addresses.json` | Address book output path |
 
-### Arbitrum One constants
+### Per-chain constants
 
-```solidity
-USDC     = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831  // multyr-core/script/DeployCoreSystem.s.sol:69
-MORPHO_GAUNTLET_CORE = 0x7e97fa6893871A2751B5fE961978DCCb2c201E65  // multyr-core/script/DeployCoreSystem.s.sol:70
-```
+USDC/Aave/Chainlink addresses are no longer hardcoded per script — they live in
+`multyr-core/script/config/ChainConfig.sol`, keyed by `block.chainid`. See that file for the
+current Arbitrum/Base/Ethereum values (cross-checked against `bgd-labs/aave-address-book`,
+Circle's USDC docs, and Chainlink's feed directory) and its header comment for the verification
+caveat — **re-verify addresses independently before any real mainnet deployment.** Morpho vault
+selection has no protocol-level canonical address (unlike Aave's Pool/DataProvider), so only
+Arbitrum ships with a default; Base/Ethereum deploys must pass `MORPHO_VAULT` explicitly.
 
 ### Prerequisites checklist
 
 - [ ] ROOT_TIMELOCK deployed (Step 1 below, or `multyr-deployment/script/DeployTimelock.s.sol:30`)
 - [ ] Deployer EOA funded: ETH for gas + ≥2 USDC (1 USDC dead deposit + 1 USDC buffer)
-- [ ] Chainlink USDC/USD feed address known (Arbitrum: `0x50834F3163758fcC1Df9973b6e91f0F0F0434aD3`, staleness 86400s)
+- [ ] Chainlink USDC/USD feed address confirmed for the target chain (see `ChainConfig.sol`)
 - [ ] Safe multisig addresses confirmed for GOVERNOR, GUARDIAN, VETOER
 
 ---

@@ -24,18 +24,14 @@ interface IAaveProtocolDataProvider {
 }
 
 /// @title AaveV3WarmAdapter_USDC
-/// @notice Adapter T+0 per Aave V3 (Arbitrum) su **USDC nativo**.
+/// @notice Adapter T+0 per Aave V3 su **USDC nativo**. Chain-agnostic: underlying/pool/data
+///         provider are supplied at construction (see script/config/ChainConfig.sol).
 /// @dev Controller = BufferManager. L'adapter pulla USDC dal CoreVault via transferFrom.
 contract AaveV3WarmAdapter_USDC is IWarmAdapter {
-    // -------- Costanti chain --------
-    address public constant UNDERLYING = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831; // USDC (nativo)
-    // Pool e DataProvider Aave v3 (Arbitrum One)
-    address public constant AAVE_POOL = 0x794a61358D6845594F94dc1DB02A252b5b4814aD;
-    address public constant AAVE_DATA = 0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654;
-
     // -------- Immutable --------
     address public immutable controller; // BufferManager
     address public immutable coreVault; // CoreVault (source of funds)
+    address public immutable UNDERLYING;
     IAaveV3Pool public immutable POOL;
     IERC20 public immutable USDC;
     IERC20 public immutable aToken;
@@ -49,6 +45,9 @@ contract AaveV3WarmAdapter_USDC is IWarmAdapter {
     error NotController();
     error ZeroAmount();
     error ZeroCoreVault();
+    error ZeroUnderlying();
+    error ZeroPool();
+    error ZeroDataProvider();
     error ApproveFailed();
     error TransferFromFailed();
 
@@ -60,20 +59,24 @@ contract AaveV3WarmAdapter_USDC is IWarmAdapter {
     constructor(
         address _controller,
         address _coreVault,
-        address poolOverride,
-        address dataProviderOverride
+        address _underlying,
+        address _pool,
+        address _dataProvider
     ) {
         if (_coreVault == address(0)) revert ZeroCoreVault();
+        if (_underlying == address(0)) revert ZeroUnderlying();
+        if (_pool == address(0)) revert ZeroPool();
+        if (_dataProvider == address(0)) revert ZeroDataProvider();
+
         controller = _controller;
         coreVault = _coreVault;
-        IAaveV3Pool pool =
-            poolOverride == address(0) ? IAaveV3Pool(AAVE_POOL) : IAaveV3Pool(poolOverride);
+        UNDERLYING = _underlying;
+        IAaveV3Pool pool = IAaveV3Pool(_pool);
         POOL = pool;
-        USDC = IERC20(UNDERLYING);
+        USDC = IERC20(_underlying);
 
-        address dataAddr = dataProviderOverride == address(0) ? AAVE_DATA : dataProviderOverride;
         (address aToken_,,) =
-            IAaveProtocolDataProvider(dataAddr).getReserveTokensAddresses(UNDERLYING);
+            IAaveProtocolDataProvider(_dataProvider).getReserveTokensAddresses(_underlying);
         require(aToken_ != address(0), "aToken=0");
         aToken = IERC20(aToken_);
 
@@ -82,7 +85,7 @@ contract AaveV3WarmAdapter_USDC is IWarmAdapter {
     }
 
     // -------- IWarmAdapter --------
-    function asset() external pure returns (address) {
+    function asset() external view returns (address) {
         return UNDERLYING;
     }
 
