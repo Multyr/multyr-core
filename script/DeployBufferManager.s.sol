@@ -6,6 +6,7 @@ import { console } from "forge-std/console.sol";
 
 import { BufferManager } from "@multyr-core/core/modules/BufferManager.sol";
 import { IBufferManager } from "@multyr-core/interfaces/IBufferManager.sol";
+import { ChainConfig } from "./config/ChainConfig.sol";
 
 /// @title DeployBufferManager -- standalone BufferManager redeploy
 /// @notice Deploys a new BufferManager for an existing CoreVault.
@@ -13,7 +14,7 @@ import { IBufferManager } from "@multyr-core/interfaces/IBufferManager.sol";
 ///         After deploy, caller must call vault.setEcosystem() to wire the new BM.
 /// @dev Idempotent: safe to deploy multiple times; only the one set in ecosystem is active.
 ///      Fails fast if vault is address(0) -- never deploy against zero vault.
-/// @custom:chain-id 42161 (Arbitrum One -- enforced at runtime)
+/// @custom:chain-id Arbitrum One (42161), Base (8453), Ethereum Mainnet (1) -- see script/config/ChainConfig.sol
 /// @custom:env-vars DEPLOYER_PRIVATE_KEY, CORE_VAULT_ADDRESS,
 ///                  TARGET_HOT_BPS (opt, default 400), MIN_HOT_BPS (opt, default 200),
 ///                  TARGET_WARM_BPS (opt, default 600), MAX_WARM_BPS (opt, default 800),
@@ -23,14 +24,8 @@ import { IBufferManager } from "@multyr-core/interfaces/IBufferManager.sol";
 ///                     3) If warm adapters: bufferManager.addWarmAdapter(...) + vault.approveWarmAdapters(...)
 contract DeployBufferManager is Script {
 
-    uint256 constant ARBITRUM_ONE_CHAIN_ID = 42161;
-    address constant USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
-
     function run() external returns (BufferManager bm) {
-        require(
-            block.chainid == ARBITRUM_ONE_CHAIN_ID,
-            "WRONG_CHAIN: DeployBufferManager is Arbitrum-only (chainId 42161)"
-        );
+        ChainConfig.Config memory chain = ChainConfig.current();
 
         uint256 deployerPk  = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address deployer    = vm.addr(deployerPk);
@@ -51,6 +46,7 @@ contract DeployBufferManager is Script {
         console.log("================================================================");
         console.log("   DEPLOY BUFFER MANAGER (standalone)");
         console.log("================================================================");
+        console.log("Chain:             ", chain.chainName);
         console.log("Deployer:          ", deployer);
         console.log("CoreVault:         ", coreVault);
         console.log("targetHotBps:      ", targetHotBps);
@@ -67,7 +63,7 @@ contract DeployBufferManager is Script {
             maxWarmBps:          uint16(maxWarmBps),
             opsReserveTargetBps: uint16(opsReserveBps),
             maxWarmSlippageBps:  uint16(maxWarmSlippageBps),
-            asset:               USDC,
+            asset:               chain.usdc,
             warmAdapter:         address(0), // deprecated field
             twapWindowSec:       0,
             paused:              false

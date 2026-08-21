@@ -29,7 +29,7 @@ library SelectorLib {
     uint256 internal constant ADMIN_MODULE_VIEW_SELECTORS = 15; // +1: getForceExitPenalty, +1: isPerfInitialized
     uint256 internal constant ERC4626_MODULE_SELECTORS = 11; // +1: forceWithdraw, +1: forceWithdrawAll
     uint256 internal constant LIQUIDITY_OPS_MODULE_SELECTORS = 7; // canDeploy, deployToStrategies, deployToStrategiesWithPlan, realizeForQueue, realizeForReserveAndOps, canRebalanceStrategies, rebalanceStrategies
-    uint256 internal constant FIXED_MATURITY_MODULE_SELECTORS = 14; // 13 plan selectors + autoCloseFunding
+    uint256 internal constant FIXED_MATURITY_MODULE_SELECTORS = 23; // 13 plan selectors + autoCloseFunding + 9 previously-unrouted views
 
     uint256 internal constant TOTAL_SELECTORS = QUEUE_MODULE_SELECTORS + QUEUE_MODULE_VIEW_SELECTORS
         + ADMIN_MODULE_OWNER_SELECTORS + ADMIN_MODULE_VIEW_SELECTORS + ERC4626_MODULE_SELECTORS
@@ -203,6 +203,16 @@ library SelectorLib {
         selectors[11] = FixedMaturityModule.isSettlementOpen.selector;
         selectors[12] = FixedMaturityModule.currentVaultModeAndState.selector;
         selectors[13] = FixedMaturityModule.fundingProgressBps.selector;
+        selectors[14] = FixedMaturityModule.isInstantExitOpen.selector;
+        selectors[15] = FixedMaturityModule.netFundedAssets.selector;
+        selectors[16] = FixedMaturityModule.isFundingSuccessful.selector;
+        selectors[17] = FixedMaturityModule.isFundingTargetReached.selector;
+        selectors[18] = FixedMaturityModule.finalPerformanceFeeStatus.selector;
+        // Config getters (used by upkeep and off-chain tooling)
+        selectors[19] = FixedMaturityModule.fundingDeadlineTs.selector;
+        selectors[20] = FixedMaturityModule.maturityTs.selector;
+        selectors[21] = FixedMaturityModule.minFundingAssets.selector;
+        selectors[22] = FixedMaturityModule.fixedTermStrategy.selector;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════

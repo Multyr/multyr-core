@@ -215,6 +215,15 @@ contract SelectorRegistry {
         if (selector == FixedMaturityModule.isSettlementOpen.selector) return ROLE_PUBLIC;
         if (selector == FixedMaturityModule.currentVaultModeAndState.selector) return ROLE_PUBLIC;
         if (selector == FixedMaturityModule.fundingProgressBps.selector) return ROLE_PUBLIC;
+        if (selector == FixedMaturityModule.isInstantExitOpen.selector) return ROLE_PUBLIC;
+        if (selector == FixedMaturityModule.netFundedAssets.selector) return ROLE_PUBLIC;
+        if (selector == FixedMaturityModule.isFundingSuccessful.selector) return ROLE_PUBLIC;
+        if (selector == FixedMaturityModule.isFundingTargetReached.selector) return ROLE_PUBLIC;
+        if (selector == FixedMaturityModule.finalPerformanceFeeStatus.selector) return ROLE_PUBLIC;
+        if (selector == FixedMaturityModule.fundingDeadlineTs.selector) return ROLE_PUBLIC;
+        if (selector == FixedMaturityModule.maturityTs.selector) return ROLE_PUBLIC;
+        if (selector == FixedMaturityModule.minFundingAssets.selector) return ROLE_PUBLIC;
+        if (selector == FixedMaturityModule.fixedTermStrategy.selector) return ROLE_PUBLIC;
 
         // Not registered - return special value
         return ROLE_UNREGISTERED;
@@ -402,7 +411,7 @@ contract SelectorRegistry {
     // @dev If we keep this, we need to maintain it manually as selectors are added/removed -
     // consider if it's worth the maintenance burden.
     function totalRegisteredSelectors() external pure returns (uint256) {
-        // 35 owner + 15 admin view + 6 queue write + 5 queue view + 11 ERC4626 + 6 LiquidityOps + 14 FM = 92
-        return 92;
+        // 35 owner + 15 admin view + 6 queue write + 5 queue view + 11 ERC4626 + 6 LiquidityOps + 23 FM = 101
+        return 101;
     }
 }
