@@ -10,7 +10,8 @@ optimizer_runs = 200
 via_ir = true
 evm_version = "shanghai"
 fs_permissions = [
-  { access = "read", path = "./" }
+  { access = "read", path = "./" },
+  { access = "read-write", path = "./broadcast" }
 ]
 allow_paths = ["../src"]
 

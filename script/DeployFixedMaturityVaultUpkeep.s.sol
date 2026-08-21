@@ -5,6 +5,7 @@ import { Script } from "forge-std/Script.sol";
 import { console } from "forge-std/console.sol";
 
 import { FixedMaturityVaultUpkeep } from "@multyr-core/automation/FixedMaturityVaultUpkeep.sol";
+import { ChainConfig } from "./config/ChainConfig.sol";
 
 /// @title DeployFixedMaturityVaultUpkeep -- FM FixedMaturityVaultUpkeep standalone deploy
 /// @notice Deploys a FixedMaturityVaultUpkeep keeper for an existing FM CoreVault.
@@ -13,20 +14,15 @@ import { FixedMaturityVaultUpkeep } from "@multyr-core/automation/FixedMaturityV
 ///         activate, matured, recall, settle, close) via Chainlink Automation.
 /// @dev Stateless: takes vault address + configuration params only.
 ///      Does not require any special permissions to deploy -- Chainlink registers as forwarder.
-/// @custom:chain-id 42161 (Arbitrum One -- enforced at runtime)
+/// @custom:chain-id Arbitrum One (42161), Base (8453), Ethereum Mainnet (1) -- see script/config/ChainConfig.sol
 /// @custom:env-vars DEPLOYER_PRIVATE_KEY, FM_VAULT_ADDRESS,
 ///                  FM_UPKEEP_STRICT_MODE (opt, default true)
 /// @custom:post-deploy 1) Register on Chainlink Automation
 ///                     2) No additional vault grants needed -- upkeep reads public FM state
 contract DeployFixedMaturityVaultUpkeep is Script {
 
-    uint256 constant ARBITRUM_ONE_CHAIN_ID = 42161;
-
     function run() external returns (FixedMaturityVaultUpkeep fmUpkeep) {
-        require(
-            block.chainid == ARBITRUM_ONE_CHAIN_ID,
-            "WRONG_CHAIN: DeployFixedMaturityVaultUpkeep is Arbitrum-only (chainId 42161)"
-        );
+        ChainConfig.Config memory chain = ChainConfig.current();
 
         uint256 deployerPk = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address deployer   = vm.addr(deployerPk);
@@ -39,6 +35,7 @@ contract DeployFixedMaturityVaultUpkeep is Script {
         console.log("================================================================");
         console.log("   DEPLOY FIXED MATURITY VAULT UPKEEP");
         console.log("================================================================");
+        console.log("Chain:         ", chain.chainName);
         console.log("Deployer:      ", deployer);
         console.log("FM Vault:      ", fmVault);
         console.log("Strict Mode:   ", strictMode);

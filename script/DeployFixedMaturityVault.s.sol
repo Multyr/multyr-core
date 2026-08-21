@@ -3,6 +3,7 @@ pragma solidity ^0.8.28;
 
 import { Script } from "forge-std/Script.sol";
 import { console } from "forge-std/console.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 // Core
@@ -130,7 +131,7 @@ contract DeployFixedMaturityVault is Script {
         _activateSelectorRegistry(result);
 
         console.log("=== PHASE 8: SEED DEAD DEPOSIT (MANDATORY) ===");
-        _seedDeadDeposit(result);
+        _seedDeadDeposit(cfg, result);
 
         console.log("=== PHASE 9: FINAL ASSERTIONS ===");
         _assertFinalState(cfg, result);
@@ -413,8 +414,10 @@ contract DeployFixedMaturityVault is Script {
     // PHASE 8: SEED DEAD DEPOSIT (MANDATORY -- inflation attack hardening)
     // =========================================================================
 
-    function _seedDeadDeposit(FMDeploymentResult memory result) internal {
-        IAdminModule(address(result.vault)).seedDeadDeposit(1e6); // 1 USDC
+    function _seedDeadDeposit(FMConfig memory cfg, FMDeploymentResult memory result) internal {
+        uint256 deadDepositAmount = 1e6; // 1 USDC
+        IERC20(cfg.chain.usdc).approve(address(result.vault), deadDepositAmount);
+        IAdminModule(address(result.vault)).seedDeadDeposit(deadDepositAmount);
         require(IAdminModule(address(result.vault)).isDeadDepositDone(), "SEED: dead deposit failed");
         console.log("  [OK] Dead deposit seeded (1 USDC)");
     }

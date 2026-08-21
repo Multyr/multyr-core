@@ -6,6 +6,7 @@ import { console } from "forge-std/console.sol";
 
 import { VaultUpkeep } from "@multyr-core/automation/VaultUpkeep.sol";
 import { BufferManager } from "@multyr-core/core/modules/BufferManager.sol";
+import { ChainConfig } from "./config/ChainConfig.sol";
 
 /// @title DeployVaultUpkeep -- OE VaultUpkeep standalone deploy
 /// @notice Deploys a VaultUpkeep keeper for an existing OE CoreVault.
@@ -13,7 +14,7 @@ import { BufferManager } from "@multyr-core/core/modules/BufferManager.sol";
 ///         Grants no special permissions automatically -- caller must set BM keeper after deploy.
 /// @dev Idempotent in the sense that deploying twice creates a second keeper; only one should
 ///      be registered with Chainlink at a time. Stateless: no storage, just constructor args.
-/// @custom:chain-id 42161 (Arbitrum One -- enforced at runtime)
+/// @custom:chain-id Arbitrum One (42161), Base (8453), Ethereum Mainnet (1) -- see script/config/ChainConfig.sol
 /// @custom:env-vars DEPLOYER_PRIVATE_KEY, VAULT_ADDRESS, BUFFER_MANAGER_ADDRESS,
 ///                  STRATEGY_ROUTER_ADDRESS, GLOBAL_CONFIG_ADDRESS,
 ///                  DEFAULT_MAX_REALIZE (opt, default 1000000e6), DEFAULT_MAX_DEPLOY (opt, default 1000000e6),
@@ -23,13 +24,8 @@ import { BufferManager } from "@multyr-core/core/modules/BufferManager.sol";
 ///                     3) Register on Chainlink Automation (forwarder address from registration)
 contract DeployVaultUpkeep is Script {
 
-    uint256 constant ARBITRUM_ONE_CHAIN_ID = 42161;
-
     function run() external returns (VaultUpkeep upkeep) {
-        require(
-            block.chainid == ARBITRUM_ONE_CHAIN_ID,
-            "WRONG_CHAIN: DeployVaultUpkeep is Arbitrum-only (chainId 42161)"
-        );
+        ChainConfig.Config memory chain = ChainConfig.current();
 
         uint256 deployerPk = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address deployer   = vm.addr(deployerPk);
@@ -52,6 +48,7 @@ contract DeployVaultUpkeep is Script {
         console.log("================================================================");
         console.log("   DEPLOY VAULT UPKEEP (OE standalone)");
         console.log("================================================================");
+        console.log("Chain:            ", chain.chainName);
         console.log("Deployer:         ", deployer);
         console.log("Vault:            ", vault);
         console.log("BufferManager:    ", bufferManager);

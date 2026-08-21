@@ -7,6 +7,7 @@ import { console } from "forge-std/console.sol";
 import { EpochedQueueModule } from "@multyr-core/core/modules/EpochedQueueModule.sol";
 import { SelectorLib } from "@multyr-core/core/libraries/SelectorLib.sol";
 import { CoreVault } from "@multyr-core/core/CoreVault.sol";
+import { ChainConfig } from "./config/ChainConfig.sol";
 
 /// @title DeployQueueModule -- EpochedQueueModule standalone redeploy (incident response)
 /// @notice Deploys a new EpochedQueueModule delegatecall target and re-wires it to an
@@ -18,7 +19,7 @@ import { CoreVault } from "@multyr-core/core/CoreVault.sol";
 ///      module instance is wired to it).
 ///      Re-wiring requires vault owner (pre-seal) or timelock (post-seal routing freeze lifted).
 ///      CRITICAL: Do NOT re-wire after routing is frozen unless a timelock tx is submitted first.
-/// @custom:chain-id 42161 (Arbitrum One -- enforced at runtime)
+/// @custom:chain-id Arbitrum One (42161), Base (8453), Ethereum Mainnet (1) -- see script/config/ChainConfig.sol
 /// @custom:env-vars DEPLOYER_PRIVATE_KEY, CORE_VAULT_ADDRESS, REWIRE (opt, default false)
 ///                  REWIRE=true -- also calls setModulesBatch to update selector routing on vault
 ///                  REWIRE=false (default) -- deploys only, caller wires manually
@@ -28,13 +29,8 @@ import { CoreVault } from "@multyr-core/core/CoreVault.sol";
 ///                     3) Verify routing: vault.moduleOf(requestEpochWithdrawal.selector) == newModule
 contract DeployQueueModule is Script {
 
-    uint256 constant ARBITRUM_ONE_CHAIN_ID = 42161;
-
     function run() external returns (EpochedQueueModule queueModule) {
-        require(
-            block.chainid == ARBITRUM_ONE_CHAIN_ID,
-            "WRONG_CHAIN: DeployQueueModule is Arbitrum-only (chainId 42161)"
-        );
+        ChainConfig.Config memory chain = ChainConfig.current();
 
         uint256 deployerPk = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address deployer   = vm.addr(deployerPk);
@@ -49,6 +45,7 @@ contract DeployQueueModule is Script {
         console.log("================================================================");
         console.log("   DEPLOY QUEUE MODULE (standalone -- incident response)");
         console.log("================================================================");
+        console.log("Chain:     ", chain.chainName);
         console.log("Deployer:  ", deployer);
         console.log("Rewire:    ", rewire);
         if (rewire) { console.log("CoreVault: ", coreVault); }

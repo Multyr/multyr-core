@@ -5,6 +5,7 @@ import { Script } from "forge-std/Script.sol";
 import { console } from "forge-std/console.sol";
 
 import { StrategyRouter } from "@multyr-core/core/modules/StrategyRouter.sol";
+import { ChainConfig } from "./config/ChainConfig.sol";
 
 /// @title DeployStrategyRouter -- standalone StrategyRouter redeploy
 /// @notice Deploys a new StrategyRouter for an existing CoreVault + GlobalConfig.
@@ -12,7 +13,7 @@ import { StrategyRouter } from "@multyr-core/core/modules/StrategyRouter.sol";
 ///         After deploy, caller must re-register strategies and update ecosystem config.
 /// @dev WARNING: Redeploying StrategyRouter clears strategy registry -- all strategies must be
 ///      re-registered via registerStrategy() after wiring. No state is migrated automatically.
-/// @custom:chain-id 42161 (Arbitrum One -- enforced at runtime)
+/// @custom:chain-id Arbitrum One (42161), Base (8453), Ethereum Mainnet (1) -- see script/config/ChainConfig.sol
 /// @custom:env-vars DEPLOYER_PRIVATE_KEY, CORE_VAULT_ADDRESS, GLOBAL_CONFIG_ADDRESS
 /// @custom:post-deploy 1) strategyRouter.setHealthRegistry(healthRegistry) -- requires SR owner
 ///                     2) vault.setEcosystem() with new SR address -- requires vault owner/timelock
@@ -20,13 +21,8 @@ import { StrategyRouter } from "@multyr-core/core/modules/StrategyRouter.sol";
 ///                     4) strategyRouter.transferOwnership(timelock)
 contract DeployStrategyRouter is Script {
 
-    uint256 constant ARBITRUM_ONE_CHAIN_ID = 42161;
-
     function run() external returns (StrategyRouter router) {
-        require(
-            block.chainid == ARBITRUM_ONE_CHAIN_ID,
-            "WRONG_CHAIN: DeployStrategyRouter is Arbitrum-only (chainId 42161)"
-        );
+        ChainConfig.Config memory chain = ChainConfig.current();
 
         uint256 deployerPk   = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address deployer     = vm.addr(deployerPk);
@@ -39,6 +35,7 @@ contract DeployStrategyRouter is Script {
         console.log("================================================================");
         console.log("   DEPLOY STRATEGY ROUTER (standalone)");
         console.log("================================================================");
+        console.log("Chain:        ", chain.chainName);
         console.log("Deployer:     ", deployer);
         console.log("CoreVault:    ", coreVault);
         console.log("GlobalConfig: ", globalConfig);
