@@ -483,11 +483,11 @@ contract WarmAdapter_BufferManager_Invariants is StdInvariant, Test {
 
         // Deploy adapters with controller = BufferManager
         aaveAdapter = new AaveV3WarmAdapter_USDC(
-            address(bufferManager), address(coreVault), address(aavePool), address(aaveDataProvider)
+            address(bufferManager), address(coreVault), address(usdc), address(aavePool), address(aaveDataProvider)
         );
 
         morphoAdapter = new MorphoVaultWarmAdapter_USDC(
-            address(bufferManager), address(coreVault), address(morphoVault), 5
+            address(bufferManager), address(coreVault), address(usdc), address(morphoVault), 5
         );
 
         // Set up warm adapters in BufferManager

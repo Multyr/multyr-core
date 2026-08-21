@@ -43,6 +43,9 @@ import { RecoveryGate } from "@multyr-core/governance/RecoveryGate.sol";
 import { VaultFactory } from "@multyr-core/factory/VaultFactory.sol";
 import { DeployTypes } from "@multyr-core/libs/DeployTypes.sol";
 
+// Chain config
+import { ChainConfig } from "./config/ChainConfig.sol";
+
 /// @title DeployCoreSystem -- OE pure core deploy (Modular Path B Step 2)
 /// @notice Deploys the Multyr Open-Ended vault core system (infrastructure + modules + ecosystem base).
 ///         Produces a PRE-SEAL state: all module routing configured, dead deposit seeded,
@@ -52,12 +55,14 @@ import { DeployTypes } from "@multyr-core/libs/DeployTypes.sol";
 /// @dev Modular Path B Step 2. Order: infra → security → core+modules → ecosystem base → wiring → seal-prep.
 ///      Warm adapters (optional, deployWarmAdapters=true) and upkeep (optional, deployUpkeep=true)
 ///      have dedicated standalone scripts: DeployWarmAdapters.s.sol, DeployVaultUpkeep.s.sol.
-/// @custom:chain-id 42161 (Arbitrum One -- enforced at runtime)
+/// @custom:chain-id Arbitrum One (42161), Base (8453), Ethereum Mainnet (1) -- see script/config/ChainConfig.sol
 /// @custom:env-vars DEPLOYER_PRIVATE_KEY, GOVERNOR_ADDRESS, GUARDIAN_ADDRESS, TREASURY_ADDRESS,
 ///                  OPS_ADDRESS, SAFETY_RESERVE_ADDRESS, SECURITY_APPROVER_ADDRESS,
 ///                  TIMELOCK_ADDRESS (opt), VETOER_ADDRESS (opt),
 ///                  DEPLOY_INCENTIVES (opt), DEPLOY_UPKEEP (opt), DEPLOY_WARM_ADAPTERS (opt),
-///                  CHAINLINK_USDC_FEED (opt), OUTPUT_JSON (opt)
+///                  CHAINLINK_USDC_FEED (opt, default from ChainConfig), SKIP_ORACLE_CONFIG (opt),
+///                  MORPHO_VAULT (required on chains with no vetted default -- see ChainConfig),
+///                  OUTPUT_JSON (opt)
 /// @custom:post-deploy 1) Run DeployUsdcLendingStrategy.s.sol with vault+ecosystem addresses
 ///                     2) Timelock: acceptOwnerTransfer + setAuthorizedSealer + systemSealer.verifyAndSeal(config)
 ///                        (single atomic call — see docs/architecture.md §10)
@@ -65,12 +70,8 @@ import { DeployTypes } from "@multyr-core/libs/DeployTypes.sol";
 /// @custom:replaces script/DeployCoreSystem.s.sol (legacy monorepo path)
 contract DeployCoreSystem is Script {
     // ═══════════════════════════════════════════════════════════════════════════════
-    // CONSTANTS - Arbitrum One
+    // CONSTANTS
     // ═══════════════════════════════════════════════════════════════════════════════
-
-    uint256 constant ARBITRUM_ONE_CHAIN_ID = 42161;
-    address constant USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
-    address constant MORPHO_GAUNTLET_CORE = 0x7e97fa6893871A2751B5fE961978DCCb2c201E65;
 
     // RecoveryGate policy (approved values — see docs/recovery.md). The contract's
     // own constructor only enforces a 14-day floor on minDelay; these are the
@@ -118,6 +119,7 @@ contract DeployCoreSystem is Script {
     // ═══════════════════════════════════════════════════════════════════════════════
 
     struct CoreConfig {
+        ChainConfig.Config chain;
         uint256 deployerPk;
         address deployer;
         address governor; // ROOT_TIMELOCK
@@ -129,6 +131,7 @@ contract DeployCoreSystem is Script {
         address vetoer; // SAFE_VETO
         address securityApprover; // RecoveryGate's independent approver (should be distinct from governor/guardian/vetoer)
         address chainlinkUsdcFeed;
+        address morphoVault;
         bool deployIncentives;
         bool deployUpkeep;
         bool deployWarmAdapters;
@@ -141,11 +144,6 @@ contract DeployCoreSystem is Script {
     // ═══════════════════════════════════════════════════════════════════════════════
 
     function run() external returns (CoreDeploymentResult memory result) {
-        require(
-            block.chainid == ARBITRUM_ONE_CHAIN_ID,
-            "WRONG_CHAIN: DeployCoreSystem is Arbitrum-only (chainId 42161)"
-        );
-
         CoreConfig memory cfg = _loadConfig();
 
         console.log("");
@@ -153,6 +151,7 @@ contract DeployCoreSystem is Script {
         console.log("   CORE SYSTEM DEPLOYMENT -- OE PURE CORE (Modular Path B)");
         console.log("================================================================");
         console.log("");
+        console.log("Chain:", cfg.chain.chainName);
         console.log("Chain ID:", block.chainid);
         console.log("Block Number:", block.number);
         console.log("Timestamp:", block.timestamp);
@@ -252,7 +251,7 @@ contract DeployCoreSystem is Script {
             25, // maxActions = 25
             500, // maxNavDeltaBps = 5%
             3600, // minCooldown = 1 hour
-            86400 // maxStaleness = 24h (Chainlink USDC/USD heartbeat)
+            cfg.chain.oracleStaleness // maxStaleness (Chainlink USDC/USD heartbeat)
         );
         console.log("[1.2] GlobalConfig:", address(result.globalConfig));
         console.log("      Governor (temp):", cfg.deployer);
@@ -315,7 +314,7 @@ contract DeployCoreSystem is Script {
     {
         // 3.1 CoreVault (starts PAUSED)
         result.vault = new CoreVault(
-            IERC20Metadata(USDC),
+            IERC20Metadata(cfg.chain.usdc),
             "Multyr Earn USDC",
             "meUSDC",
             cfg.deployer,
@@ -328,7 +327,7 @@ contract DeployCoreSystem is Script {
         // 3.1b CRITICAL: Register vault in factory IMMEDIATELY (subgraph event ordering)
         {
             DeployTypes.VaultRegistrationConfig memory regCfg = DeployTypes.VaultRegistrationConfig({
-                asset: IERC20Metadata(USDC),
+                asset: IERC20Metadata(cfg.chain.usdc),
                 name: "Multyr Earn USDC",
                 symbol: "meUSDC",
                 owner: cfg.governor,
@@ -375,7 +374,7 @@ contract DeployCoreSystem is Script {
             maxWarmBps: 800, // 8% = 1000 - minHotBps (invariant)
             opsReserveTargetBps: 400, // 4% = targetHotBps (routing target)
             maxWarmSlippageBps: 50, // 0.5% slippage cap on warm ops
-            asset: USDC,
+            asset: cfg.chain.usdc,
             warmAdapter: address(0), // deprecated field
             twapWindowSec: 0,
             paused: false
@@ -404,16 +403,18 @@ contract DeployCoreSystem is Script {
             result.aaveWarmAdapter = new AaveV3WarmAdapter_USDC(
                 address(result.bufferManager),
                 address(result.vault),
-                address(0), // use default AAVE_POOL
-                address(0) // use default AAVE_DATA_PROVIDER
+                cfg.chain.usdc,
+                cfg.chain.aavePool,
+                cfg.chain.aaveDataProvider
             );
             console.log("[4.3] AaveV3WarmAdapter:", address(result.aaveWarmAdapter));
 
             result.morphoWarmAdapter = new MorphoVaultWarmAdapter_USDC(
                 address(result.bufferManager),
                 address(result.vault),
-                MORPHO_GAUNTLET_CORE,
-                5 // 0.05% slippage
+                cfg.chain.usdc,
+                cfg.morphoVault,
+                cfg.chain.morphoSlippageBps
             );
             console.log("[4.4] MorphoWarmAdapter:", address(result.morphoWarmAdapter));
         }
@@ -513,14 +514,15 @@ contract DeployCoreSystem is Script {
         // 5.6 Oracle
         if (cfg.configureOracle && cfg.chainlinkUsdcFeed != address(0)) {
             console.log("[5.6] Configuring price oracle feed...");
-            result.priceOracle.setOracleFeed(USDC, cfg.chainlinkUsdcFeed, 86400);
-            result.globalConfig.setDefaultOracleConfig(address(result.priceOracle), 86400);
-            result.globalConfig.setAssetOracleConfig(USDC, address(result.priceOracle), 86400);
-            (address o, uint256 s) = result.globalConfig.oracleConfigFor(USDC, address(result.vault));
-            require(o == address(result.priceOracle) && s == 86400, "DEPLOY_BUG: oracle registry mismatch");
+            uint256 staleness = cfg.chain.oracleStaleness;
+            result.priceOracle.setOracleFeed(cfg.chain.usdc, cfg.chainlinkUsdcFeed, staleness);
+            result.globalConfig.setDefaultOracleConfig(address(result.priceOracle), staleness);
+            result.globalConfig.setAssetOracleConfig(cfg.chain.usdc, address(result.priceOracle), staleness);
+            (address o, uint256 s) = result.globalConfig.oracleConfigFor(cfg.chain.usdc, address(result.vault));
+            require(o == address(result.priceOracle) && s == staleness, "DEPLOY_BUG: oracle registry mismatch");
             console.log("  [OK] Oracle registered in GlobalConfig");
         } else {
-            console.log("  WARNING: Oracle not configured (CHAINLINK_USDC_FEED not set)");
+            console.log("  WARNING: Oracle not configured (SKIP_ORACLE_CONFIG set or feed unavailable)");
             console.log("  StrategyRouter hard-fails without oracle. Configure before deposit ops.");
         }
 
@@ -592,7 +594,7 @@ contract DeployCoreSystem is Script {
         console.log("[5.10] Seeding dead deposit...");
         if (!IAdminModule(address(result.vault)).isDeadDepositDone()) {
             uint256 deadDepositAmount = 1_000_000; // 1 USDC (6 decimals)
-            IERC20(USDC).approve(address(result.vault), deadDepositAmount);
+            IERC20(cfg.chain.usdc).approve(address(result.vault), deadDepositAmount);
             IAdminModule(address(result.vault)).seedDeadDeposit(deadDepositAmount);
             require(IAdminModule(address(result.vault)).isDeadDepositDone(), "DEPLOY_BUG: dead deposit not done");
             console.log("  [OK] Dead deposit seeded: 1 USDC");
@@ -694,6 +696,8 @@ contract DeployCoreSystem is Script {
     // ═══════════════════════════════════════════════════════════════════════════════
 
     function _loadConfig() internal view returns (CoreConfig memory cfg) {
+        cfg.chain = ChainConfig.current();
+
         cfg.deployerPk = vm.envUint("DEPLOYER_PRIVATE_KEY");
         cfg.deployer = vm.addr(cfg.deployerPk);
 
@@ -710,13 +714,14 @@ contract DeployCoreSystem is Script {
         try vm.envAddress("VETOER_ADDRESS") returns (address v) { cfg.vetoer = v; }
         catch { cfg.vetoer = address(0); }
 
-        try vm.envAddress("CHAINLINK_USDC_FEED") returns (address feed) {
-            cfg.chainlinkUsdcFeed = feed;
-            cfg.configureOracle = true;
-        } catch {
-            cfg.chainlinkUsdcFeed = address(0);
-            cfg.configureOracle = false;
-        }
+        // Oracle feed defaults to the chain's known Chainlink USDC/USD feed. To
+        // intentionally skip oracle config (e.g. pre-strategy PRE-SEAL phase),
+        // set SKIP_ORACLE_CONFIG=true rather than omitting CHAINLINK_USDC_FEED.
+        bool skipOracle = vm.envOr("SKIP_ORACLE_CONFIG", false);
+        cfg.chainlinkUsdcFeed = vm.envOr("CHAINLINK_USDC_FEED", cfg.chain.chainlinkUsdcUsdFeed);
+        cfg.configureOracle = !skipOracle && cfg.chainlinkUsdcFeed != address(0);
+
+        cfg.morphoVault = vm.envOr("MORPHO_VAULT", cfg.chain.morphoVaultDefault);
 
         try vm.envBool("DEPLOY_INCENTIVES") returns (bool b) { cfg.deployIncentives = b; }
         catch { cfg.deployIncentives = false; }
@@ -726,6 +731,11 @@ contract DeployCoreSystem is Script {
 
         try vm.envBool("DEPLOY_WARM_ADAPTERS") returns (bool b) { cfg.deployWarmAdapters = b; }
         catch { cfg.deployWarmAdapters = true; }
+
+        require(
+            !cfg.deployWarmAdapters || cfg.morphoVault != address(0),
+            "MORPHO_VAULT required: no vetted default vault for this chain"
+        );
 
         try vm.envString("OUTPUT_JSON") returns (string memory p) { cfg.outputJsonPath = p; }
         catch { cfg.outputJsonPath = "broadcast/core-addresses.json"; }

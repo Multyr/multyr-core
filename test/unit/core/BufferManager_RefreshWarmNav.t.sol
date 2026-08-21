@@ -66,7 +66,7 @@ contract BufferManager_RefreshWarmNav_Test is Test {
         bm = new BufferManager(address(this), address(vault), cfg);
 
         // Warm adapter controlled by BufferManager, pulls from vault
-        warm = new AaveV3WarmAdapter_USDC(address(bm), address(vault), address(pool), address(data));
+        warm = new AaveV3WarmAdapter_USDC(address(bm), address(vault), USDC_UNDERLYING, address(pool), address(data));
 
         // Complete config and wire into core
         cfg.warmAdapter = address(warm);

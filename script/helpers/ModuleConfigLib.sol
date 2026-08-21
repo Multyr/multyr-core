@@ -7,8 +7,9 @@ import { LiquidityOpsModule } from "@multyr-core/core/modules/LiquidityOpsModule
 
 /// @title ModuleConfigLib -- CoreVault module routing helper
 /// @notice Helper library for configuring CoreVault selector-to-module routing in deploy scripts.
-/// @dev Used by DeployCoreSystem and DeployFixedMaturityVault. Pure internal library -- no deploy artifact.
-/// @custom:chain-id 42161 (Arbitrum One)
+/// @dev Chain-agnostic: only operates on already-deployed module addresses, no chain-specific
+///      addresses or assumptions. Not currently wired into DeployCoreSystem/DeployFixedMaturityVault
+///      (both duplicate this routing logic inline) -- pure internal library, no deploy artifact.
 library ModuleConfigLib {
     /// @notice Configure all module routing for a CoreVault
     function configureAllRouting(
