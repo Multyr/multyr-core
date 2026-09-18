@@ -817,7 +817,9 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
                 if (address(healthRegistry) != address(0)) {
                     try IStrategy(plan[i].strat).totalAssets() returns (uint256 nav) {
                         healthRegistry.updateLastKnownNAV(plan[i].strat, nav);
-                    } catch { }
+                    } catch (bytes memory reason) {
+                        emit ExternalCallFailed(plan[i].strat, IStrategy.totalAssets.selector, block.timestamp, reason);
+                    }
                 }
             } else {
                 emit StrategyDepositSkipped(plan[i].strat, plan[i].amount, depositReason);
@@ -946,7 +948,8 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
             if (lossCapPerStrategy[plan[i].strat] > 0 || address(healthRegistry) != address(0)) {
                 try IStrategy(plan[i].strat).totalAssets() returns (uint256 nav) {
                     stratNavBefore = nav;
-                } catch {
+                } catch (bytes memory reason) {
+                    emit ExternalCallFailed(plan[i].strat, IStrategy.totalAssets.selector, block.timestamp, reason);
                     // If NAV query fails, use cached value from healthRegistry
                     if (address(healthRegistry) != address(0)) {
                         IStrategyHealthRegistry.StrategyHealth memory health =
@@ -977,7 +980,9 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
                 if (address(healthRegistry) != address(0)) {
                     try IStrategy(plan[i].strat).totalAssets() returns (uint256 nav) {
                         healthRegistry.updateLastKnownNAV(plan[i].strat, nav);
-                    } catch { }
+                    } catch (bytes memory reason) {
+                        emit ExternalCallFailed(plan[i].strat, IStrategy.totalAssets.selector, block.timestamp, reason);
+                    }
                 }
             } catch (bytes memory reason) {
                 emit StrategyRedeemSkipped(plan[i].strat, plan[i].amount, reason);
@@ -1087,6 +1092,8 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
     function _getAvailableSurplus() internal view returns (uint256) {
         return _getAvailableSurplusWithOffset(0);
     }
+
+    event ExternalCallFailed(address indexed target, bytes4 indexed selector, uint256 timestamp, bytes data);
 
     /// @dev Get available surplus accounting for funds already transferred out of core.
     /// @param offset Amount already transferred from core (to reconstruct pre-transfer hot balance)

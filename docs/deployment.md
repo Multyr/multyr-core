@@ -459,7 +459,7 @@ settlement. Set all three before the vault takes real deposits.
 |---|---|---|---|
 | Vault deposit cap | `GlobalConfig.setVaultDepositLimits(vault, cap, userCap, minDeposit)`, read via `IParamsProvider.getDepositLimits` | **10,000,000e6 (10M USDC)** from `defaultVaultDepositCap` | No script narrows it. A vault intended to launch at 20,000 USDC will accept 10M until governance says otherwise. |
 | Asset oracle | `GlobalConfig` oracle config for the vault's asset, read via `oracleConfigFor(asset, vault)` | **unset** | `StrategyRouter.executeRedeemBatch` values the asset through `OracleValuationLib` and reverts `OracleNotConfigured` without it — for 6-decimal USDC as much as an 18-decimal asset. `fundEpoch` swallows that revert, so with no oracle the strategy-redeem leg of the funding waterfall silently does nothing and epochs stay `Closed`. The quote must also be fresher than the configured staleness window at the moment `fundEpoch` runs, which for a multi-day epoch means the keeper has to refresh it near funding time, not at close. |
-| `queueStressThreshold` | `GlobalConfig` dynamic-cap config, read via `IParamsProvider.getDynamicCapParams` | **100 claims** | Drives `WithdrawalCapLib.calculateDynamicCapBps`: once `outstandingClaimCount` reaches it, the instant-exit cap collapses to `minBps` for everyone. At the default, and with `minClaimAmount` at its own 100 USDC default, pinning the cap at its floor costs roughly 100 x 100 = 10,000 USDC of refundable capital. On a 20,000 USDC vault that is half the deposit cap; on a 10M vault it is negligible. Tune it against the real cap. |
+| `queueStressThreshold` | `GlobalConfig` dynamic-cap config, read via `IParamsProvider.getDynamicCapParams` | **100 claims** | Drives `WithdrawalCapLib.calculateDynamicCapBps`: once `outstandingClaimCount` reaches it, the instant-exit cap collapses to `minBps` for everyone. The default claim minimum is zero, so do not assume a 100-USDC capital cost per claim. Review claim-count stress and processing costs independently of the deposit minimum; do not reintroduce an exit floor that traps residual balances. |
 
 Also worth setting deliberately rather than accepting the default:
 
@@ -551,3 +551,20 @@ Run on fork before mainnet deployment (Day 1 of `multyr-deployment/runbooks/full
 ---
 
 *Generated code-first from `multyr-core/script/DeployCoreSystem.s.sol`, `multyr-deployment/script/DeployTimelock.s.sol`, and `multyr-core/script/DeployFixedMaturityVault.s.sol`. All citations verified against source.*
+
+### Deposit minimum and residual exits
+
+For native-USDC vaults, the production policy is `minDepositAmount = 100e6` and
+`minClaimAmount = 0`. These are independent fields: deposit/mint enforces the
+former, while instant and epoch withdrawal requests read the latter. A zero
+claim minimum permits small residual exits; zero-share requests, fees, token
+precision, liquidity, pause controls and settlement rules still apply.
+
+`ConfigureWithdrawalPolicy.s.sol` permanently corrects the existing Arbitrum
+vault through its active GlobalConfig. It preserves caps, lock period and queue
+parameters and verifies the current provider and governance roles. No module,
+strategy, adapter or vault redeployment is needed. There is no restore-floor step.
+Future GlobalConfig deployments now default to a zero claim floor. Existing
+GlobalConfig bytecode retains its historical default for unconfigured vaults;
+the production vault uses its explicit zero-floor withdrawal override. Migration
+scripts that clone state must preserve or explicitly correct legacy overrides.

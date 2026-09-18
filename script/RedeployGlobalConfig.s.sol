@@ -1,0 +1,151 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+import {Script,console2} from "forge-std/Script.sol";
+import {GlobalConfig} from "../src/core/config/GlobalConfig.sol";
+import {GlobalConfigMigrated} from "./helpers/GlobalConfigMigration.sol";
+import {IParamsProvider} from "../src/interfaces/IParamsProvider.sol";
+interface MigrationCore {function params() external view returns(address);function setParams(address) external;function isSystemSealed() external view returns(bool);function canCloseCurrentEpoch() external view returns(bool);}
+interface MigrationRouter {function params() external view returns(address);function setParamsProvider(address) external;}
+interface MigrationFactory {function getDeployedVaults() external view returns(address[] memory);}
+interface MigrationTimelock {
+ function getMinDelay() external view returns(uint256);
+ function hasRole(bytes32,address) external view returns(bool);
+ function scheduleBatch(address[] calldata,uint256[] calldata,bytes[] calldata,bytes32,bytes32,uint256) external;
+ function executeBatch(address[] calldata,uint256[] calldata,bytes[] calldata,bytes32,bytes32) external payable;
+}
+contract RedeployGlobalConfig is Script {
+ address constant OLD=0x8fE1cbc7fC2A469B5b5904EA5e5C4D09c583eDD6;
+ address constant CORE=0x4575Ec0dD1ED08FD4F426665E5B56442594189bb;
+ address constant ASSET=0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
+ address constant ROOT=0xE2812E869F8005397130CCDF1aaabd75447844df;
+ address constant ROUTER=0x8EeF3Cb022B0d70Fe70a4CA6759C977e5718b8e7;
+ address constant FACTORY=0x27b5B83E77044817310c14CF62D96be606f79436;
+ address constant SIGNER=0x908756f36954f2853134259B8846c49F90E84ECe;
+ function run() external {
+  require(block.chainid==42161,"wrong chain");
+  uint256 key=vm.envUint("DEPLOYER_PRIVATE_KEY");require(vm.addr(key)==SIGNER,"unexpected signer");
+  MigrationTimelock tl=MigrationTimelock(ROOT);
+  require(tl.getMinDelay()==0,"separate scheduling required");
+  require(tl.hasRole(keccak256("PROPOSER_ROLE"),SIGNER)&&tl.hasRole(keccak256("EXECUTOR_ROLE"),SIGNER),"missing governance role");
+  require(GlobalConfig(OLD).governor()==ROOT,"old governor changed");
+  require(MigrationCore(CORE).params()==OLD && MigrationRouter(ROUTER).params()==OLD,"provider changed; review migration");
+  require(!MigrationCore(CORE).isSystemSealed(),"system sealed");
+  address[] memory vaults=MigrationFactory(FACTORY).getDeployedVaults();
+  require(vaults.length==1 && vaults[0]==CORE,"vault inventory changed");
+  IParamsProvider.QueueParams memory q=IParamsProvider(OLD).getQueueParams(CORE);
+  require(q.epochDuration==7 days,"queue changed; review");
+  vm.startBroadcast(key);
+  GlobalConfigMigrated next=new GlobalConfigMigrated(OLD,CORE,ASSET);
+  vm.stopBroadcast();
+  _compareAll(address(next));
+  require(next.governor()==ROOT,"wrong governor");
+  address[] memory targets=new address[](3);uint256[] memory values=new uint256[](3);bytes[] memory calls=new bytes[](3);
+  targets[0]=address(next);calls[0]=abi.encodeCall(GlobalConfig.setVaultQueueOverride,(CORE,GlobalConfig.QueueConfig(q.maxClaimsPerUserPerEpoch,q.cooldownPerClaim,1 days)));
+  targets[1]=CORE;calls[1]=abi.encodeCall(MigrationCore.setParams,(address(next)));
+  targets[2]=ROUTER;calls[2]=abi.encodeCall(MigrationRouter.setParamsProvider,(address(next)));
+  bytes32 salt=keccak256(abi.encode("MultyrGlobalConfigQueueSetter",address(next)));
+  vm.startBroadcast(key);
+  tl.scheduleBatch(targets,values,calls,bytes32(0),salt,0);
+  tl.executeBatch(targets,values,calls,bytes32(0),salt);
+  vm.stopBroadcast();
+  require(MigrationCore(CORE).params()==address(next)&&MigrationRouter(ROUTER).params()==address(next),"provider switch failed");
+  IParamsProvider.QueueParams memory afterQ=next.getQueueParams(CORE);
+  require(afterQ.epochDuration==1 days&&afterQ.maxClaimsPerUserPerEpoch==q.maxClaimsPerUserPerEpoch&&afterQ.cooldownPerClaim==q.cooldownPerClaim,"queue postcondition failed");
+  console2.log("New GlobalConfig",address(next));console2.log("Governor",next.governor());console2.log("Epoch duration",afterQ.epochDuration);
+  console2.log("Can close current epoch",MigrationCore(CORE).canCloseCurrentEpoch());
+ }
+ function _same(address next,bytes memory payload) internal view {
+  (bool a,bytes memory x)=OLD.staticcall(payload);(bool b,bytes memory y)=next.staticcall(payload);
+  require(a&&b&&keccak256(x)==keccak256(y),"configuration mismatch");
+ }
+ function _compareAll(address next) internal view {
+  _same(next,abi.encodeWithSignature("governor()"));
+  _same(next,abi.encodeWithSignature("version()"));
+  _same(next,abi.encodeWithSignature("defaultFees()"));
+  _same(next,abi.encodeWithSignature("defaultWithdrawal()"));
+  _same(next,abi.encodeWithSignature("defaultDynamicCap()"));
+  _same(next,abi.encodeWithSignature("defaultQueue()"));
+  _same(next,abi.encodeWithSignature("defaultSecurity()"));
+  _same(next,abi.encodeWithSignature("defaultBuffer()"));
+  _same(next,abi.encodeWithSignature("defaultStrategy()"));
+  _same(next,abi.encodeWithSignature("defaultNavSmoothing()"));
+  _same(next,abi.encodeWithSignature("defaultLockPeriod()"));
+  _same(next,abi.encodeWithSignature("defaultVaultDepositCap()"));
+  _same(next,abi.encodeWithSignature("defaultUserDepositCap()"));
+  _same(next,abi.encodeWithSignature("defaultMinDepositAmount()"));
+  _same(next,abi.encodeWithSignature("defaultMinRebalanceCooldown()"));
+  _same(next,abi.encodeWithSignature("defaultBatchGuardrails()"));
+  _same(next,abi.encodeWithSignature("defaultOracleConfig()"));
+  _same(next,abi.encodeWithSignature("defaultMinParamDelay()"));
+  _same(next,abi.encodeWithSignature("defaultMaxPerfRate()"));
+  _same(next,abi.encodeWithSignature("defaultMaxFeeBps()"));
+  _same(next,abi.encodeWithSignature("defaultMaxImmediateExitPenaltyBps()"));
+  _same(next,abi.encodeWithSignature("defaultMaxForceExitPenaltyBps()"));
+  _same(next,abi.encodeWithSignature("defaultGuardianPauseCooldown()"));
+  _same(next,abi.encodeWithSignature("defaultMinDeployAmount()"));
+  _same(next,abi.encodeWithSignature("defaultStratTaGas()"));
+  _same(next,abi.encodeWithSignature("defaultOpsMaxBps()"));
+  _same(next,abi.encodeWithSignature("vaultFeeOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultWithdrawalOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultDynamicCapOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultQueueOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultSecurityOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultBufferOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultStrategyOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultNavSmoothingOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultLockOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultCapOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultUserCapOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultMinDepositOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultCooldownOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultBatchOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultOracleOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultMinParamDelayOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultMaxPerfRateOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultMaxFeeBpsOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultMaxImmExitPenaltyOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultMaxForceExitPenaltyOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultGuardianPauseCooldownOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultMinDeployAmountOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultStratTaGasOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("vaultOpsMaxBpsOverrides(address)",CORE));
+  _same(next,abi.encodeWithSignature("assetOracleConfig(address)",ASSET));
+  _same(next,abi.encodeWithSignature("hasOverride(address,uint8)",CORE,uint8(0)));
+  _same(next,abi.encodeWithSignature("hasOverride(address,uint8)",CORE,uint8(1)));
+  _same(next,abi.encodeWithSignature("hasOverride(address,uint8)",CORE,uint8(2)));
+  _same(next,abi.encodeWithSignature("hasOverride(address,uint8)",CORE,uint8(3)));
+  _same(next,abi.encodeWithSignature("hasOverride(address,uint8)",CORE,uint8(4)));
+  _same(next,abi.encodeWithSignature("hasOverride(address,uint8)",CORE,uint8(5)));
+  _same(next,abi.encodeWithSignature("hasOverride(address,uint8)",CORE,uint8(6)));
+  _same(next,abi.encodeWithSignature("hasOverride(address,uint8)",CORE,uint8(7)));
+  _same(next,abi.encodeWithSignature("hasOverride(address,uint8)",CORE,uint8(8)));
+  _same(next,abi.encodeWithSignature("hasOverride(address,uint8)",CORE,uint8(9)));
+  _same(next,abi.encodeWithSignature("hasOverride(address,uint8)",CORE,uint8(10)));
+  _same(next,abi.encodeWithSignature("hasOverride(address,uint8)",CORE,uint8(11)));
+  _same(next,abi.encodeWithSignature("hasOverride(address,uint8)",CORE,uint8(12)));
+  _same(next,abi.encodeWithSignature("hasOverride(address,uint8)",CORE,uint8(13)));
+  _same(next,abi.encodeWithSignature("hasOverride(address,uint8)",CORE,uint8(14)));
+  _same(next,abi.encodeWithSignature("getFeeParams(address)",CORE));
+  _same(next,abi.encodeWithSignature("getWithdrawalParams(address)",CORE));
+  _same(next,abi.encodeWithSignature("getDynamicCapParams(address)",CORE));
+  _same(next,abi.encodeWithSignature("getQueueParams(address)",CORE));
+  _same(next,abi.encodeWithSignature("getSecurityParams(address)",CORE));
+  _same(next,abi.encodeWithSignature("getBufferParams(address)",CORE));
+  _same(next,abi.encodeWithSignature("getStrategyParams(address)",CORE));
+  _same(next,abi.encodeWithSignature("getBatchGuardrails(address)",CORE));
+  _same(next,abi.encodeWithSignature("getDepositLimits(address)",CORE));
+  _same(next,abi.encodeWithSignature("getNavSmoothingParams(address)",CORE));
+  _same(next,abi.encodeWithSignature("minParamDelay(address)",CORE));
+  _same(next,abi.encodeWithSignature("maxPerfRate(address)",CORE));
+  _same(next,abi.encodeWithSignature("maxFeeBps(address)",CORE));
+  _same(next,abi.encodeWithSignature("maxImmediateExitPenaltyBps(address)",CORE));
+  _same(next,abi.encodeWithSignature("maxForceExitPenaltyBps(address)",CORE));
+  _same(next,abi.encodeWithSignature("guardianPauseCooldown(address)",CORE));
+  _same(next,abi.encodeWithSignature("minDeployAmount(address)",CORE));
+  _same(next,abi.encodeWithSignature("stratTaGas(address)",CORE));
+  _same(next,abi.encodeWithSignature("opsMaxBps(address)",CORE));
+  _same(next,abi.encodeWithSignature("oracleConfigFor(address,address)",ASSET,CORE));
+  _same(next,abi.encodeWithSignature("oracleFor(address)",ASSET));
+  _same(next,abi.encodeWithSignature("minRebalanceCooldown()"));
+ }
+}
