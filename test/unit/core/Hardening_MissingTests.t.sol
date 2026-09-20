@@ -312,6 +312,55 @@ contract Hardening_MissingTests is Test {
     // still ships/documents it as an anti-spam floor).
     // ═══════════════════════════════════════════════════════════════════════════
 
+    // Deposit policy must never impose a claim floor on residual positions.
+    function test_noClaimFloor_allowsTinyFullInstantExitWithDepositMinimum() public {
+        params.setDepositLimits(0, 0, 100e6);
+        params.setMinClaimAmount(0);
+        address residualOwner = address(0xD057);
+        vm.prank(user1);
+        vault.transfer(residualOwner, 100); // 0.0001 USDC gross, below former 0.001 floor
+        vm.prank(residualOwner);
+        (bool instant,,) = IQueueModule(address(vault)).requestInstantWithdrawal(100);
+        assertTrue(instant);
+        assertEq(vault.balanceOf(residualOwner), 0);
+        assertGt(usdc.balanceOf(residualOwner), 0);
+    }
+
+    function test_noClaimFloor_tinyFullQueuedExitCanBeClaimed() public {
+        params.setDepositLimits(0, 0, 100e6);
+        params.setMinClaimAmount(0);
+        address residualOwner = address(0xD057);
+        vm.prank(user1);
+        vault.transfer(residualOwner, 100);
+        vm.prank(residualOwner);
+        (uint256 epoch, uint256 claim) = IQueueModule(address(vault)).requestEpochWithdrawal(100);
+        assertEq(vault.balanceOf(residualOwner), 0);
+        vm.warp(block.timestamp + 7 days + 1);
+        IQueueModule(address(vault)).closeCurrentEpoch();
+        IQueueModule(address(vault)).fundEpoch(epoch);
+        vm.prank(residualOwner);
+        uint256 paid = IQueueModule(address(vault)).claimEpochAssets(epoch, claim);
+        assertGt(paid, 0);
+        assertEq(usdc.balanceOf(residualOwner), paid);
+        assertEq(IQueueModule(address(vault)).outstandingClaimCount(), 0);
+    }
+
+    function test_noClaimFloor_instantFallbackQueuesTinyResidual() public {
+        params.setDepositLimits(0, 0, 100e6);
+        params.setMinClaimAmount(0);
+        params.setLockPeriod(1 days); // force the instant path into the queue
+        vm.warp(1 hours);
+        address residualOwner = address(0xD057);
+        vm.prank(user1);
+        vault.transfer(residualOwner, 100);
+        vm.prank(residualOwner);
+        (bool instant,, uint256 claim) = IQueueModule(address(vault)).requestInstantWithdrawal(100);
+        assertFalse(instant);
+        assertGt(claim, 0);
+        assertEq(vault.balanceOf(residualOwner), 0);
+        assertEq(IQueueModule(address(vault)).totalEscrowedShares(), 100);
+    }
+
     function test_minClaimAmount_blocksQueuedDustClaim() public {
         params.setMinClaimAmount(50e6);
 

@@ -36,6 +36,7 @@ contract GlobalConfig is IParamsProvider {
     event DefaultWithdrawalUpdated(WithdrawalConfig cfg);
     event DefaultDynamicCapUpdated(DynamicCapConfig cfg);
     event DefaultQueueUpdated(QueueConfig cfg);
+    event VaultQueueOverrideUpdated(address indexed vault, QueueConfig cfg);
     event DefaultSecurityUpdated(SecurityConfig cfg);
     event DefaultBufferUpdated(BufferConfig cfg);
     event DefaultStrategyUpdated(StrategyConfig cfg);
@@ -255,7 +256,7 @@ contract GlobalConfig is IParamsProvider {
             capPerEpochBps: 1000, // 10%
             maxWithdrawalPerBlock: 0,
             maxWithdrawalPerTx: 0,
-            minClaimAmount: 100e6, // 100 USDC
+            minClaimAmount: 0, // No exit floor: users can withdraw residual balances
             lockPeriod: _lockPeriod
         });
 
@@ -460,6 +461,31 @@ contract GlobalConfig is IParamsProvider {
             }));
     }
 
+    /// @notice Update queue defaults for vaults without a QUEUE override.
+    /// @dev Duration is read at settlement time, including by already-open epochs.
+    function setDefaultQueue(QueueConfig calldata cfg) external onlyGovernor {
+        _validateQueueConfig(cfg);
+        defaultQueue = cfg;
+        emit DefaultQueueUpdated(cfg);
+    }
+
+    /// @notice Set the complete queue configuration for one vault.
+    /// @dev Changing duration also changes eligibility of its currently open epoch.
+    function setVaultQueueOverride(address vault, QueueConfig calldata cfg) external onlyGovernor {
+        if (vault == address(0)) revert ZeroAddress();
+        _validateQueueConfig(cfg);
+        vaultQueueOverrides[vault] = cfg;
+        hasOverride[vault][ParamType.QUEUE] = true;
+        emit VaultOverrideSet(vault, ParamType.QUEUE);
+        emit VaultQueueOverrideUpdated(vault, cfg);
+    }
+
+    function _validateQueueConfig(QueueConfig calldata cfg) internal pure {
+        if (cfg.maxClaimsPerUserPerEpoch == 0) revert InvalidMaxActions();
+        if (cfg.epochDuration < 1 hours || cfg.epochDuration > 30 days) revert InvalidDelay();
+        if (cfg.cooldownPerClaim > cfg.epochDuration) revert InvalidDelay();
+    }
+
     /* ========== PER-VAULT OVERRIDE SETTERS ========== */
 
     /// @notice Set vault-specific fee override
@@ -515,8 +541,8 @@ contract GlobalConfig is IParamsProvider {
 
     /// @notice Per-vault withdrawal config override — completes the previously dead
     ///         WITHDRAWAL override path (vaultWithdrawalOverrides/DefaultWithdrawalUpdated
-    ///         existed but nothing ever wrote them). Needed for non-USDC vaults: minClaimAmount
-    ///         is asset-unit denominated and the global default (100e6) assumes 6dp.
+    ///         existed but nothing ever wrote them). minClaimAmount is denominated in
+    ///         asset units; zero disables the exit floor independently of deposit limits.
     function setVaultWithdrawalOverride(address vault, WithdrawalConfig calldata cfg)
         external
         onlyGovernor
@@ -525,6 +551,21 @@ contract GlobalConfig is IParamsProvider {
         vaultWithdrawalOverrides[vault] = cfg;
         hasOverride[vault][ParamType.WITHDRAWAL] = true;
         emit VaultOverrideSet(vault, ParamType.WITHDRAWAL);
+    }
+
+    /// @notice Set vault-specific dynamic instant-withdrawal cap parameters.
+    /// @dev Keeps the queue-stress threshold proportional to each vault's real
+    ///      launch cap instead of inheriting the 10M-USDC default configuration.
+    function setVaultDynamicCapOverride(address vault, DynamicCapConfig calldata cfg)
+        external
+        onlyGovernor
+    {
+        if (vault == address(0)) revert ZeroAddress();
+        if (cfg.minBps > cfg.maxBps || cfg.maxBps > 10000) revert InvalidBps();
+        if (cfg.queueStressThreshold == 0) revert InvalidDelay();
+        vaultDynamicCapOverrides[vault] = cfg;
+        hasOverride[vault][ParamType.DYNAMIC_CAP] = true;
+        emit VaultOverrideSet(vault, ParamType.DYNAMIC_CAP);
     }
 
     function setVaultAdapterOverride(address vault, address adapter, bool allowed, uint256 cap)

@@ -25,9 +25,10 @@ contract GlobalConfig_VaultOverrides_Decimals_Test is Test {
     // setVaultWithdrawalOverride
     // ═══════════════════════════════════════════════════════════════════
 
-    function test_withdrawalOverride_defaultsTo6dpGlobal_beforeOverride() public view {
+    function test_withdrawalDefaultHasNoFloorAndDepositMinimumIsIndependent() public view {
         IParamsProvider.WithdrawalParams memory p = cfg.getWithdrawalParams(vault);
-        assertEq(p.minClaimAmount, 100e6, "global default is 100 USDC (6dp)");
+        assertEq(p.minClaimAmount, 0, "no withdrawal minimum");
+        assertEq(cfg.getDepositLimits(vault).minDepositAmount, 100e6, "100 USDC deposit minimum");
     }
 
     function test_setVaultWithdrawalOverride_appliesPerVault_18dp() public {
@@ -47,7 +48,7 @@ contract GlobalConfig_VaultOverrides_Decimals_Test is Test {
 
         // A different, unconfigured vault must still see the untouched global default.
         address otherVault = makeAddr("otherVault");
-        assertEq(cfg.getWithdrawalParams(otherVault).minClaimAmount, 100e6);
+        assertEq(cfg.getWithdrawalParams(otherVault).minClaimAmount, 0);
     }
 
     function test_setVaultWithdrawalOverride_onlyGovernor() public {

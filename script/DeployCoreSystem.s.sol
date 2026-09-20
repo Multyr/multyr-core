@@ -33,6 +33,7 @@ import { IBufferManager } from "@multyr-core/interfaces/IBufferManager.sol";
 import { IAdminModule } from "@multyr-core/interfaces/IAdminModule.sol";
 import { IQueueModule } from "@multyr-core/interfaces/IQueueModule.sol";
 import { IIncentives } from "@multyr-core/interfaces/IIncentives.sol";
+import { IParamsProvider } from "@multyr-core/interfaces/IParamsProvider.sol";
 
 // Security
 import { SelectorRegistry } from "@multyr-core/core/libraries/SelectorRegistry.sol";
@@ -62,6 +63,9 @@ import { ChainConfig } from "./config/ChainConfig.sol";
 ///                  DEPLOY_INCENTIVES (opt), DEPLOY_UPKEEP (opt), DEPLOY_WARM_ADAPTERS (opt),
 ///                  CHAINLINK_USDC_FEED (opt, default from ChainConfig), SKIP_ORACLE_CONFIG (opt),
 ///                  MORPHO_VAULT (required on chains with no vetted default -- see ChainConfig),
+///                  VAULT_DEPOSIT_CAP, USER_DEPOSIT_CAP, MIN_DEPOSIT_AMOUNT,
+///                  QUEUE_STRESS_THRESHOLD, WARM_ADAPTER_ALLOWANCE_CAP,
+///                  ENABLE_SMALL_TEST_WITHDRAWALS (test only),
 ///                  OUTPUT_JSON (opt)
 /// @custom:post-deploy 1) Run DeployUsdcLendingStrategy.s.sol with vault+ecosystem addresses
 ///                     2) Timelock: acceptOwnerTransfer + setAuthorizedSealer + systemSealer.verifyAndSeal(config)
@@ -511,6 +515,60 @@ contract DeployCoreSystem is Script {
         result.healthRegistry.setAuthorizedCaller(address(result.vault), true);
         result.healthRegistry.setAuthorizedCaller(address(result.strategyRouter), true);
 
+        // 5.5b Launch limits. These are explicit per-vault overrides so the
+        // launch vault never inherits the broad 10M-USDC defaults by accident.
+        uint256 vaultDepositCap = vm.envOr("VAULT_DEPOSIT_CAP", uint256(10_000_000e6));
+        uint256 userDepositCap = vm.envOr("USER_DEPOSIT_CAP", uint256(500_000e6));
+        uint256 minDepositAmount = vm.envOr("MIN_DEPOSIT_AMOUNT", uint256(100e6));
+        uint256 queueStressThreshold = vm.envOr("QUEUE_STRESS_THRESHOLD", uint256(100));
+        result.globalConfig.setVaultDepositLimits(
+            address(result.vault), vaultDepositCap, userDepositCap, minDepositAmount
+        );
+        result.globalConfig.setVaultDynamicCapOverride(
+            address(result.vault),
+            GlobalConfig.DynamicCapConfig({
+                minBps: 200,
+                maxBps: 2000,
+                queueStressThreshold: queueStressThreshold,
+                enabled: false
+            })
+        );
+        IParamsProvider.DepositLimits memory limits =
+            result.globalConfig.getDepositLimits(address(result.vault));
+        IParamsProvider.DynamicCapParams memory dynamicCap =
+            result.globalConfig.getDynamicCapParams(address(result.vault));
+        require(limits.vaultDepositCap == vaultDepositCap, "DEPLOY_BUG: vault cap mismatch");
+        require(limits.userDepositCap == userDepositCap, "DEPLOY_BUG: user cap mismatch");
+        require(limits.minDepositAmount == minDepositAmount, "DEPLOY_BUG: min deposit mismatch");
+        require(
+            dynamicCap.queueStressThreshold == queueStressThreshold,
+            "DEPLOY_BUG: queue threshold mismatch"
+        );
+        require(
+            result.globalConfig.getQueueParams(address(result.vault)).epochDuration == 7 days,
+            "DEPLOY_BUG: epoch duration mismatch"
+        );
+        console.log("[5.5b] Vault deposit cap:", vaultDepositCap);
+        console.log("       User deposit cap:", userDepositCap);
+        console.log("       Minimum deposit:", minDepositAmount);
+        console.log("       Queue stress threshold:", queueStressThreshold);
+
+        // Disposable smoke-test override. Restore the standard withdrawal
+        // settings immediately after the deposit/withdraw round trip.
+        if (vm.envOr("ENABLE_SMALL_TEST_WITHDRAWALS", false)) {
+            result.globalConfig.setVaultWithdrawalOverride(
+                address(result.vault),
+                GlobalConfig.WithdrawalConfig({
+                    capPerEpochBps: 10000,
+                    maxWithdrawalPerBlock: 0,
+                    maxWithdrawalPerTx: 0,
+                    minClaimAmount: 0,
+                    lockPeriod: 0
+                })
+            );
+            console.log("       Small immediate withdrawals enabled for smoke test");
+        }
+
         // 5.6 Oracle
         if (cfg.configureOracle && cfg.chainlinkUsdcFeed != address(0)) {
             console.log("[5.6] Configuring price oracle feed...");
@@ -552,6 +610,8 @@ contract DeployCoreSystem is Script {
             RECOVERY_MIN_DELAY,
             RECOVERY_COOLDOWN
         );
+        require(result.recoveryGate.minDelay() == RECOVERY_MIN_DELAY, "DEPLOY_BUG: recovery delay mismatch");
+        require(result.recoveryGate.cooldown() == RECOVERY_COOLDOWN, "DEPLOY_BUG: recovery cooldown mismatch");
         result.vault.setRecoveryGate(address(result.recoveryGate));
         require(result.vault.recoveryGate() == address(result.recoveryGate), "DEPLOY_BUG: recoveryGate not wired");
         console.log("  RecoveryGate:", address(result.recoveryGate));

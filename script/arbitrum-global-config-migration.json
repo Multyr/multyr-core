@@ -1,0 +1,36 @@
+{
+  "chainId": 42161,
+  "oldGlobalConfig": "0x67881EC6Af7cCFa347fC09FF1D97Fe86b419e0fc",
+  "globalConfig": "0x16968cA72bE6CBfCaC8A8a87349EE5706f771a2e",
+  "coreVault": "0x4575Ec0dD1ED08FD4F426665E5B56442594189bb",
+  "strategyRouter": "0x8EeF3Cb022B0d70Fe70a4CA6759C977e5718b8e7",
+  "governor": "0xE2812E869F8005397130CCDF1aaabd75447844df",
+  "queue": {
+    "maxClaimsPerUserPerEpoch": 10,
+    "cooldownPerClaim": 3600,
+    "epochDuration": 3600
+  },
+  "vaultUpkeepGlobalConfig": "0x8fE1cbc7fC2A469B5b5904EA5e5C4D09c583eDD6",
+  "transactions": [
+    {
+      "transactionHash": "0x99a88f71023ddd376fc2a9216bcc127a490349c383b7eb07b6106dd4e93e2a5d",
+      "status": "0x1",
+      "contractAddress": "0x16968ca72be6cbfcac8a8a87349ee5706f771a2e",
+      "blockNumber": "0x1e30526c"
+    },
+    {
+      "transactionHash": "0x95cd6f2bbf04ca1a363424d71c1ab7525024c31efcb231aadb3868082ed307c4",
+      "status": "0x1",
+      "contractAddress": null,
+      "blockNumber": "0x1e30527a"
+    },
+    {
+      "transactionHash": "0xe95258668457ebf84b3bde9ed9adf8bbc085685dc6ff89203cee51030605d1e0",
+      "status": "0x1",
+      "contractAddress": null,
+      "blockNumber": "0x1e305280"
+    }
+  ],
+  "sourceVerification": "Not yet submitted for this latest replacement",
+  "minClaimAmount": 1000
+}

@@ -20,6 +20,9 @@ import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/I
 ///      causing deposit() to mint too many shares (dilution attack).
 ///      See test: test_invariant_bufferManager_never_holds_idle_assets()
 contract BufferManager is IBufferManager, ReentrancyGuard {
+    event AdapterCallFailed(address indexed adapter, bytes4 indexed selector, uint256 timestamp, bytes data);
+
+
     using SafeERC20 for IERC20;
 
     error NotOwner();
@@ -712,7 +715,8 @@ contract BufferManager is IBufferManager, ReentrancyGuard {
                 if (got == 0) break;
                 received += got;
                 remaining = got >= remaining ? 0 : remaining - got;
-            } catch {
+            } catch (bytes memory reason) {
+                emit AdapterCallFailed(adapter, IWarmAdapter.withdraw.selector, block.timestamp, reason);
                 emit WarmWithdrawAdapterFailed(adapter, remaining);
                 break;
             }
@@ -740,7 +744,8 @@ contract BufferManager is IBufferManager, ReentrancyGuard {
                 }
                 emit BufferDeployed(amount, received);
                 return true;
-            } catch {
+            } catch (bytes memory reason) {
+                emit AdapterCallFailed(adapter, IWarmAdapter.deposit.selector, block.timestamp, reason);
                 // Try next adapter
             }
             unchecked {
