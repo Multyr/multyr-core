@@ -18,11 +18,13 @@ import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/I
 
 import { CoreHarness } from "../../helpers/CoreHarness.sol";
 import { MockUSDC } from "../../helpers/MockUSDC.sol";
+import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTests.sol";
 import { ERC4626Module } from "../../../src/core/modules/ERC4626Module.sol";
 import { EpochedQueueModule } from "../../../src/core/modules/EpochedQueueModule.sol";
 import { EpochQueueStorage } from "../../../src/core/modules/EpochedQueueModule.sol";
 import { CoreStorage } from "../../../src/core/storage/CoreStorage.sol";
 import { MockQueueEpochParamsProvider } from "../../sprint-test/QueueEpochModule_WithdrawFlow_POC.t.sol";
+import { ICoreVault } from "../../../src/interfaces/ICoreVault.sol";
 
 contract EpochedQueueModule_Test is Test {
     address constant USDC_UNDERLYING = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
@@ -107,68 +109,30 @@ contract EpochedQueueModule_Test is Test {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // cancelEpochWithdrawal
+    // No cancellation (economic exit at request, spec §6.3 / W-10)
     // ═══════════════════════════════════════════════════════════════════════
 
-    function test_cancelEpochWithdrawal_returnsShares_andDecrementsTotals() public {
+    function test_noCancelPath_acceptedRequestIsAFixedLiability() public {
         uint256 shares = _deposit(user, 1_000_000e6);
 
         vm.prank(user);
         (uint256 epochId, uint256 claimId) =
             EpochedQueueModule(address(core)).requestEpochWithdrawal(shares);
 
+        // Economic exit: shares are gone, the amount owed is a fixed liability.
+        assertEq(core.balanceOf(user), 0, "shares burned at request");
+        assertEq(core.totalOwed(), 1_000_000e6, "assetsOwed recorded as liability");
         assertEq(EpochedQueueModule(address(core)).outstandingClaimCount(), 1);
-        assertEq(EpochedQueueModule(address(core)).totalEscrowedShares(), shares);
 
+        // The selector is no longer routed: every former cancel path reverts.
         vm.prank(user);
-        EpochedQueueModule(address(core)).cancelEpochWithdrawal(epochId, claimId);
+        (bool ok,) = address(core).call(
+            abi.encodeWithSignature("cancelEpochWithdrawal(uint256,uint256)", epochId, claimId)
+        );
+        assertFalse(ok, "cancelEpochWithdrawal must not exist");
 
-        assertEq(core.balanceOf(user), shares, "shares returned to user");
-        assertEq(EpochedQueueModule(address(core)).outstandingClaimCount(), 0);
-        assertEq(EpochedQueueModule(address(core)).totalEscrowedShares(), 0);
-
-        EpochQueueStorage.EpochData memory epoch = EpochedQueueModule(address(core)).epochData(epochId);
-        assertEq(epoch.claimCount, 0);
-        assertEq(epoch.totalGrossShares, 0);
-    }
-
-    function test_cancelEpochWithdrawal_revertsForNonOwner() public {
-        uint256 shares = _deposit(user, 1_000_000e6);
-        vm.prank(user);
-        (uint256 epochId, uint256 claimId) =
-            EpochedQueueModule(address(core)).requestEpochWithdrawal(shares);
-
-        vm.prank(userB);
-        vm.expectRevert(EpochedQueueModule.NotClaimOwner.selector);
-        EpochedQueueModule(address(core)).cancelEpochWithdrawal(epochId, claimId);
-    }
-
-    function test_cancelEpochWithdrawal_revertsIfAlreadyCancelled() public {
-        uint256 shares = _deposit(user, 1_000_000e6);
-        vm.prank(user);
-        (uint256 epochId, uint256 claimId) =
-            EpochedQueueModule(address(core)).requestEpochWithdrawal(shares);
-
-        vm.prank(user);
-        EpochedQueueModule(address(core)).cancelEpochWithdrawal(epochId, claimId);
-
-        vm.prank(user);
-        vm.expectRevert(EpochedQueueModule.ClaimAlreadySettled.selector);
-        EpochedQueueModule(address(core)).cancelEpochWithdrawal(epochId, claimId);
-    }
-
-    function test_cancelEpochWithdrawal_revertsOnceEpochClosed() public {
-        uint256 shares = _deposit(user, 1_000_000e6);
-        vm.prank(user);
-        (uint256 epochId, uint256 claimId) =
-            EpochedQueueModule(address(core)).requestEpochWithdrawal(shares);
-
-        vm.warp(block.timestamp + 7 days + 1);
-        EpochedQueueModule(address(core)).closeCurrentEpoch();
-
-        vm.prank(user);
-        vm.expectRevert(EpochedQueueModule.EpochNotOpen.selector);
-        EpochedQueueModule(address(core)).cancelEpochWithdrawal(epochId, claimId);
+        assertEq(core.balanceOf(user), 0, "still no shares");
+        assertEq(core.totalOwed(), 1_000_000e6, "liability unchanged");
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -222,8 +186,7 @@ contract EpochedQueueModule_Test is Test {
 
         // Simulate capital deployed elsewhere: drain the vault's hot balance
         // so fundEpoch() sees an unfundable deficit on the first call.
-        vm.prank(address(core));
-        IERC20(USDC_UNDERLYING).transfer(makeAddr("elsewhere"), 900_000e6);
+        _moveHotToWarm(900_000e6); // stays in gross (warm bucket): solvent, but no hot cash
 
         EpochedQueueModule(address(core)).fundEpoch(epochId);
         EpochQueueStorage.EpochData memory epochAfterFirst =
@@ -241,10 +204,10 @@ contract EpochedQueueModule_Test is Test {
             EpochedQueueModule(address(core)).epochData(epochId);
         assertTrue(
             epochAfterSecond.state == EpochQueueStorage.EpochState.Funded,
-            "retry succeeds once hot balance covers totalNetAssets"
+            "retry succeeds once hot balance covers the epoch's assetsOwed"
         );
-        // No double counting: totalNetAssets is unchanged across retries.
-        assertEq(epochAfterFirst.totalNetAssets, epochAfterSecond.totalNetAssets);
+        // No double counting: totalAssetsOwed is unchanged across retries.
+        assertEq(epochAfterFirst.totalAssetsOwed, epochAfterSecond.totalAssetsOwed);
 
         vm.prank(user);
         uint256 assets = EpochedQueueModule(address(core)).claimEpochAssets(epochId, claimId);
@@ -265,8 +228,7 @@ contract EpochedQueueModule_Test is Test {
         EpochQueueStorage.EpochData memory epoch0 = EpochedQueueModule(address(core)).epochData(0);
         assertTrue(epoch0.state == EpochQueueStorage.EpochState.Closed);
         assertEq(epoch0.totalNetShares, 0);
-        assertEq(epoch0.totalNetAssets, 0, "no division-by-zero weirdness: zero shares -> zero assets");
-        assertEq(epoch0.ppsAtClose, 1e18, "empty-supply PPS defaults to WAD");
+        assertEq(epoch0.totalAssetsOwed, 0, "an empty bucket owes nothing");
 
         assertEq(EpochedQueueModule(address(core)).currentEpochId(), 1, "next epoch opened");
     }
@@ -318,9 +280,9 @@ contract EpochedQueueModule_Test is Test {
         vm.warp(t);
         EpochedQueueModule(address(core)).closeCurrentEpoch(); // opens epoch 1
 
-        // Drain hot so epoch 0 CANNOT be funded yet.
-        vm.prank(address(core));
-        IERC20(USDC_UNDERLYING).transfer(makeAddr("elsewhere"), 950_000e6);
+        // Move hot into the warm bucket so epoch 0 CANNOT be funded yet (still solvent:
+        // draining it would put the vault in insolvency mode and block new requests).
+        _moveHotToWarm(950_000e6);
 
         // Epoch 1: userB's claim, funded normally (ample remaining liquidity).
         _deposit(userB, 500_000e6);
@@ -378,11 +340,7 @@ contract EpochedQueueModule_Test is Test {
             "Alice's payout is now reserved"
         );
 
-        // NAV drops 50% (e.g. a strategy loss) -- drain hot directly by
-        // exactly what's reserved for Alice, leaving hot == reservedForClaims.
-        vm.prank(address(core));
-        IERC20(USDC_UNDERLYING).transfer(makeAddr("elsewhere"), 1_000_000e6);
-
+        // userB's exit is priced NOW (economic exit at request): 500k owed, bucket epoch 1.
         vm.prank(userB);
         EpochedQueueModule(address(core)).requestEpochWithdrawal(500_000e6);
 
@@ -390,12 +348,17 @@ contract EpochedQueueModule_Test is Test {
         vm.warp(t);
         EpochedQueueModule(address(core)).closeCurrentEpoch(); // opens epoch 2
         uint256 epoch1Id = epoch0Id + 1;
-        EpochQueueStorage.EpochData memory e1Closed = EpochedQueueModule(address(core)).epochData(epoch1Id);
-        assertEq(e1Closed.ppsAtClose, 0.5e18, "NAV halved relative to unchanged supply");
 
-        // Pre-fix, fundEpoch compared hot(1,000,000) >= totalNetAssets(250,000)
+        // Move hot cash into the (mock) warm bucket: the portfolio is still
+        // solvent (gross 2M >= owed 1.5M) but hot is down to exactly what is
+        // reserved for Alice. The cash a LATER epoch needs is not on hand.
+        _moveHotToWarm(1_000_000e6);
+        assertEq(IERC20(USDC_UNDERLYING).balanceOf(address(core)), 1_000_000e6);
+        assertFalse(core.isInsolvent(), "still solvent: the money is only illiquid");
+
+        // Pre-fix, fundEpoch compared hot(1,000,000) >= epoch need(500,000)
         // directly and would have wrongly marked epoch 1 Funded out of
-        // Alice's reserved cash. Post-fix it must stay CLOSED.
+        // Alice's reserved cash. It must stay CLOSED.
         EpochedQueueModule(address(core)).fundEpoch(epoch1Id);
         EpochQueueStorage.EpochData memory e1After = EpochedQueueModule(address(core)).epochData(epoch1Id);
         assertTrue(
@@ -406,7 +369,17 @@ contract EpochedQueueModule_Test is Test {
         // Alice's original Funded claim is still fully payable.
         vm.prank(user);
         uint256 assets = EpochedQueueModule(address(core)).claimEpochAssets(epoch0Id, aliceClaimId);
-        assertEq(assets, 1_000_000e6, "Alice paid in full despite the later NAV drop and funding attempt");
+        assertEq(assets, 1_000_000e6, "Alice paid in full: solvent, so liabilityIndex == 1e18");
+    }
+
+    /// @dev Simulates capital sitting in the warm bucket: hot cash leaves the
+    ///      vault, and the (mock) BufferManager reports it as warm NAV.
+    function _moveHotToWarm(uint256 amount) internal {
+        vm.prank(address(core));
+        IERC20(USDC_UNDERLYING).transfer(makeAddr("warmAdapter"), amount);
+        MockBufferManagerForTests bm = MockBufferManagerForTests(address(core.bufferManager()));
+        (uint256 nav,,) = bm.warmNavState();
+        bm.setWarmNav(nav + amount, uint40(block.timestamp), true);
     }
 
     function test_canInstant_rejectsExit_thatWouldDipIntoReservedForClaims() public {
@@ -422,9 +395,9 @@ contract EpochedQueueModule_Test is Test {
         EpochedQueueModule(address(core)).fundEpoch(epoch0Id);
         assertEq(EpochedQueueModule(address(core)).reservedForClaims(), 1_000_000e6);
 
-        // Drain hot down to exactly reservedForClaims -- zero free liquidity.
-        vm.prank(address(core));
-        IERC20(USDC_UNDERLYING).transfer(makeAddr("elsewhere"), 1_000_000e6);
+        // Hot down to exactly reservedForClaims -- zero free liquidity -- while
+        // the portfolio stays solvent (the rest sits in the warm bucket).
+        _moveHotToWarm(1_000_000e6);
 
         // Pre-fix, _canInstant compared raw hot(1,000,000) >= gross and would
         // have let this through, spending into Alice's reserved payout.
@@ -434,8 +407,7 @@ contract EpochedQueueModule_Test is Test {
 
         assertFalse(settledImmediately, "instant exit must not dip into cash reserved for a funded epoch");
 
-        // Alice's reservation is untouched, still fully payable at her locked
-        // ppsAtClose (unaffected by the live-pps drop from the drain above).
+        // Alice's reservation is untouched, still fully payable.
         vm.prank(user);
         uint256 assets = EpochedQueueModule(address(core)).claimEpochAssets(epoch0Id, aliceClaimId);
         assertEq(assets, 1_000_000e6);
@@ -566,11 +538,11 @@ contract EpochedQueueModule_Test is Test {
         );
     }
 
-    /// @dev Write oldestUnfundedEpochId directly. The field sits at offset 6 of
+    /// @dev Write oldestUnfundedEpochId directly. The field sits at offset 5 of
     ///      EpochQueueStorage.Layout (currentEpochId, three mappings,
-    ///      escrowedShares, outstandingClaimCount, then this one).
+    ///      outstandingClaimCount, then this one).
     function _forceCursor(uint256 value) internal {
-        vm.store(address(core), bytes32(uint256(EpochQueueStorage.SLOT) + 6), bytes32(value));
+        vm.store(address(core), bytes32(uint256(EpochQueueStorage.SLOT) + 5), bytes32(value));
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -602,11 +574,10 @@ contract EpochedQueueModule_Test is Test {
         vm.warp(t);
         EpochedQueueModule(address(core)).closeCurrentEpoch();
 
-        uint256 owed = EpochedQueueModule(address(core)).epochData(epochId).totalNetAssets;
+        uint256 owed = EpochedQueueModule(address(core)).epochData(epochId).totalAssetsOwed;
 
         // Drain most of the hot balance so the epoch cannot be funded.
-        vm.prank(address(core));
-        IERC20(USDC_UNDERLYING).transfer(makeAddr("elsewhere"), 900_000e6);
+        _moveHotToWarm(900_000e6); // stays in gross (warm bucket): solvent, but no hot cash
         uint256 hotLeft = IERC20(USDC_UNDERLYING).balanceOf(address(core));
 
         vm.expectEmit(true, false, false, true, address(core));
@@ -631,7 +602,7 @@ contract EpochedQueueModule_Test is Test {
         vm.warp(t);
         EpochedQueueModule(address(core)).closeCurrentEpoch();
 
-        uint256 owed = EpochedQueueModule(address(core)).epochData(epochId).totalNetAssets;
+        uint256 owed = EpochedQueueModule(address(core)).epochData(epochId).totalAssetsOwed;
         uint256 hot = IERC20(USDC_UNDERLYING).balanceOf(address(core));
 
         vm.recordLogs();
@@ -673,7 +644,7 @@ contract EpochedQueueModule_Test is Test {
 
         vm.prank(user);
         vm.expectRevert(EpochedQueueModule.ReentrancyGuardLocked.selector);
-        EpochedQueueModule(address(core)).cancelEpochWithdrawal(epochId, claimId);
+        EpochedQueueModule(address(core)).requestEpochWithdrawal(1);
 
         vm.expectRevert(EpochedQueueModule.ReentrancyGuardLocked.selector);
         EpochedQueueModule(address(core)).closeCurrentEpoch();

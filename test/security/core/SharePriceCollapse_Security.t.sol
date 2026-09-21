@@ -80,7 +80,7 @@ contract SharePriceCollapse_Security is Test {
         vault.setModule(
             EpochedQueueModule.requestEpochWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
-        vault.setModule(EpochedQueueModule.cancelEpochWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.syncInsolvencyState.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(EpochedQueueModule.closeCurrentEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(EpochedQueueModule.fundEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(EpochedQueueModule.claimEpochAssets.selector, address(queueModule), vault.ROLE_PUBLIC());
@@ -89,7 +89,7 @@ contract SharePriceCollapse_Security is Test {
             EpochedQueueModule.requestInstantWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
         vault.setModule(
-            EpochedQueueModule.totalEscrowedShares.selector, address(queueModule), vault.ROLE_PUBLIC()
+            EpochedQueueModule.syncInsolvencyState.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
         vault.setModule(EpochedQueueModule.outstandingClaimCount.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(EpochedQueueModule.reservedForClaims.selector, address(queueModule), vault.ROLE_PUBLIC());
@@ -230,18 +230,17 @@ contract SharePriceCollapse_Security is Test {
 
         uint256 aliceShares = vault.balanceOf(alice);
 
-        // Alice requests claim (shares escrowed)
+        // Alice requests an exit: priced at 1.0 and her shares burned NOW
         vm.startPrank(alice);
         (uint256 epochId, uint256 claimId) =
             IQueueModule(address(vault)).requestEpochWithdrawal(aliceShares);
         vm.stopPrank();
 
-        uint256 pendingShares = IQueueModule(address(vault)).totalEscrowedShares();
-        assertEq(pendingShares, aliceShares, "Shares should be escrowed");
+        uint256 owed = IQueueModule(address(vault)).totalOwed();
+        assertApproxEqRel(owed, aliceShares, 0.01e18, "liability fixed at request price (net of fee)");
 
-        // Check that escrowed shares are held by vault
-        uint256 vaultShares = vault.balanceOf(address(vault));
-        assertEq(vaultShares, aliceShares, "Vault should hold escrowed shares");
+        // Nothing is escrowed any more
+        assertEq(vault.balanceOf(address(vault)), 0, "Vault holds no escrowed shares");
 
         // COLLAPSE: 80% loss
         uint256 totalAssets = vault.totalAssets();
@@ -253,21 +252,22 @@ contract SharePriceCollapse_Security is Test {
         uint256 sharePrice = vault.convertToAssets(1e18);
         console2.log("Share price after collapse:", sharePrice);
 
-        // Settle Alice's claim: close AFTER the collapse locks PPS at the reduced price
+        // Settle Alice's claim: the collapse is borne by Bob, the remaining holder;
+        // Alice is a creditor with a fixed claim and is not affected by it.
         vm.warp(block.timestamp + 7 days);
         IQueueModule(address(vault)).closeCurrentEpoch();
         IQueueModule(address(vault)).fundEpoch(epochId);
         vm.prank(alice);
         IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
 
-        // Alice should receive proportional assets
+        // Alice receives exactly the amount fixed at request, whatever happened after
         uint256 aliceBalance = usdc.balanceOf(alice);
         console2.log("Alice received:", aliceBalance / 1e6, "USDC");
-        assertGt(aliceBalance, 0, "Alice should receive assets");
+        assertEq(aliceBalance, owed, "Alice is paid the fixed assetsOwed");
 
         // pendingShares should be reduced
         assertEq(
-            IQueueModule(address(vault)).totalEscrowedShares(), 0, "Pending shares should be cleared"
+            IQueueModule(address(vault)).totalOwed(), 0, "Pending shares should be cleared"
         );
         assertEq(vault.balanceOf(address(vault)), 0, "Vault should not hold shares");
     }
@@ -293,48 +293,43 @@ contract SharePriceCollapse_Security is Test {
             IQueueModule(address(vault)).requestEpochWithdrawal(claimShares);
         vm.stopPrank();
 
-        // CORRECT accounting check BEFORE collapse
-        // Escrowed shares are in vault balance AND counted in totalEscrowedShares
-        uint256 vaultBalance = vault.balanceOf(address(vault));
-        uint256 pendingShares = IQueueModule(address(vault)).totalEscrowedShares();
-        assertEq(vaultBalance, pendingShares, "Vault balance should equal pending shares");
-
-        // totalSupply stays the same (shares transferred, not burned)
-        assertEq(vault.totalSupply(), initialSupply, "totalSupply unchanged after request");
+        // Economic exit: nothing sits in escrow, the net shares were burned at request
+        // and the amount owed is recorded as a fixed liability.
+        uint256 owed = IQueueModule(address(vault)).totalOwed();
+        assertEq(vault.balanceOf(address(vault)), 0, "no escrow: shares burned at request");
+        assertLt(vault.totalSupply(), initialSupply, "totalSupply decreased at request");
+        assertApproxEqRel(owed, claimShares, 0.01e18, "liability fixed at the request price");
+        uint256 supplyAfterRequest = vault.totalSupply();
 
         // COLLAPSE
         uint256 totalAssets = vault.totalAssets();
         vm.prank(address(vault));
         usdc.transfer(address(0xDEAD), (totalAssets * 90) / 100);
 
-        // Accounting check AFTER collapse (before settlement)
-        assertEq(
-            vault.balanceOf(address(vault)),
-            IQueueModule(address(vault)).totalEscrowedShares(),
-            "Escrow accounting should survive collapse"
-        );
-        assertEq(vault.totalSupply(), initialSupply, "totalSupply still unchanged");
+        // Accounting check AFTER collapse (before settlement): the liability is fixed
+        assertEq(IQueueModule(address(vault)).totalOwed(), owed, "liability survives the collapse");
+        assertEq(vault.totalSupply(), supplyAfterRequest, "totalSupply unchanged by the collapse");
 
-        // Settle: close AFTER the collapse locks PPS at the reduced price
+        // Settle: the claim pays the fixed amount
         vm.warp(block.timestamp + 7 days);
         IQueueModule(address(vault)).closeCurrentEpoch();
         IQueueModule(address(vault)).fundEpoch(epochId);
         vm.prank(alice);
         IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
 
-        // After settlement, escrowed shares are burned
-        assertTrue(vault.totalSupply() < initialSupply, "Shares should be burned");
-        assertEq(IQueueModule(address(vault)).totalEscrowedShares(), 0, "No pending shares");
+        // After settlement the liability is discharged (the shares were burned at request)
+        assertEq(vault.totalSupply(), supplyAfterRequest, "settlement burns nothing");
+        assertEq(IQueueModule(address(vault)).totalOwed(), 0, "No pending liability");
+        assertEq(usdc.balanceOf(alice), owed, "paid the fixed amount");
         assertEq(vault.balanceOf(address(vault)), 0, "Vault should not hold shares");
     }
 
     /**
      * @notice THE ORDER THE EPOCH MODEL INTRODUCES: close first, collapse
-     *         after. Every other collapse test here closes the epoch AFTER the
-     *         loss, which locks ppsAtClose at the already-reduced price and is
-     *         the harmless direction. Closing first locks the price HIGH and
-     *         then removes the assets backing it, which is where the original
-     *         unpayable-claimant bug lived.
+     *         after. (Under economic exit the price is fixed at request either way;
+     *         what this order exercises is a FUNDED claim whose backing cash must
+     *         survive a later loss, which is where the original unpayable-claimant
+     *         bug lived.)
      * @dev The reservation is what makes this safe now: epoch 0 can only be
      *      marked Funded while the vault genuinely holds its liability, and
      *      once reserved that cash cannot be spent by anything else.
@@ -357,7 +352,7 @@ contract SharePriceCollapse_Security is Test {
         (uint256 epochId, uint256 claimId) =
             IQueueModule(address(vault)).requestEpochWithdrawal(aliceShares);
 
-        // CLOSE FIRST: ppsAtClose is locked at the healthy price.
+        // CLOSE FIRST: (the price was already fixed at request; close only buckets it).
         vm.warp(block.timestamp + 7 days);
         IQueueModule(address(vault)).closeCurrentEpoch();
         IQueueModule(address(vault)).fundEpoch(epochId);

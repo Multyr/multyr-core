@@ -83,7 +83,7 @@ contract CoreVault_Adversarial_Invariants is StdInvariant, Test {
         vault.setModule(
             EpochedQueueModule.requestEpochWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
-        vault.setModule(EpochedQueueModule.cancelEpochWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.syncInsolvencyState.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(EpochedQueueModule.closeCurrentEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(EpochedQueueModule.fundEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(EpochedQueueModule.claimEpochAssets.selector, address(queueModule), vault.ROLE_PUBLIC());
@@ -94,9 +94,10 @@ contract CoreVault_Adversarial_Invariants is StdInvariant, Test {
         );
         vault.setModule(EpochedQueueModule.currentEpochId.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(
-            EpochedQueueModule.totalEscrowedShares.selector, address(queueModule), vault.ROLE_PUBLIC()
+            EpochedQueueModule.syncInsolvencyState.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
         vault.setModule(EpochedQueueModule.outstandingClaimCount.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.reservedForClaims.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(EpochedQueueModule.canCloseCurrentEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(EpochedQueueModule.currentEpochClaimCount.selector, address(queueModule), vault.ROLE_PUBLIC());
 
@@ -113,14 +114,12 @@ contract CoreVault_Adversarial_Invariants is StdInvariant, Test {
     }
 
     /**
-     * @notice CRITICAL INVARIANT: Escrowed shares MUST equal totalEscrowedShares
-     * @dev This was the bug found in the original test
+     * @notice CRITICAL INVARIANT (W-2): an accepted exit burns its net shares at request,
+     *         so the vault never holds escrowed shares and totalSupply carries no share
+     *         of any user with a pending claim.
      */
-    function invariant_escrowedShares_equalsPendingShares() public view {
-        uint256 vaultShares = vault.balanceOf(address(vault));
-        uint256 pending = IQueueModule(address(vault)).totalEscrowedShares();
-
-        assertEq(vaultShares, pending, "ESCROW: Vault shares must equal totalEscrowedShares");
+    function invariant_noSharesEscrowed() public view {
+        assertEq(vault.balanceOf(address(vault)), 0, "ESCROW: the vault must hold no shares");
     }
 
     /**
@@ -180,14 +179,15 @@ contract CoreVault_Adversarial_Invariants is StdInvariant, Test {
     }
 
     /**
-     * @notice Pending shares should never exceed total supply
-     * @dev This would indicate a double-counting bug
+     * @notice W-4: reservedForClaims only earmarks liquidity for what is owed, so it can
+     *         never exceed totalOwed. A violation would mean a claim was double-reserved.
      */
-    function invariant_pendingShares_bounded() public view {
-        uint256 pending = IQueueModule(address(vault)).totalEscrowedShares();
-        uint256 supply = vault.totalSupply();
-
-        assertLe(pending, supply, "PENDING: totalEscrowedShares cannot exceed totalSupply");
+    function invariant_reservedNeverExceedsOwed() public view {
+        assertLe(
+            IQueueModule(address(vault)).reservedForClaims(),
+            IQueueModule(address(vault)).totalOwed(),
+            "RESERVE: reservedForClaims must be <= totalOwed"
+        );
     }
 
     function invariant_callSummary() public view {

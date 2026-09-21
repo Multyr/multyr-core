@@ -25,7 +25,7 @@ interface IQueueModule {
     function claimEpochAssets(uint256 epochId, uint256 claimId) external returns (uint256 assets);
     function endEpochCrystallize() external;
     function outstandingClaimCount() external view returns (uint256);
-    function totalEscrowedShares() external view returns (uint256);
+    function totalOwed() external view returns (uint256);
 }
 
 /// @title Hardening: canX/performX Consistency + Event Correctness + Wiring
@@ -164,7 +164,7 @@ contract Hardening_Consistency is Test {
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
         bytes32 requestedSig =
-            keccak256("EpochWithdrawalRequested(uint256,uint256,address,uint256,uint256,uint256)");
+            keccak256("EpochWithdrawalRequested(uint256,uint256,address,uint256,uint256,uint256,uint256)");
         bool found = false;
         uint256 count = 0;
         for (uint256 i; i < logs.length; i++) {
@@ -179,15 +179,14 @@ contract Hardening_Consistency is Test {
 
     function test_settlement_emitsFeePaidAndSettled() public {
         // Queue claim
+        // Economic exit at request: the fee shares reach the FeeCollector in the request tx.
+        vm.recordLogs();
         vm.prank(user1);
         (uint256 epochId, uint256 claimId) =
             IQueueModule(address(vault)).requestEpochWithdrawal(200_000e6);
 
         vm.warp(block.timestamp + 7 days + 1);
 
-        vm.recordLogs();
-
-        // Close: fee shares (if any) transfer here
         IQueueModule(address(vault)).closeCurrentEpoch();
         IQueueModule(address(vault)).fundEpoch(epochId);
         vm.prank(user1);
@@ -195,7 +194,7 @@ contract Hardening_Consistency is Test {
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
-        // FeePaid should be emitted during close (fee shares leave escrow)
+        // FeePaid is emitted by the request (price, fee and burn all happen there)
         bytes32 feePaidSig = keccak256("FeePaid(address,address,uint256)");
         bool foundFeePaid = false;
         for (uint256 i; i < logs.length; i++) {
@@ -204,7 +203,7 @@ contract Hardening_Consistency is Test {
                 break;
             }
         }
-        assertTrue(foundFeePaid, "FeePaid emitted on settlement");
+        assertTrue(foundFeePaid, "FeePaid emitted at request");
 
         // EpochAssetsClaimed emitted when the user pulls their claim
         bytes32 claimedSig = keccak256("EpochAssetsClaimed(uint256,uint256,address,uint256,uint256)");
@@ -229,8 +228,8 @@ contract Hardening_Consistency is Test {
             "requestEpochWithdrawal wired"
         );
         assertTrue(
-            vault.moduleOf(EpochedQueueModule.cancelEpochWithdrawal.selector) != address(0),
-            "cancelEpochWithdrawal wired"
+            vault.moduleOf(EpochedQueueModule.syncInsolvencyState.selector) != address(0),
+            "syncInsolvencyState wired"
         );
         assertTrue(
             vault.moduleOf(EpochedQueueModule.closeCurrentEpoch.selector) != address(0),
@@ -288,6 +287,6 @@ contract Hardening_Consistency is Test {
 
         // Module-routed views should still work
         IQueueModule(address(vault)).outstandingClaimCount();
-        IQueueModule(address(vault)).totalEscrowedShares();
+        IQueueModule(address(vault)).totalOwed();
     }
 }

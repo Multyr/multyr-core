@@ -1,5 +1,12 @@
 # Multyr Core — Architecture
 
+> **Superseded in part — see [economic-exit.md](economic-exit.md).** This document describes the
+> escrow / `ppsAtClose` withdrawal model. Requests are now priced and their shares burned **at
+> request**; epochs are settlement buckets only; `cancelEpochWithdrawal`, `ppsAtClose`,
+> `escrowedShares` and `closedPendingAssets` are gone; `totalAssets()` is net of `totalOwed`.
+> Everything below about those topics is historical until this file is rewritten.
+
+
 > **Status**: draft | **Audit-scope**: multyr-core@pierdev
 > **Last reviewed by code**: commit `1595a279` on branch `pierdev` (date: 2026-05-15)
 > **Version**: 1.0.0-draft

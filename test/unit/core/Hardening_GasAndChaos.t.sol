@@ -32,7 +32,7 @@ interface IQueueModule {
     function canCloseCurrentEpoch() external view returns (bool);
     function currentEpochClaimCount() external view returns (uint256);
     function outstandingClaimCount() external view returns (uint256);
-    function totalEscrowedShares() external view returns (uint256);
+    function totalOwed() external view returns (uint256);
     function endEpochCrystallize() external;
 }
 
@@ -158,7 +158,7 @@ contract Hardening_GasAndChaos is Test {
 
         vm.warp(block.timestamp + 7 days + 1);
         IQueueModule(address(vault)).closeCurrentEpoch();
-        uint256 owed = IQueueModule(address(vault)).epochData(epochId).totalNetAssets;
+        uint256 owed = IQueueModule(address(vault)).epochData(epochId).totalAssetsOwed;
 
         // Refresh the quote after the warp: the staleness window is an hour and
         // epochs are days long, so at fund time the oracle must have been
@@ -336,29 +336,6 @@ contract Hardening_GasAndChaos is Test {
     // QUEUE CANCEL + RE-QUEUE STRESS (no zombie, no leak)
     // ═══════════════════════════════════════════════════════════════════════════
 
-    function test_queueCancelRequeue_noLeak() public {
-        address user = address(0xD100);
-        _fundAndDeposit(user, 10_000_000e6);
-
-        uint256 initialShares = vault.balanceOf(user);
-        uint256 initialSupply = vault.totalSupply();
-
-        // 50 cycles of queue → cancel → re-queue
-        for (uint256 i = 0; i < 50; i++) {
-            vm.prank(user);
-            (uint256 epochId, uint256 claimId) =
-                IQueueModule(address(vault)).requestEpochWithdrawal(100_000e6);
-
-            vm.prank(user);
-            IQueueModule(address(vault)).cancelEpochWithdrawal(epochId, claimId);
-        }
-
-        // No leak
-        assertEq(vault.balanceOf(user), initialShares, "no share leak after 50 cancel cycles");
-        assertEq(vault.totalSupply(), initialSupply, "no supply leak");
-        assertEq(IQueueModule(address(vault)).totalEscrowedShares(), 0, "no pending leak");
-    }
-
     // ═══════════════════════════════════════════════════════════════════════════
     // CAP BOUNDARY PRECISION
     // ═══════════════════════════════════════════════════════════════════════════
@@ -376,10 +353,10 @@ contract Hardening_GasAndChaos is Test {
         IQueueModule(address(vault)).requestInstantWithdrawal(999_000e6);
 
         // This should queue (over cap ~1.5M)
-        uint256 pendingBefore = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pendingBefore = IQueueModule(address(vault)).totalOwed();
         vm.prank(user);
         IQueueModule(address(vault)).requestInstantWithdrawal(600_000e6);
-        uint256 pendingAfter = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pendingAfter = IQueueModule(address(vault)).totalOwed();
 
         assertGt(pendingAfter, pendingBefore, "second claim queued at cap boundary");
     }

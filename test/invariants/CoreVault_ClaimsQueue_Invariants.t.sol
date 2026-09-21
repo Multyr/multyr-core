@@ -107,7 +107,7 @@ contract CoreVault_ClaimsQueue_Invariants is StdInvariant, Test {
         vault.setModule(
             EpochedQueueModule.requestEpochWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
-        vault.setModule(EpochedQueueModule.cancelEpochWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.syncInsolvencyState.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(EpochedQueueModule.closeCurrentEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(EpochedQueueModule.fundEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(EpochedQueueModule.claimEpochAssets.selector, address(queueModule), vault.ROLE_PUBLIC());
@@ -120,7 +120,7 @@ contract CoreVault_ClaimsQueue_Invariants is StdInvariant, Test {
         );
         vault.setModule(EpochedQueueModule.currentEpochId.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(
-            EpochedQueueModule.totalEscrowedShares.selector, address(queueModule), vault.ROLE_PUBLIC()
+            EpochedQueueModule.syncInsolvencyState.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
         vault.setModule(
             EpochedQueueModule.reservedForClaims.selector, address(queueModule), vault.ROLE_PUBLIC()
@@ -420,12 +420,21 @@ contract ClaimQueueHandler is Test {
 
         if (claimSettled[claimId] || claimCancelled[claimId]) return;
 
-        try queueModule.cancelEpochWithdrawal(claimVaultEpochId[claimId], claimVaultClaimId[claimId]) {
+        // cancelEpochWithdrawal was removed (economic exit at request): the selector
+        // is no longer routed, so this must always fail.
+        (bool ok,) = address(queueModule).call(
+            abi.encodeWithSignature(
+                "cancelEpochWithdrawal(uint256,uint256)",
+                claimVaultEpochId[claimId],
+                claimVaultClaimId[claimId]
+            )
+        );
+        if (ok) {
             claimCancelled[claimId] = true;
             ghost_cancelledClaims++;
             if (ghost_openClaims > 0) ghost_openClaims--;
             calls_cancelClaim++;
-        } catch { }
+        }
     }
 
     function cancelOthersClaim(uint256 actorSeed, uint256 targetActorSeed)
@@ -446,12 +455,15 @@ contract ClaimQueueHandler is Test {
 
         ghost_unauthorizedCancelAttempts++;
 
-        try queueModule.cancelEpochWithdrawal(claimVaultEpochId[claimId], claimVaultClaimId[claimId]) {
+        (bool ok,) = address(queueModule).call(
+            abi.encodeWithSignature(
+                "cancelEpochWithdrawal(uint256,uint256)",
+                claimVaultEpochId[claimId],
+                claimVaultClaimId[claimId]
+            )
+        );
         // Should not succeed - this would be a bug
-        }
-        catch {
-            ghost_unauthorizedCancelReverts++;
-        }
+        if (!ok) ghost_unauthorizedCancelReverts++;
     }
 
     // Close, fund and claim are SEPARATE handler actions on purpose. Fusing

@@ -73,6 +73,11 @@ contract ERC4626Module {
     error ReentrancyGuardLocked();
     error NavStale();
     error NavInvalid();
+    /// @notice grossAssets < totalOwed: totalAssets() == 0, so share pricing is meaningless.
+    error VaultInsolvent();
+    /// @notice forceWithdraw() values at totalAssets() == 0 (insolvency mode, or no shareholder equity):
+    ///         there is nothing to withdraw. (forceWithdrawAll() returns 0 instead of reverting.)
+    error NothingToWithdraw();
     error InsufficientLiquidity();
     error SharesLocked();
     error WithdrawalLimitExceeded();
@@ -198,6 +203,9 @@ contract ERC4626Module {
         _enterNonReentrant();
 
         if (assets == 0) revert ZeroAmount();
+        // Force exit values at totalAssets(). With no shareholder equity (insolvency mode, or
+        // grossAssets == totalOwed) an exact-amount exit has nothing to draw on.
+        if (IERC4626(address(this)).totalAssets() == 0) revert NothingToWithdraw();
         if (receiver == address(0)) revert ZeroAddress();
         if (owner_ == address(0)) revert ZeroAddress();
 
@@ -321,6 +329,15 @@ contract ERC4626Module {
         // Read all shares
         uint256 shares = _balanceOf(msg.sender);
         if (shares == 0) revert ZeroAmount();
+        // No shareholder equity (insolvency mode, or grossAssets == totalOwed): shares value at
+        // totalAssets() == 0, there is nothing to withdraw, and burning them for a zero fill would
+        // destroy the caller's residual claim for nothing. Return 0 untouched -- no burn, no fee,
+        // no revert -- unless the caller demanded a non-zero minimum.
+        if (IERC4626(address(this)).totalAssets() == 0) {
+            if (minAssetsOut > 0) revert SlippageExceeded();
+            _exitNonReentrant();
+            return 0;
+        }
 
         // Fee via ExitEngineLib (FORCE mode)
         (uint256 totalFeeShares, uint256 netShares) =
@@ -551,6 +568,7 @@ contract ERC4626Module {
         _enterNonReentrant();
 
         if (assets == 0) revert ZeroAmount();
+        _requireSolvent();
         _ensureFreshWarmNav();
 
         CoreStorage.Layout storage core = CoreStorage.layout();
@@ -626,6 +644,7 @@ contract ERC4626Module {
         _enterNonReentrant();
 
         if (shares == 0) revert ZeroAmount();
+        _requireSolvent();
         _ensureFreshWarmNav();
 
         CoreStorage.Layout storage core = CoreStorage.layout();
@@ -789,6 +808,17 @@ contract ERC4626Module {
 
     function _asset() internal view returns (address) {
         return IERC4626(address(this)).asset();
+    }
+
+    /// @dev Insolvency mode (grossAssets < totalOwed) makes totalAssets() == 0, and so does
+    ///      grossAssets == totalOwed (no shareholder equity). With totalSupply > 0 either one
+    ///      makes deposit/mint pricing divide by zero or mint unbounded shares. Read through the
+    ///      vault -- never reconstructed here.
+    function _requireSolvent() internal view {
+        (uint256 gross, uint256 owed,) = ICoreVault(address(this)).liabilityState();
+        if (gross < owed || (gross == owed && IERC20(address(this)).totalSupply() > 0)) {
+            revert VaultInsolvent();
+        }
     }
 
     /// @dev Hot balance net of assets earmarked for FUNDED-but-unclaimed epoch

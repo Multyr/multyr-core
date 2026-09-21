@@ -89,6 +89,16 @@ contract Withdrawal_PauseMatrix_Invariants is Test {
     // Instant-settlement breaker — Guardian-eligible (review §20)
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// @dev cancelEpochWithdrawal was removed: an accepted request is a fixed
+    ///      liability and can no longer be cancelled, modified or re-priced.
+    function _assertNoCancelPath(uint256 epochId, uint256 claimId) internal {
+        vm.prank(user);
+        (bool ok,) = address(core).call(
+            abi.encodeWithSignature("cancelEpochWithdrawal(uint256,uint256)", epochId, claimId)
+        );
+        assertFalse(ok, "cancelEpochWithdrawal must not exist");
+    }
+
     function test_pauseInstantWithdrawalOnly_forcesQueueFallback_doesNotRevert() public {
         uint256 shares = _deposit(1_000_000e6);
 
@@ -195,13 +205,12 @@ contract Withdrawal_PauseMatrix_Invariants is Test {
         EpochedQueueModule(address(core)).requestEpochWithdrawal(shares); // must not revert
     }
 
-    function test_cancelEpochWithdrawal_remainsOpen_whileQueuedRequestPaused() public {
+    function test_noCancelPath_whileQueuedRequestPaused() public {
         (uint256 epochId, uint256 claimId) = _depositAndQueue(1_000_000e6);
 
         core.pauseQueuedRequestOnly(true);
 
-        vm.prank(user);
-        EpochedQueueModule(address(core)).cancelEpochWithdrawal(epochId, claimId); // must not revert
+        _assertNoCancelPath(epochId, claimId);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -261,14 +270,13 @@ contract Withdrawal_PauseMatrix_Invariants is Test {
         EpochedQueueModule(address(core)).closeCurrentEpoch();
     }
 
-    function test_pauseEpochCloseFundOnly_doesNotBlockNewQueuedRequestsOrCancel() public {
+    function test_pauseEpochCloseFundOnly_doesNotBlockNewQueuedRequests() public {
         (uint256 epochId, uint256 claimId) = _depositAndQueue(1_000_000e6);
 
         vm.prank(guardian);
         core.pauseEpochCloseFundOnly(true);
 
-        vm.prank(user);
-        EpochedQueueModule(address(core)).cancelEpochWithdrawal(epochId, claimId); // must not revert
+        _assertNoCancelPath(epochId, claimId);
 
         uint256 moreShares = _deposit(500_000e6);
         vm.prank(user);
@@ -395,9 +403,8 @@ contract Withdrawal_PauseMatrix_Invariants is Test {
         vm.expectRevert(EpochedQueueModule.EpochCloseFundPaused.selector);
         EpochedQueueModule(address(core)).closeCurrentEpoch();
 
-        // Cancelling an already-submitted request must still work.
-        vm.prank(user);
-        EpochedQueueModule(address(core)).cancelEpochWithdrawal(epochId, claimId);
+        // An accepted request can never be cancelled (economic exit at request).
+        _assertNoCancelPath(epochId, claimId);
     }
 
     function test_pauseWithdrawalsOnly_doesNotBlockNewQueuedRequests() public {

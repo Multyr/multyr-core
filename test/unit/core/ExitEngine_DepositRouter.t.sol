@@ -23,7 +23,7 @@ interface IQueueModule {
     function closeCurrentEpoch() external;
     function fundEpoch(uint256 epochId) external;
     function claimEpochAssets(uint256 epochId, uint256 claimId) external returns (uint256 assets);
-    function totalEscrowedShares() external view returns (uint256);
+    function totalOwed() external view returns (uint256);
     function outstandingClaimCount() external view returns (uint256);
 }
 
