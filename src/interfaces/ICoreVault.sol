@@ -16,10 +16,30 @@ interface ICoreVault {
     // ═══════════════════════════════════════════════════════════════════════════════
 
     function asset() external view returns (address);
+
+    /// @notice Active shareholder NAV (class B): max(0, grossAssets() - totalOwed()).
     function totalAssets() external view returns (uint256);
 
+    /// @notice Physical portfolio value (class A): hot + warm + Σ strategy assets.
+    function grossAssets() external view returns (uint256);
+
+    /// @notice Σ nominal assetsOwed over all unclaimed claims, funded or not.
+    function totalOwed() external view returns (uint256);
+
+    /// @notice Pro-rata payout multiplier for outstanding claims, 1e18 when solvent.
+    function liabilityIndex() external view returns (uint256);
+
+    /// @notice grossAssets < totalOwed. Derived, not stored.
+    function isInsolvent() external view returns (bool);
+
+    /// @notice Is the whole economic NAV valid enough to crystallize a withdrawal? See CoreVault.
+    function navStatus() external view returns (bool valid, uint8 reason);
+
+    /// @notice grossAssets, totalOwed and liabilityIndex from one consistent read.
+    function liabilityState() external view returns (uint256 gross, uint256 owed, uint256 index);
+
     /// @notice Returns breakdown of total assets for gas-efficient external queries
-    /// @return nav Total assets (hot + strat + warm)
+    /// @return nav grossAssets() (hot + strat + warm) — physical value, NOT net of totalOwed
     /// @return hot Idle assets in vault
     /// @return warm Assets in warm buffer adapters
     function totalAssetsBreakdown() external view returns (uint256 nav, uint256 hot, uint256 warm);

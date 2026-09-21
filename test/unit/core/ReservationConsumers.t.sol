@@ -46,7 +46,7 @@ interface IReservationQueue {
         external returns (uint256 totalAssets);
     function currentEpochId() external view returns (uint256);
     function outstandingClaimCount() external view returns (uint256);
-    function totalEscrowedShares() external view returns (uint256);
+    function totalOwed() external view returns (uint256);
     function reservedForClaims() external view returns (uint256);
     function closedPendingAssets() external view returns (uint256);
     function epochData(uint256 epochId) external view returns (EpochQueueStorage.EpochData memory);
@@ -118,6 +118,16 @@ contract ReservationConsumers is Test {
         vm.warp(t);
     }
 
+    /// @dev Moves `amount` of hot cash into the (mock) warm bucket: it leaves the vault's balance
+    ///      but stays in grossAssets, so the vault remains solvent with shareholder equity while
+    ///      hot liquidity shrinks -- the only way to starve FREE liquidity without insolvency.
+    function _moveHotToWarm(uint256 amount) internal {
+        vm.prank(address(vault));
+        usdc.transfer(makeAddr("warmAdapter"), amount);
+        (uint256 nav,,) = bufferManager.warmNavState();
+        bufferManager.setWarmNav(nav + amount, uint40(block.timestamp), true);
+    }
+
     /// @dev Queue alice's whole position, close, fund. Returns her claim handle.
     function _fundAliceEpoch(uint256 shares) internal returns (uint256 epochId, uint256 claimId) {
         vm.prank(alice);
@@ -145,8 +155,8 @@ contract ReservationConsumers is Test {
         uint256 reserved = _q().reservedForClaims();
         assertGt(reserved, 0, "alice's payout is reserved");
 
-        // 50% NAV loss AFTER epoch 0 was funded: alice's ppsAtClose is already
-        // locked at the pre-loss price, so her liability now exceeds her
+        // 50% NAV loss AFTER epoch 0 was funded: alice's payout is already
+        // fixed at the pre-loss price (economic exit at request), so her liability now exceeds her
         // proportional share of what is left.
         uint256 loss = _hot() / 2;
         vm.prank(address(vault));
@@ -163,7 +173,7 @@ contract ReservationConsumers is Test {
         // The whole point: alice is paid, in full, at her locked price.
         vm.prank(alice);
         uint256 paid = _q().claimEpochAssets(e0, c0);
-        assertEq(paid, reserved, "funded claimant paid in full at ppsAtClose");
+        assertEq(paid, reserved, "funded claimant paid in full at the price fixed at request");
         assertEq(_q().reservedForClaims(), 0, "reservation released on payout");
     }
 
@@ -176,9 +186,7 @@ contract ReservationConsumers is Test {
         (uint256 e0, uint256 c0) = _fundAliceEpoch(aliceShares);
 
         // Drain hot down to exactly the reservation.
-        uint256 drain = _hot() - _q().reservedForClaims();
-        vm.prank(address(vault));
-        usdc.transfer(makeAddr("elsewhere"), drain);
+        _moveHotToWarm(_hot() - _q().reservedForClaims());
 
         uint256 bobBefore = usdc.balanceOf(bob);
         vm.prank(bob);
@@ -200,9 +208,7 @@ contract ReservationConsumers is Test {
 
         (uint256 e0, uint256 c0) = _fundAliceEpoch(aliceShares);
 
-        uint256 drain = _hot() - _q().reservedForClaims();
-        vm.prank(address(vault));
-        usdc.transfer(makeAddr("elsewhere"), drain);
+        _moveHotToWarm(_hot() - _q().reservedForClaims());
 
         // forceWithdraw is not wired by CoreHarness, so route it explicitly.
         vault.setModule(
@@ -257,9 +263,7 @@ contract ReservationConsumers is Test {
         _fundAliceEpoch(aliceShares);
 
         // Drain hot to exactly the reservation: zero free liquidity remains.
-        uint256 drain = _hot() - _q().reservedForClaims();
-        vm.prank(address(vault));
-        usdc.transfer(makeAddr("elsewhere"), drain);
+        _moveHotToWarm(_hot() - _q().reservedForClaims());
 
         (, uint256 deployAfter) = real.plan();
         assertEq(deployAfter, 0, "nothing deployable once all hot cash is reserved");
@@ -314,8 +318,8 @@ contract ReservationConsumers is Test {
         }
 
         assertEq(_q().outstandingClaimCount(), 0, "no claims outstanding");
-        assertEq(_q().totalEscrowedShares(), 0, "escrow drained");
-        assertEq(_q().closedPendingAssets(), 0, "closed-pending liability cleared");
+        assertEq(_q().totalOwed(), 0, "escrow drained");
+        assertEq(_q().totalOwed(), 0, "liability cleared");
         assertLe(
             _q().reservedForClaims(), 10,
             "reservation drains back to at most the documented per-epoch truncation dust"
@@ -324,7 +328,7 @@ contract ReservationConsumers is Test {
 
     /// @notice Same, with cancellations interleaved and an empty epoch closed
     ///         and funded in the middle.
-    function test_reservationReleases_withCancellationsAndEmptyEpochs() public {
+    function test_reservationReleases_withEmptyEpochsInterleaved() public {
         _dep(alice, 10_000_000e6);
         _dep(bob, 10_000_000e6);
 
@@ -333,10 +337,6 @@ contract ReservationConsumers is Test {
 
             vm.prank(alice);
             (uint256 e, uint256 cA) = _q().requestEpochWithdrawal(100_000e6);
-            vm.prank(bob);
-            (, uint256 cB) = _q().requestEpochWithdrawal(60_000e6);
-            vm.prank(bob);
-            _q().cancelEpochWithdrawal(e, cB);
 
             _warp(7 days + 1);
             _q().closeCurrentEpoch();
@@ -354,9 +354,9 @@ contract ReservationConsumers is Test {
         }
 
         assertEq(_q().outstandingClaimCount(), 0, "no claims outstanding");
-        assertEq(_q().totalEscrowedShares(), 0, "escrow drained");
+        assertEq(_q().totalOwed(), 0, "escrow drained");
         assertEq(_q().reservedForClaims(), 0, "single-claim epochs release exactly");
-        assertEq(_q().closedPendingAssets(), 0, "empty epochs add no liability");
+        assertEq(_q().totalOwed(), 0, "empty epochs add no liability");
     }
 
     /// @notice The batch path must release exactly what the single path does.

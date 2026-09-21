@@ -39,12 +39,10 @@ library ExitEngineLib {
         uint256 penaltyAssets; // penalty fee in assets (immediate or force)
         bool willQueue; // true if exit cannot settle immediately
         uint256 epochCapRemaining; // cap remaining after this exit
-        // NOTE on netAssets:
-        //   INSTANT/FORCE: netAssets is EXACT — settlement happens in the same tx.
-        //   STANDARD: netAssets is INDICATIVE — settlement is deferred to a future tx,
-        //     and totalAssets/totalSupply may change between queue and settle.
-        //     The actual net at settlement depends on the PPS at settlement time.
-        //     Use feeShares and userShares (which are exact) for accounting.
+        // NOTE on netAssets (economic exit at request):
+        //   Every mode is EXACT: the price is fixed and the shares are burned in the request
+        //   transaction, so netAssets is the assetsOwed a request would record. Settlement of a
+        //   queued request only pays that fixed amount (× liabilityIndex, 1e18 while solvent).
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -136,13 +134,9 @@ library ExitEngineLib {
     // ═══════════════════════════════════════════════════════════════════════════════
 
     /// @notice Simulate an exit for preview/max functions
-    /// @dev SEMANTICS:
-    ///      - INSTANT/FORCE: netAssets is EXACT — identical to runtime (same tx).
-    ///        Same formulas, same rounding, same operation order.
-    ///      - STANDARD (queued): netAssets is INDICATIVE — the queued path cannot
-    ///        promise today the exact net of a future settlement. The PPS at
-    ///        settlement time may differ. feeShares and userShares ARE exact
-    ///        (computed at queue time), but the asset conversion is indicative.
+    /// @dev SEMANTICS: netAssets is EXACT for every mode — a request prices at the current
+    ///      share price and burns its net shares in the same transaction, with the same
+    ///      formulas, rounding and operation order as this function.
     ///
     ///      Callers MUST provide inputs computed AFTER soft NAV refresh:
     ///        grossAssets = convertToAssets(shares)

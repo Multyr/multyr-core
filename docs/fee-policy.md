@@ -10,6 +10,13 @@ tags: [fee, withdrawal-fee, performance-fee, timelock, fee-storage]
 
 # Fee Policy
 
+> **Superseded in part — see [economic-exit.md](economic-exit.md).** This document describes the
+> escrow / `ppsAtClose` withdrawal model. Requests are now priced and their shares burned **at
+> request**; epochs are settlement buckets only; `cancelEpochWithdrawal`, `ppsAtClose`,
+> `escrowedShares` and `closedPendingAssets` are gone; `totalAssets()` is net of `totalOwed`.
+> Everything below about those topics is historical until this file is rewritten.
+
+
 > **Source of truth**: `src/core/storage/FeeStorage.sol:55` @ `c39f9462`
 > **ADR-015 workflow applied**: full code read before drafting.
 

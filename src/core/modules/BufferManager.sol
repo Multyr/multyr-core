@@ -290,7 +290,8 @@ contract BufferManager is IBufferManager, ReentrancyGuard {
 
     /// @notice Target hot balance computed on current NAV (post-event) as reported by Core.
     function targetHot() public view returns (uint256) {
-        uint256 nav = ICoreVault(core).totalAssets();
+        // Class A: the buffer sizes physical liquidity against the physical portfolio.
+        uint256 nav = ICoreVault(core).grossAssets();
         return (nav * _cfg.targetHotBps) / 1e4;
     }
 

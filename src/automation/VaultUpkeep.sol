@@ -19,6 +19,7 @@ interface ICoreVault {
     function endEpochCrystallize() external;
     function realizeForReserveAndOps(uint256 maxAmount) external;
     function totalAssets() external view returns (uint256);
+    function grossAssets() external view returns (uint256);
     function deployToStrategies(uint256 maxAmount) external;
     function reconcilePendingExits(uint256 maxUsers) external returns (uint256);
     function pendingExitCount() external view returns (uint256);
@@ -585,7 +586,7 @@ contract VaultUpkeep is AutomationCompatibleInterface, Ownable {
         if (gap == 0) return false;
         if (gap >= minRealizeFloor) return true;
         if (minRealizeGapBps > 0) {
-            try core.totalAssets() returns (uint256 ta) {
+            try core.grossAssets() returns (uint256 ta) { // class A: realize gap vs physical portfolio
                 if (ta > 0) {
                     uint256 threshold = (ta * uint256(minRealizeGapBps)) / 10000;
                     uint256 upper = threshold * 120 / 100; // 20% hysteresis band

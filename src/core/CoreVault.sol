@@ -15,6 +15,7 @@ import { IIncentives } from "../interfaces/IIncentives.sol";
 import { ICoreVault } from "../interfaces/ICoreVault.sol";
 import { CoreStorage } from "./storage/CoreStorage.sol";
 import { FeeStorage } from "./storage/FeeStorage.sol";
+import { EpochQueueStorage } from "./modules/EpochedQueueModule.sol";
 import { Events } from "./libraries/Events.sol";
 import { Percentage } from "../libs/Percentage.sol";
 import { SelectorRegistry } from "./libraries/SelectorRegistry.sol";
@@ -33,6 +34,10 @@ import { SelectorLib } from "./libraries/SelectorLib.sol";
 ///      1. Single source of truth for fee logic (ExitFeeLib)
 ///      2. Module swappability for all economic paths
 ///      3. No fee desynchronization between paths
+interface INavValidity {
+    function navValidity() external view returns (uint256 strategyAssets, uint8 issue);
+}
+
 contract CoreVault is ERC4626, ICoreVault {
     using SafeERC20 for IERC20;
 
@@ -725,20 +730,105 @@ contract CoreVault is ERC4626, ICoreVault {
     function rewardsTreasury() external view returns (address) { return CoreStorage.layout().rewardsTreasury; }
 
     // ═══════════════════════════════════════════════════════════════════════════════
-    // TOTAL ASSETS — CANONICAL (ERC-4626, LIVE, never stale)
+    // ACCOUNTING PRIMITIVES (P0-C) — the ONE source of truth for each quantity
     // ═══════════════════════════════════════════════════════════════════════════════
     //
-    // CRITICAL: This is the ONLY function used for fee math, PPS, convertToAssets.
-    // It always computes live. _cachedNavForOps() is a SEPARATE cache for gas-sensitive
-    // decisions and MUST NOT be used for economic calculations.
+    //   grossAssets()  hot + warm + Σ strategy assets      physical portfolio value  (class A)
+    //   totalOwed()    Σ nominal assetsOwed, unclaimed     fixed liabilities to exited users
+    //   totalAssets()  max(0, grossAssets - totalOwed)     active shareholder NAV    (class B)
+    //
+    // No module may reconstruct either quantity locally: every consumer reads
+    // grossAssets() (portfolio / liquidity / risk math) or totalAssets()
+    // (shareholder pricing, fees, caps). See docs/exit-engine.md for the audit of
+    // every call site.
+    //
+    // totalAssets() lives HERE, in the CoreVault shell (not in a module), because
+    // it is the ERC-4626 entry point. The shell is not behind a proxy: changing it
+    // means deploying a new CoreVault.
+    //
+    // reservedForClaims is NOT subtracted: it only earmarks liquidity already
+    // inside grossAssets, and totalOwed already contains everything owed, funded
+    // or not. Subtracting both would double count.
+    //
+    // CRITICAL: These always compute live. _cachedNavForOps() is a SEPARATE cache
+    // for gas-sensitive decisions and MUST NOT be used for economic calculations.
     //
 
+    /// @notice Physical value of the portfolio: hot + warm + Σ strategy assets. (class A)
+    function grossAssets() public view returns (uint256) {
+        return _grossAssets();
+    }
+
+    /// @notice Σ nominal assetsOwed over all unclaimed claims, funded or not.
+    function totalOwed() public view returns (uint256) {
+        return EpochQueueStorage.layout().totalOwed;
+    }
+
+    /// @notice Active shareholder NAV (ERC-4626 totalAssets): grossAssets - totalOwed,
+    ///         saturating at 0. Never reverts on underflow, in any state. (class B)
     function totalAssets() public view override(ERC4626, ICoreVault) returns (uint256) {
-        (uint256 hot, uint256 strat, uint256 warm) = _totalAssetsBreakdown();
-        return hot + strat + warm;
+        return _totalAssets();
+    }
+
+    /// @notice grossAssets, totalOwed and liabilityIndex read consistently in one call.
+    /// @dev liabilityIndex is a pure function of state, computed on read, never stored:
+    ///      1e18 when totalOwed == 0 or grossAssets >= totalOwed, else
+    ///      grossAssets * 1e18 / totalOwed. Always <= 1e18, O(1).
+    function liabilityState()
+        public
+        view
+        returns (uint256 gross, uint256 owed, uint256 index)
+    {
+        gross = _grossAssets();
+        owed = EpochQueueStorage.layout().totalOwed;
+        index = (owed == 0 || gross >= owed) ? 1e18 : (gross * 1e18) / owed;
+    }
+
+    /// @notice The payout multiplier for every outstanding claim (1e18 when solvent).
+    function liabilityIndex() external view returns (uint256 index) {
+        (, , index) = liabilityState();
+    }
+
+    /// @notice True whenever grossAssets < totalOwed. Derived, not stored.
+    ///         In this mode totalAssets() == 0.
+    function isInsolvent() public view returns (bool) {
+        return _grossAssets() < EpochQueueStorage.layout().totalOwed;
+    }
+
+    /// @notice Is the economic NAV trustworthy enough to CRYSTALLIZE an irrevocable withdrawal
+    ///         liability from it? Checks every input of grossAssets(), not just cache age:
+    ///         hot balance (always readable), the warm cache (present, complete = no adapter
+    ///         failed, and not older than 15 minutes), and every enabled strategy (valuation
+    ///         readable, health registry OK, required oracle live/fresh/consistent).
+    /// @return valid true only if every check passes
+    /// @return reason 0 ok; 1 no BufferManager; 2 warm NAV incomplete/invalid; 3 warm NAV stale;
+    ///         4 strategy valuation failed; 5 strategy unhealthy; 6 oracle invalid
+    function navStatus() external view returns (bool valid, uint8 reason) {
+        CoreStorage.Layout storage core = CoreStorage.layout();
+        IBufferManager bm = core.bufferManager;
+        if (address(bm) == address(0)) return (false, 1);
+        (, uint40 ts, bool warmOk) = bm.warmNavState();
+        if (!warmOk) return (false, 2);
+        if (block.timestamp > uint256(ts) + 15 minutes) return (false, 3);
+
+        IStrategyRouter r = core.router;
+        if (address(r) != address(0)) {
+            try INavValidity(address(r)).navValidity() returns (uint256, uint8 issue) {
+                if (issue != 0) return (false, issue);
+            } catch {
+                return (false, 4);
+            }
+        }
+        return (true, 0);
     }
 
     function _totalAssets() internal view returns (uint256) {
+        uint256 gross = _grossAssets();
+        uint256 owed = EpochQueueStorage.layout().totalOwed;
+        return gross > owed ? gross - owed : 0;
+    }
+
+    function _grossAssets() internal view returns (uint256) {
         (uint256 hot, uint256 strat, uint256 warm) = _totalAssetsBreakdown();
         return hot + strat + warm;
     }
@@ -762,6 +852,8 @@ contract CoreVault is ERC4626, ICoreVault {
         }
     }
 
+    /// @notice Class A breakdown: `nav` is grossAssets() (physical portfolio value,
+    ///         NOT net of totalOwed) — consumed by deploy sizing and buffer planning.
     function totalAssetsBreakdown() external view returns (uint256 nav, uint256 hot, uint256 warm) {
         uint256 strat;
         (hot, strat, warm) = _totalAssetsBreakdown();
@@ -859,7 +951,13 @@ contract CoreVault is ERC4626, ICoreVault {
         if (address(bm) == address(0)) return false;
         (, uint40 ts, bool valid) = bm.warmNavState();
         if (!valid) return false;
-        return block.timestamp <= uint256(ts) + 15 minutes;
+        if (block.timestamp > uint256(ts) + 15 minutes) return false;
+        // Insolvency mode (grossAssets < totalOwed), or zero shareholder equity
+        // (grossAssets == totalOwed with shares outstanding): totalAssets() == 0, so share
+        // pricing would divide by zero or mint unbounded shares. ERC-4626: maxDeposit == 0.
+        (uint256 gross, uint256 owed,) = liabilityState();
+        if (gross < owed) return false;
+        return !(gross == owed && totalSupply() > 0);
     }
 
     // NOTE: previewWithdraw/previewRedeem keep OZ defaults (share/asset conversion).
@@ -889,7 +987,7 @@ contract CoreVault is ERC4626, ICoreVault {
     }
 
     function _refreshOpsNavCache() internal {
-        _opsNavCache = _totalAssets();
+        _opsNavCache = _grossAssets(); // class A: physical value for ops decisions
         _opsNavCacheTs = uint64(block.timestamp);
     }
 
@@ -989,7 +1087,7 @@ contract CoreVault is ERC4626, ICoreVault {
         if (targetBps == 0) return false;
 
         uint256 currentCash = IERC20(asset()).balanceOf(address(this));
-        uint256 tvl = _totalAssets();
+        uint256 tvl = _grossAssets(); // class A: physical liquidity vs portfolio
         uint256 target = Percentage.mulBpsDown(tvl, targetBps);
         return currentCash < target;
     }
@@ -1015,7 +1113,7 @@ contract CoreVault is ERC4626, ICoreVault {
         if (targetBps == 0) return (false, 0);
 
         uint256 currentCash = IERC20(asset()).balanceOf(address(this));
-        uint256 tvl = _totalAssets();
+        uint256 tvl = _grossAssets(); // class A: physical liquidity vs portfolio
         uint256 target = Percentage.mulBpsDown(tvl, targetBps);
         if (currentCash >= target) return (false, 0);
         return (true, target - currentCash);

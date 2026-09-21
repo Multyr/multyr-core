@@ -100,6 +100,11 @@ contract MockStrategyRouter {
     function totalStrategyAssetsSafe() external pure returns (uint256) {
         return 0;
     }
+
+    /// @dev A router that cannot attest NAV validity is treated as invalid by the request gate.
+    function navValidity() external pure returns (uint256, uint8) {
+        return (0, 0);
+    }
 }
 
 /// @title VaultFactory_Integration

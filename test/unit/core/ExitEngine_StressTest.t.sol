@@ -26,7 +26,7 @@ interface IQueueModule {
     function canCloseCurrentEpoch() external view returns (bool);
     function currentEpochClaimCount() external view returns (uint256);
     function outstandingClaimCount() external view returns (uint256);
-    function totalEscrowedShares() external view returns (uint256);
+    function totalOwed() external view returns (uint256);
     function endEpochCrystallize() external;
 }
 
@@ -214,13 +214,13 @@ contract ExitEngine_StressTest is Test {
 
         console2.log("=== PHASE 4: Cap exhaustion ===");
 
-        uint256 pendingBefore = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pendingBefore = IQueueModule(address(vault)).totalOwed();
 
         // User3 tries instant 5M — should queue (cap nearly exhausted)
         vm.prank(users[3]);
         IQueueModule(address(vault)).requestInstantWithdrawal(5_000_000e6);
 
-        uint256 pendingAfter = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pendingAfter = IQueueModule(address(vault)).totalOwed();
         // If cap was exhausted, claim was queued
         if (pendingAfter > pendingBefore) {
             console2.log("Cap exhausted - claim queued. Pending:", pendingAfter / 1e6);
@@ -244,7 +244,7 @@ contract ExitEngine_StressTest is Test {
         }
 
         uint256 queueLen = IQueueModule(address(vault)).outstandingClaimCount();
-        uint256 pendingTotal = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pendingTotal = IQueueModule(address(vault)).totalOwed();
         console2.log("Queue length:", queueLen);
         console2.log("Pending shares:", pendingTotal / 1e6, "M");
         assertGt(queueLen, 0, "queue has claims");
@@ -354,7 +354,7 @@ contract ExitEngine_StressTest is Test {
         console2.log("Final supply:", finalSupply / 1e6, "shares");
         console2.log("FeeCollector shares:", finalFeeShares / 1e6);
         console2.log("Queue length:", IQueueModule(address(vault)).outstandingClaimCount());
-        console2.log("Pending shares:", IQueueModule(address(vault)).totalEscrowedShares() / 1e6);
+        console2.log("Pending shares:", IQueueModule(address(vault)).totalOwed() / 1e6);
 
         // INVARIANT: supply < initial (exits happened)
         assertLt(finalSupply, 300_001_000e6, "supply decreased from exits");

@@ -13,6 +13,7 @@ import { ReentrancyGuard } from "@openzeppelin/contracts/security/ReentrancyGuar
 interface ICoreVault {
     function asset() external view returns (address);
     function totalAssets() external view returns (uint256);
+    function grossAssets() external view returns (uint256);
     function bufferManager() external view returns (IBufferManager);
 }
 
@@ -377,6 +378,55 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
         }
     }
 
+    /// @notice STRICT valuation check for request-time crystallization. totalStrategyAssetsSafe()
+    ///         is best-effort: it counts a reverting strategy as 0, which silently understates
+    ///         the NAV. A withdrawal request turns the NAV into an irrevocable liability, so it
+    ///         needs to know the valuation is COMPLETE and trustworthy, not merely computable.
+    /// @return strategyAssets Σ totalAssets() of enabled strategies (partial if issue != 0)
+    /// @return issue 0 = valid; 4 = a strategy valuation reverted / returned malformed data;
+    ///         5 = a strategy is DEGRADED/BROKEN in the health registry (or it cannot be read);
+    ///         6 = a required oracle input is missing-when-configured, stale or inconsistent
+    function navValidity() external view returns (uint256 strategyAssets, uint8 issue) {
+        uint256 len = _strats.length;
+        for (uint256 i = 0; i < len;) {
+            StrategyInfo storage s = _strats[i];
+            if (s.enabled) {
+                (bool ok, bytes memory data) = s.strat.staticcall{ gas: _stratTaGas() }(
+                    abi.encodeWithSelector(IStrategy.totalAssets.selector)
+                );
+                if (ok && data.length >= 32) {
+                    strategyAssets += abi.decode(data, (uint256));
+                } else if (issue == 0) {
+                    issue = 4;
+                }
+                if (issue == 0 && address(healthRegistry) != address(0)) {
+                    try healthRegistry.getStrategyState(s.strat) returns (
+                        IStrategyHealthRegistry.StrategyState st
+                    ) {
+                        if (st != IStrategyHealthRegistry.StrategyState.OK) issue = 5;
+                    } catch {
+                        issue = 5;
+                    }
+                }
+            }
+            unchecked { ++i; }
+        }
+        if (issue == 0 && !_oracleValid()) issue = 6;
+    }
+
+    /// @notice Runs the exact oracle validation the batch guards use (primary freshness/price and
+    ///         the secondary cross-check), reverting if it fails. Exposed only so navValidity()
+    ///         can reuse that single implementation instead of duplicating it.
+    ///         If no oracle is configured for the vault asset the modifier hard-fails
+    ///         (OracleNotConfigured); navValidity() treats that case separately.
+    function oracleCheck() external view checkOracleFreshness { }
+
+    function _oracleValid() internal view returns (bool) {
+        (address oracleAddr,) = params.oracleConfigFor(ICoreVault(core).asset(), core);
+        if (oracleAddr == address(0)) return true; // no price input is needed to value an asset-denominated vault
+        try this.oracleCheck() { return true; } catch { return false; }
+    }
+
     /// @dev Safe view: returns strategy totalAssets or 0 if call fails.
     ///      Used by planRedeem to exclude failed strategies silently.
     function _safeTotalAssetsView(address strat) internal view returns (uint256) {
@@ -549,6 +599,13 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
     ///      This prevents a compromised oracle from lying about freshness
     ///      Uses oracleConfigFor() for asset-specific oracle lookup with staleness config
     modifier checkOracleFreshness() {
+        _checkOracleFreshness();
+        _;
+    }
+
+    /// @dev Body of checkOracleFreshness, as one internal function so the modifier does not inline
+    ///      the whole oracle validation at every use site (contract-size limit, EIP-170).
+    function _checkOracleFreshness() internal view {
         address asset = ICoreVault(core).asset(); // Get actual vault asset (e.g., USDC)
         // Use oracleConfigFor for asset+vault specific oracle lookup with staleness
         (address oracleAddr, uint256 maxStale) = params.oracleConfigFor(asset, core);
@@ -588,7 +645,6 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
         if (secondaryOracle != address(0) && maxOracleDeviationBps > 0) {
             _validateSecondaryOracle(asset, quote.price, maxStale);
         }
-        _;
     }
 
     /// @notice Validate price against secondary oracle
@@ -694,11 +750,13 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
         }
     }
 
-    /// @dev Get current NAV from core (totalAssets). Direct interface call instead
-    ///      of staticcall+abi.encodeWithSignature — same revert-on-failure semantics,
-    ///      cheaper (no runtime selector hashing / manual decode).
+    /// @dev Get current portfolio NAV from core (class A: grossAssets, NOT net of
+    ///      totalOwed -- NAV-delta / drawdown guards measure the physical portfolio,
+    ///      and a pending-exit liability would amplify every delta). Direct interface
+    ///      call instead of staticcall+abi.encodeWithSignature — same revert-on-failure
+    ///      semantics, cheaper (no runtime selector hashing / manual decode).
     function _getCoreNav() internal view returns (uint256) {
-        return ICoreVault(core).totalAssets();
+        return ICoreVault(core).grossAssets();
     }
 
     /// @dev Extract adapter addresses from Allocation array
@@ -1106,7 +1164,7 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
             if (address(bm) != address(0)) {
                 uint16 opsReserveBps = bm.getConfig().opsReserveTargetBps;
                 if (opsReserveBps > 0) {
-                    uint256 nav = ICoreVault(core).totalAssets();
+                    uint256 nav = ICoreVault(core).grossAssets(); // class A
                     uint256 minHot = (nav * opsReserveBps) / 1e4;
                     return hot > minHot ? hot - minHot : 0;
                 }

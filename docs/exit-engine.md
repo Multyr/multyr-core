@@ -10,6 +10,13 @@ tags: [exit-engine, withdrawal, queue, force-exit, epoch-cap, epoch-queue]
 
 # Exit Engine
 
+> **Superseded in part — see [economic-exit.md](economic-exit.md).** This document describes the
+> escrow / `ppsAtClose` withdrawal model. Requests are now priced and their shares burned **at
+> request**; epochs are settlement buckets only; `cancelEpochWithdrawal`, `ppsAtClose`,
+> `escrowedShares` and `closedPendingAssets` are gone; `totalAssets()` is net of `totalOwed`.
+> Everything below about those topics is historical until this file is rewritten.
+
+
 > **Source of truth**: `src/core/libraries/ExitEngineLib.sol` + `src/core/modules/EpochedQueueModule.sol` @ `f7e3544`
 > **Supersedes**: v1.0 of this document, which described the exit engine's `QueueModule`
 > integration. `QueueModule.sol` has been deleted; `EpochedQueueModule` is the sole production

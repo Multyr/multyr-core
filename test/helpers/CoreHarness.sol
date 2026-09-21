@@ -60,7 +60,6 @@ contract CoreHarness is CoreVault {
 
         // Wire up queue module (EpochedQueueModule) selectors (PUBLIC)
         _setModuleUnsafe(EpochedQueueModule.requestEpochWithdrawal.selector, address(queueModule), ROLE_PUBLIC);
-        _setModuleUnsafe(EpochedQueueModule.cancelEpochWithdrawal.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.closeCurrentEpoch.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.fundEpoch.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.claimEpochAssets.selector, address(queueModule), ROLE_PUBLIC);
@@ -73,13 +72,12 @@ contract CoreHarness is CoreVault {
         _setModuleUnsafe(EpochedQueueModule.epochData.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.epochClaim.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.nextClaimIdForEpoch.selector, address(queueModule), ROLE_PUBLIC);
-        _setModuleUnsafe(EpochedQueueModule.totalEscrowedShares.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.outstandingClaimCount.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.oldestUnfundedEpochId.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.epochDeficit.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.canCloseCurrentEpoch.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.reservedForClaims.selector, address(queueModule), ROLE_PUBLIC);
-        _setModuleUnsafe(EpochedQueueModule.closedPendingAssets.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.syncInsolvencyState.selector, address(queueModule), ROLE_PUBLIC);
 
         // Wire up admin module owner selectors (OWNER)
         _setModuleUnsafe(AdminModule.submitFeeParams.selector, address(adminModule), ROLE_OWNER);
@@ -405,7 +403,7 @@ contract CoreHarness is CoreVault {
         CoreStorage.layout().incentivesEngine = IIncentivesEngine(engine);
     }
 
-    // Note: Queue module functions (requestEpochWithdrawal, cancelEpochWithdrawal,
+    // Note: Queue module functions (requestEpochWithdrawal,
     // closeCurrentEpoch, fundEpoch, claimEpochAssets, requestInstantWithdrawal) are
     // available via fallback routing to EpochedQueueModule
 }

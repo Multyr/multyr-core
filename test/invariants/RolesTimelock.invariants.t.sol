@@ -779,14 +779,14 @@ contract RolesTimelockInvariants is Test {
         // "Queue module" = EpochedQueueModule (the sole queue-settlement mechanism).
         string[9] memory queueNames = [
             "requestEpochWithdrawal",
-            "cancelEpochWithdrawal",
             "closeCurrentEpoch",
             "fundEpoch",
             "claimEpochAssets",
             "batchClaimEpochAssets",
             "requestInstantWithdrawal",
             "endEpochCrystallize",
-            "syncOldestUnfundedEpoch"
+            "syncOldestUnfundedEpoch",
+            "syncInsolvencyState"
         ];
 
         for (uint256 i = 0; i < queueSels.length; i++) {

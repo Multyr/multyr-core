@@ -106,7 +106,7 @@ contract CoreVault_System_Invariants is StdInvariant, Test {
         vault.setModule(
             EpochedQueueModule.requestEpochWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
-        vault.setModule(EpochedQueueModule.cancelEpochWithdrawal.selector, address(queueModule), vault.ROLE_PUBLIC());
+        vault.setModule(EpochedQueueModule.syncInsolvencyState.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(EpochedQueueModule.closeCurrentEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(EpochedQueueModule.fundEpoch.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(EpochedQueueModule.claimEpochAssets.selector, address(queueModule), vault.ROLE_PUBLIC());
@@ -119,7 +119,7 @@ contract CoreVault_System_Invariants is StdInvariant, Test {
         );
         vault.setModule(EpochedQueueModule.currentEpochId.selector, address(queueModule), vault.ROLE_PUBLIC());
         vault.setModule(
-            EpochedQueueModule.totalEscrowedShares.selector, address(queueModule), vault.ROLE_PUBLIC()
+            EpochedQueueModule.syncInsolvencyState.selector, address(queueModule), vault.ROLE_PUBLIC()
         );
         vault.setModule(
             EpochedQueueModule.reservedForClaims.selector, address(queueModule), vault.ROLE_PUBLIC()
@@ -304,14 +304,14 @@ contract CoreVault_System_Invariants is StdInvariant, Test {
     }
 
     function invariant_queue_integrity() public view {
-        uint256 pendingShares = IQueueModule(address(vault)).totalEscrowedShares();
-
-        if (pendingShares > 0) {
-            uint256 vaultOwnShares = vault.balanceOf(address(vault));
-            assertEq(
-                vaultOwnShares, pendingShares, "QUEUE: Escrowed shares must equal totalEscrowedShares"
-            );
-        }
+        // Economic exit at request: shares are burned when the request is accepted, so the
+        // vault never escrows any, and the reservation can never exceed the liability.
+        assertEq(vault.balanceOf(address(vault)), 0, "QUEUE: no shares are escrowed");
+        assertLe(
+            IQueueModule(address(vault)).reservedForClaims(),
+            IQueueModule(address(vault)).totalOwed(),
+            "QUEUE: reservedForClaims <= totalOwed"
+        );
     }
 
     /* ========== INVARIANT: NAV_CONSISTENCY ========== */
@@ -650,12 +650,16 @@ contract VaultHandler is Test {
         }
 
         PendingClaim memory pc = pendingClaims[found];
-        try IQueueModule(address(vault)).cancelEpochWithdrawal(pc.epochId, pc.claimId) {
+        // cancelEpochWithdrawal was removed (economic exit at request): must always fail.
+        (bool ok,) = address(vault).call(
+            abi.encodeWithSignature("cancelEpochWithdrawal(uint256,uint256)", pc.epochId, pc.claimId)
+        );
+        if (ok) {
             if (ghost_pendingClaims > 0) ghost_pendingClaims--;
             if (actorClaimCount[actor] > 0) actorClaimCount[actor]--;
             _removePendingClaim(found);
             calls_cancelClaim++;
-        } catch {
+        } else {
             reverts_cancelClaim++;
         }
     }

@@ -1,5 +1,12 @@
 # access-control.md — Multyr Core: Access Control System
 
+> **Superseded in part — see [economic-exit.md](economic-exit.md).** This document describes the
+> escrow / `ppsAtClose` withdrawal model. Requests are now priced and their shares burned **at
+> request**; epochs are settlement buckets only; `cancelEpochWithdrawal`, `ppsAtClose`,
+> `escrowedShares` and `closedPendingAssets` are gone; `totalAssets()` is net of `totalOwed`.
+> Everything below about those topics is historical until this file is rewritten.
+
+
 **Version**: 1.0.0 | **Branch**: reorg/runbook-docs-consolidate-01a.3 | **Commit**: see footer
 
 ---
