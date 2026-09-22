@@ -281,6 +281,14 @@ contract EpochedQueueModule {
     ///         requirement stays exact.
     uint256 public constant INSOLVENCY_FUNDING_DUST_BPS = 10;
 
+    /// @notice fundEpoch() asks strategies for the deficit plus this many basis points (and 1 unit) to absorb
+    ///         withdrawal slippage; 50 bps equals StrategyRouter's default loss cap.
+    uint256 public constant STRATEGY_REDEEM_BUFFER_BPS = 50;
+
+    /// @notice Smallest amount fundEpoch() asks a strategy for (0.01 USDC at 6 decimals), so a unit of
+    ///         rounding cannot look like a loss-cap breach. See fundEpoch().
+    uint256 public constant MIN_STRATEGY_REDEEM = 10_000;
+
     // =========================================================================
     // REQUEST -- PRICE ONCE (P0-B)
     // =========================================================================
@@ -547,7 +555,18 @@ contract EpochedQueueModule {
             if (deficit > 0) {
                 IStrategyRouter r = core.router;
                 if (address(r) != address(0)) {
-                    IStrategyRouter.Pull[] memory plan = r.planRedeem(deficit);
+                    // Ask for a little MORE than the deficit. Adapters routinely return slightly less than
+                    // they are asked for (withdrawal slippage, share rounding), and a solvent epoch needs its
+                    // nominal amount on hand exactly: asking for the bare deficit leaves a residue that every
+                    // retry shrinks by the same factor and that finally stalls at a unit or two (a 1-unit ask
+                    // returns 0). The buffer covers slippage up to the router's default loss cap in one call and
+                    // the +1 removes the rounding stall. Surplus cash simply stays in hot for the keeper.
+                    // The ask also has a floor: the router's loss cap is a percentage, so on a tiny ask a single
+                    // unit of rounding (25 asked, 24 returned = 4%) reads as a big loss and reverts the whole
+                    // redeem, which would strand the last few units exactly like the bare-deficit ask does.
+                    uint256 ask = deficit + deficit * STRATEGY_REDEEM_BUFFER_BPS / 10_000 + 1;
+                    if (ask < MIN_STRATEGY_REDEEM) ask = MIN_STRATEGY_REDEEM;
+                    IStrategyRouter.Pull[] memory plan = r.planRedeem(ask);
                     if (plan.length > 0) {
                         try r.executeRedeemBatch(plan) returns (uint256 got, uint256) {
                             emit Events.RealizedForQueue(deficit, got);

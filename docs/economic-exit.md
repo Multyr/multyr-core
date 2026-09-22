@@ -192,6 +192,20 @@ Each is small, but each is a decision the reviewer should confirm.
    (beyond it, it reverts). Earmarks and payouts are rounded **down** (floor is subadditive, so at one index the
    claims' payouts never exceed the earmark). The visible effect is that the index can drift **up** by at most
    the tolerance across a claim (W-13 holds to within 10 bps, and only upward). Multyr should confirm 10 bps.
+5b. **Adapters paying out less than asked (no hack: slippage, rounding).** Tested in
+   `AdapterShortfall.t.sol` with a real StrategyRouter and a strategy that pays a set % short. Findings:
+   - The shortfall is a loss of the *vault*: Alice's claim stays the fixed amount and the remaining holders
+     absorb it (solvent case), or the index drops (insolvent case).
+   - `fundEpoch` used to ask a strategy for exactly the deficit. Every retry then shrinks the residue by the same
+     factor and it stalls a unit or two short (a 1-unit ask returns 0), leaving a *solvent* epoch unfundable.
+     It now asks for `deficit + 0.5% + 1` (`STRATEGY_REDEEM_BUFFER_BPS`) so ordinary slippage is covered in one
+     call, and never for less than `MIN_STRATEGY_REDEEM` (10,000 units, 0.01 USDC): the router's loss cap is a
+     percentage, so on a tiny ask one unit of rounding (25 asked, 24 returned = 4%) looked like a cap breach and
+     reverted the whole redeem. Surplus cash stays in hot for the keeper.
+   - If an adapter pays short by **more than `StrategyRouter.lossCapBps`** (default 0.5%), the router refuses the
+     withdrawal atomically: nothing moves, the epoch stays `Closed`, no claim is payable, nothing is repriced. It
+     is unblocked by governance raising the cap or using `emergencyRedeemBatch`. This is the one place an accepted
+     claim can wait, and it is deliberate router policy, not something this PR changes.
 6. **Zero-equity is treated like insolvency for deposits, mints and requests.** W-3 names
    `grossAssets < totalOwed`. `grossAssets == totalOwed` is solvent but leaves `totalAssets() == 0`, and
    the failure the spec cites for insolvency (a share price of 0: unbounded shares minted, or an

@@ -779,6 +779,46 @@ contract EconomicExit_ArbitrumFork_Test is Test {
         assertEq(_claim(alice, e, c), owed, "and is paid in full while the vault is still solvent");
     }
 
+    // ═════════════════════════ 9. the strategy is FAILING while the vault needs its cash ═════════════════════════
+
+    /// @notice Cash sits inside the real strategy and the strategy's withdrawals start reverting (a paused or
+    ///         hacked market). fundEpoch must fail SAFE: the epoch stays Closed, the shortfall is emitted, no
+    ///         claim is payable and nobody jumps the queue. When the strategy recovers, the same call funds it.
+    function test_fork_strategyWithdrawalsFail_fundingFailsSafe_thenRecovers() public {
+        uint256 sa = _deposit(alice, 8_000e6);
+        _deposit(bob, 8_000e6);
+        _freshOracle();
+        (uint256 e, uint256 c) = _request(alice, sa);
+        uint256 owed = q.epochClaim(e, c).assetsOwed;
+
+        // move the vault's hot cash into the real strategy (its idle cash counts in its totalAssets)
+        uint256 toStrategy = _hot() - 100e6;
+        vm.prank(VAULT);
+        usdc.transfer(STRATEGY, toStrategy);
+        assertLt(_hot(), owed, "hot can no longer cover the exit on its own");
+
+        vm.mockCallRevert(STRATEGY, abi.encodeWithSignature("withdraw(uint256,address)"), "market paused");
+        vm.mockCallRevert(STRATEGY, abi.encodeWithSignature("withdrawAll(address)"), "market paused");
+
+        _closeEpoch();
+        _freshOracle();
+        q.fundEpoch(e);
+        assertTrue(
+            q.epochData(e).state == EpochQueueStorage.EpochState.Closed, "cannot fund what cannot be withdrawn"
+        );
+        assertEq(q.reservedForClaims(), 0, "nothing was earmarked");
+        vm.prank(alice);
+        vm.expectRevert(EpochedQueueModule.EpochNotFunded.selector);
+        q.claimEpochAssets(e, c);
+        assertEq(ICoreVault(VAULT).totalOwed(), owed, "the liability is intact");
+
+        vm.clearMockedCalls();
+        _freshOracle();
+        q.fundEpoch(e); // the strategy works again: realises through the real router
+        assertTrue(q.epochData(e).state == EpochQueueStorage.EpochState.Funded, "recovers without intervention");
+        assertEq(_claim(alice, e, c), owed);
+    }
+
     function dave() internal returns (address) {
         return makeAddr("dave");
     }
