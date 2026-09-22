@@ -91,7 +91,9 @@ contract ERC4626Module {
     // ═══════════════════════════════════════════════════════════════════════════════
     // CONSTANTS
     // ═══════════════════════════════════════════════════════════════════════════════
-    uint256 public constant MAX_WARM_NAV_AGE = 15 minutes;
+    /// @dev Kept as a public constant for ABI compatibility; sourced from CoreStorage so
+    ///      there is exactly one literal value across the vault (review: Stefano).
+    uint256 public constant MAX_WARM_NAV_AGE = CoreStorage.MAX_WARM_NAV_AGE;
     uint256 public constant MAX_FORCE_LEGS = 10;
 
     // ═══════════════════════════════════════════════════════════════════════════════

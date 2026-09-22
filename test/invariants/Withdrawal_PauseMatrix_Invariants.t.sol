@@ -27,6 +27,7 @@ import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/I
 import { CoreHarness } from "../helpers/CoreHarness.sol";
 import { MockUSDC } from "../helpers/MockUSDC.sol";
 import { MockParamsProvider } from "../helpers/MockParamsProvider.sol";
+import { MockBufferManagerForTests } from "../helpers/MockBufferManagerForTests.sol";
 import { CoreVault } from "../../src/core/CoreVault.sol";
 import { ERC4626Module } from "../../src/core/modules/ERC4626Module.sol";
 import { EpochedQueueModule, EpochQueueStorage } from "../../src/core/modules/EpochedQueueModule.sol";
@@ -176,11 +177,18 @@ contract Withdrawal_PauseMatrix_Invariants is Test {
     function test_pauseQueuedRequestOnly_alsoBlocksTheInstantFallbackPath() public {
         // requestInstantWithdrawal()'s queue-fallback must not be a bypass for
         // pauseQueuedRequestOnly() — same underlying risk (accepting a new
-        // queued request during an active incident), same breaker. Force the
-        // fallback branch deterministically via the lock period so this
-        // exercises the fallback path rather than instant settlement.
-        params.setLockPeriod(1 days);
+        // queued request during an active incident), same breaker. Deposit lock
+        // is now a hard revert on BOTH exit paths (review: Pier), so it can no
+        // longer be used to force the fallback branch -- drain hot liquidity into
+        // the (mock) warm bucket instead, deterministically failing the instant
+        // liquidity check without touching lock semantics or solvency.
         uint256 shares = _deposit(1_000_000e6);
+        uint256 hotBal = usdc.balanceOf(address(core));
+        vm.prank(address(core));
+        IERC20(address(usdc)).transfer(address(0xBEEF), hotBal);
+        MockBufferManagerForTests(address(core.bufferManager())).setWarmNav(
+            hotBal, uint40(block.timestamp), true
+        );
         core.pauseQueuedRequestOnly(true);
 
         vm.prank(user);

@@ -504,13 +504,34 @@ contract EconomicExit_Spec_Test is Test {
         assertEq(paidNow, queuedOwed, "instant pays exactly the amount a queued request would owe");
         assertEq(core.totalOwed(), 0, "and the liability is discharged in the same tx");
 
-        // (c) instant that falls back into the queue (lock period)
+        // (c) instant that falls back into the queue. Deposit lock is now a hard revert on
+        // both exit paths (review: Pier), so an exhausted cap forces the fallback instead.
         vm.revertToState(snap);
-        params.setLockPeriod(1 days);
+        params.setCapPerEpochBps(1);
         vm.prank(alice);
         (bool instant2, uint256 fe, uint256 fc) = _q().requestInstantWithdrawal(s / 2);
         assertFalse(instant2);
         assertEq(_claimOf(fe, fc).assetsOwed, queuedOwed, "fallback carries exactly the request-time assetsOwed");
+    }
+
+    /// @notice The fee tier is decided BEFORE crystallizing (review: Stefano), so a request
+    ///         that falls back into the queue pays the STANDARD fee, not the instant one --
+    ///         unlike the previous behaviour (documented as a deliberate deviation), which
+    ///         always crystallized as INSTANT first and so overcharged every fallback.
+    function test_W12_fallback_paysTheStandardFee_notTheInstantOne() public {
+        core.setExitFeesUnsafe(100, 500, 0); // witBps 1%, instant penalty +5%, no force penalty
+        uint256 s = _deposit(alice, 1_000e6);
+        _deposit(bob, 1_000e6);
+        params.setCapPerEpochBps(1); // exhausted: every instant call falls back
+
+        vm.prank(alice);
+        (bool settled, uint256 e, uint256 c) = _q().requestInstantWithdrawal(s / 2);
+        assertFalse(settled, "cap exhausted -> fallback");
+
+        uint256 owed = _claimOf(e, c).assetsOwed;
+        // At 1% (standard) the net is ~99% of gross; at 6% (instant tier) it would be ~94%.
+        // A fallback that had wrongly crystallized as INSTANT would owe visibly less.
+        assertApproxEqAbs(owed, 495e6, 2e6, "priced at the STANDARD 1% fee, not the INSTANT 6%");
     }
 
     // ═════════════════════════ W-13 / W-14 pro-rata index ═════════════════════════
@@ -670,14 +691,21 @@ contract EconomicExit_Spec_Test is Test {
         assertLt(feeAssets, 2.5e6);
     }
 
+    /// @notice A request attempts a best-effort self-heal (same as deposit/mint) before the
+    ///         strict age check. That must not make the gate toothless: if the keeper is
+    ///         genuinely dead -- here, the refresh call itself fails, standing in for a broken
+    ///         adapter or a reverting BufferManager -- the cache stays exactly as stale as it
+    ///         was, and the request still correctly reverts on age.
     function test_s11_staleNav_requestRevertsEvenWhenWarmNavValidIsTrue() public {
         uint256 s = _deposit(alice, 1_000e6);
         _deposit(bob, 1_000e6);
 
-        // valid == true, but the cache is 16 minutes old (MAX_WARM_NAV_AGE is 15).
+        // valid == true, but the cache is 16 minutes old (MAX_WARM_NAV_AGE is 15), and the
+        // keeper is unable to fix it (refresh itself fails -- swallowed by the try/catch).
         t += 16 minutes;
         vm.warp(t);
         bm.setWarmNav(0, uint40(t - 16 minutes), true);
+        bm.setRefreshShouldRevert(true);
         (, uint40 ts, bool valid) = bm.warmNavState();
         assertTrue(valid);
         assertGt(block.timestamp - ts, 15 minutes);
@@ -690,8 +718,11 @@ contract EconomicExit_Spec_Test is Test {
         vm.expectRevert(EpochedQueueModule.NavStale.selector);
         _q().requestInstantWithdrawal(s);
 
-        // A fresh cache (keeper ran) lets the same request through.
-        bm.setWarmNav(0, uint40(t), true);
+        // The cache being merely stale-but-fixable is different: here the keeper CAN refresh
+        // (the request's own soft-refresh attempt succeeds), so it is accepted without anyone
+        // needing to call refreshWarmNav() separately first.
+        bm.setRefreshShouldRevert(false);
+        bm.setRefreshResult(0, uint40(t), true);
         _request(alice, s);
     }
 
@@ -821,6 +852,96 @@ contract EconomicExit_Spec_Test is Test {
         assertLe(_q().reservedForClaims(), _hot(), "the earmark never promises cash that is not there");
         uint256 paid = _claim(alice, e, c);
         assertApproxEqAbs(paid, 300e6, 0.2e6, "paid the recovery ratio, short by at most the dust");
+    }
+
+    /// @notice Review (Stefano): measures the WORST-CASE dust drift precisely, in bps, so
+    ///         Multyr can sign off on the exact number INSOLVENCY_FUNDING_DUST_BPS = 10 allows.
+    ///         At the boundary -- hot short by exactly 0.1% of the epoch's target reserve --
+    ///         funding still succeeds, and the claimant realizes exactly 10 bps less than the
+    ///         formula `assetsOwed * grossAssets / totalOwed` would give them. Any shortfall
+    ///         one wei larger stays unfunded (proven by the sibling test right below).
+    /// @notice Review ("to complete", scenario with five claimants): the same pro-rata
+    ///         guarantee tested with 2 claimants elsewhere holds at 5 -- every claimant gets the
+    ///         identical recovery ratio regardless of claim size or the order they claim in.
+    function test_s11_insolvency_fiveClaimants_allGetTheIdenticalRatio_anyOrder() public {
+        address e1 = makeAddr("e1");
+        address e2 = makeAddr("e2");
+        address e3 = makeAddr("e3");
+        address e4 = makeAddr("e4");
+        address e5 = makeAddr("e5");
+        uint256[5] memory amts = [uint256(500e6), 300e6, 1_200e6, 50e6, 950e6]; // sum = 3,000
+        address[5] memory us = [e1, e2, e3, e4, e5];
+        uint256[5] memory shares;
+        uint256[5] memory owed;
+        uint256[5] memory claimIds;
+        uint256 epochId;
+
+        for (uint256 i; i < 5; i++) {
+            MockUSDC(USDC).mint(us[i], amts[i] + 1);
+            vm.prank(us[i]);
+            IERC20(USDC).approve(address(core), type(uint256).max);
+            shares[i] = _deposit(us[i], amts[i]);
+        }
+        _deposit(dave, 7_000e6); // stays in, absorbs the eventual loss
+
+        for (uint256 i; i < 5; i++) {
+            (epochId, claimIds[i]) = _request(us[i], shares[i]);
+            owed[i] = _q().epochClaim(epochId, claimIds[i]).assetsOwed;
+        }
+        uint256 totalOwedAtRequest = owed[0] + owed[1] + owed[2] + owed[3] + owed[4];
+        assertApproxEqAbs(totalOwedAtRequest, 3_000e6, 5, "sum of the five claims");
+        _closeEpoch();
+
+        // Catastrophic loss: 40% recovery ratio.
+        uint256 gross0 = core.grossAssets();
+        _loss(gross0 - totalOwedAtRequest * 4 / 10);
+        assertTrue(core.isInsolvent());
+        uint256 index = core.liabilityIndex();
+        assertApproxEqRel(index, 0.4e18, 1e12);
+
+        _q().fundEpoch(epochId);
+        assertTrue(_q().epochData(epochId).state == EpochQueueStorage.EpochState.Funded);
+
+        // Claim in a deliberately scrambled order: 3rd, 1st, 5th, 2nd, 4th.
+        uint256[5] memory claimOrder = [uint256(2), 0, 4, 1, 3];
+        for (uint256 k; k < 5; k++) {
+            uint256 i = claimOrder[k];
+            uint256 paid = _claim(us[i], epochId, claimIds[i]);
+            assertApproxEqRel(paid, owed[i] * index / WAD, 1e12, "every claimant, any position in the order, gets the same ratio");
+        }
+        assertEq(core.totalOwed(), 0);
+        assertEq(_q().reservedForClaims(), 0);
+    }
+
+    function test_s11_insolvencyFunding_dustTolerance_worstCaseDriftIsExactlyTenBps() public {
+        uint256 sa = _deposit(alice, 1_000_000e6);
+        _deposit(dave, 1_000_000e6);
+        (uint256 e, uint256 c) = _request(alice, sa); // owed 1,000,000
+        _closeEpoch();
+        _loss(1_500_000e6); // gross 500,000 vs owed 1,000,000: exact index 0.5
+
+        uint256 idealPayout = 1_000_000e6 * 5 / 10; // 500,000, at the exact (undropped) index
+        // Read the constant off a bare (unwired) module instance -- constants are the same
+        // regardless of deployment, and this avoids needing the selector routed through the
+        // vault's dispatch just for this one read.
+        uint256 dustBps = (new EpochedQueueModule()).INSOLVENCY_FUNDING_DUST_BPS();
+        uint256 worstCaseShortfall = idealPayout * dustBps / 10_000; // 500
+        assertEq(worstCaseShortfall, 500e6, "10 bps of the 500,000 target is exactly 500");
+
+        // Push hot down to precisely the boundary the dust tolerance allows.
+        _moveHotToWarm(worstCaseShortfall);
+
+        _q().fundEpoch(e);
+        assertTrue(_q().epochData(e).state == EpochQueueStorage.EpochState.Funded, "funds exactly at the boundary");
+        assertEq(_q().reservedForClaims(), idealPayout - worstCaseShortfall, "earmark short by exactly the dust");
+
+        uint256 paid = _claim(alice, e, c);
+        assertEq(paid, idealPayout - worstCaseShortfall, "paid short by exactly the dust, not a wei more");
+
+        // State the drift the way Multyr needs to sign off on it: in basis points of the
+        // amount the pro-rata formula would otherwise have given this claimant.
+        uint256 driftBps = (idealPayout - paid) * 10_000 / idealPayout;
+        assertEq(driftBps, dustBps, "worst-case realized drift == INSOLVENCY_FUNDING_DUST_BPS, exactly");
     }
 
     function test_s11_insolvencyFunding_illiquidRemainderBeyondTolerance_staysClosed() public {

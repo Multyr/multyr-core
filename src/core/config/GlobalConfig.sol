@@ -86,7 +86,8 @@ contract GlobalConfig is IParamsProvider {
         uint16 capPerEpochBps; // Max immediate withdrawals per epoch
         uint256 maxWithdrawalPerBlock; // Max total withdrawals per block
         uint256 maxWithdrawalPerTx; // Max single transaction withdrawal
-        uint256 minClaimAmount; // Minimum claim amount (anti-spam)
+        // @dev DEAD for withdrawals: see IParamsProvider.WithdrawalParams.minClaimAmount.
+        uint256 minClaimAmount; // DEPRECATED, unused for exits
         uint64 lockPeriod; // Deposit lock period in seconds
     }
 

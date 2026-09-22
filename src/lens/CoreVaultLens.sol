@@ -16,6 +16,7 @@ interface ICoreVaultLensTarget {
     function asset() external view returns (address);
     function totalSupply() external view returns (uint256);
     function totalAssets() external view returns (uint256);
+    function capBaseSnapshot() external view returns (uint256);
     function grossAssets() external view returns (uint256);
     function totalOwed() external view returns (uint256);
     function liabilityIndex() external view returns (uint256);
@@ -201,7 +202,14 @@ contract CoreVaultLens {
             ? _calculateDynamicCapBps(vault)
             : (wp.capPerEpochBps == 0 ? type(uint16).max : wp.capPerEpochBps);
         if (cap == type(uint16).max) return type(uint256).max;
-        uint256 m = Percentage.mulBpsDown(v.totalAssets(), cap);
+        // Match enforcement exactly (review: Pier): the vault sizes the instant bucket off a
+        // snapshot taken at cap-epoch rollover, not live totalAssets(), so standard-queue
+        // activity mid-epoch cannot silently shrink it here either. Falls back to live
+        // totalAssets() only when nothing has been snapshotted yet (before the vault's first
+        // instant/rollover call) -- the module backfills identically at that point.
+        uint256 base = v.capBaseSnapshot();
+        if (base == 0) base = v.totalAssets();
+        uint256 m = Percentage.mulBpsDown(base, cap);
         uint256 ew = v.epochWithdrawn();
         return m > ew ? m - ew : 0;
     }

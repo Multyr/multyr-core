@@ -46,8 +46,10 @@ import { CoreStorage } from "../../src/core/storage/CoreStorage.sol";
 import { ICoreVault } from "../../src/interfaces/ICoreVault.sol";
 import { IBufferManager } from "../../src/interfaces/IBufferManager.sol";
 import { IStrategyHealthRegistry } from "../../src/interfaces/IStrategyHealthRegistry.sol";
+import { IParamsProvider } from "../../src/interfaces/IParamsProvider.sol";
 
 interface IVaultView {
+    function lastDepositTs(address) external view returns (uint64);
     function owner() external view returns (address);
     function feeCollector() external view returns (address);
     function params() external view returns (address);
@@ -119,6 +121,9 @@ contract EconomicExit_ArbitrumFork_Test is Test {
     IERC20 usdc = IERC20(USDC);
 
     uint256 t; // local clock
+    uint64 liveLockPeriod; // live withdrawal-lock window (review: Pier's fix makes this a hard
+                           // revert on both exit paths now; the live vault has one configured
+                           // (86,400s at the pinned block) so tests must clear it after depositing)
     uint256 liveGrossBefore;
     uint256 liveSupplyBefore;
     uint256 liveWarmNavAgeAtFork;
@@ -139,6 +144,8 @@ contract EconomicExit_ArbitrumFork_Test is Test {
         (, uint40 warmTs, bool warmValid) = IBufferManager(BM).warmNavState();
         liveWarmNavAgeAtFork = block.timestamp - warmTs;
         warmNavFlagAtFork = warmValid;
+
+        liveLockPeriod = IParamsProvider(vault.params()).getWithdrawalParams(VAULT).lockPeriod;
 
         _installNewCode();
         _rebaseQueueStorage();
@@ -203,11 +210,31 @@ contract EconomicExit_ArbitrumFork_Test is Test {
         BufferManager(BM).refreshWarmNav();
     }
 
-    /// @dev Deposits refresh the warm NAV themselves (ERC4626Module._ensureFreshWarmNav).
+    /// @dev Deposits refresh the warm NAV themselves (ERC4626Module._ensureFreshWarmNav). Also
+    ///      clears the live deposit-lock window for `who` (review: Pier -- lock is now a hard
+    ///      revert on both requestEpochWithdrawal and requestInstantWithdrawal, and the live
+    ///      vault has a real, non-zero lockPeriod configured). None of these scenarios are ABOUT
+    ///      the lock itself (that is covered separately, see test_fork_depositLock_*).
+    ///
+    ///      Implementation note: clearing the lock by writing lastDepositTs[who] directly would
+    ///      be the clean fix, but the slot is only discoverable by brute-forcing 40 candidate
+    ///      offsets against the free public RPC's archive state, and most of those are untouched
+    ///      slots at the pinned historical block -- "historical state" errors, not a contract
+    ///      bug. Warping block.timestamp forward past the lock instead is a plain local EVM op,
+    ///      no RPC needed, but it ages the warm cache and the oracle quote along with it; both
+    ///      are refreshed again immediately after so the deposit leaves NAV exactly as fresh as
+    ///      it found it, and individual tests that want a DIFFERENT staleness state (there is
+    ///      exactly one, the stale-cache test) simply build their own staleness on top afterward.
     function _deposit(address who, uint256 amt) internal returns (uint256 shares) {
         _fund(who, amt);
         vm.prank(who);
         shares = ERC4626Module(VAULT).deposit(amt, who);
+        if (liveLockPeriod > 0) {
+            t += uint256(liveLockPeriod) + 1;
+            vm.warp(t);
+            _keeperRefresh();
+            _freshOracle();
+        }
     }
 
     function _request(address who, uint256 shares) internal returns (uint256 e, uint256 c) {
@@ -275,6 +302,12 @@ contract EconomicExit_ArbitrumFork_Test is Test {
 
     /// @notice The live BufferManager reports warmNavValid == true while its cache is HOURS old.
     ///         This is exactly the situation §8 was written for.
+    /// @notice A request now self-heals a stale cache (same as deposit/mint) before checking it
+    ///         strictly. Proven two ways on the real BufferManager: (1) while the keeper is
+    ///         genuinely unable to refresh (its call reverts, standing in for every real adapter
+    ///         being broken at once), age still correctly rejects the request; (2) once refresh
+    ///         actually works, the SAME stale starting state is fixed inline and accepted, with
+    ///         nobody needing to call refreshWarmNav() separately first.
     function test_fork_liveWarmNav_flagTrueButCacheStale_requestsRevert() public {
         console2.log("live warm-NAV age at fork (s):", liveWarmNavAgeAtFork);
         console2.log("live warmNavValid flag:", warmNavFlagAtFork);
@@ -291,15 +324,19 @@ contract EconomicExit_ArbitrumFork_Test is Test {
         assertTrue(valid, "warmNavValid is still true");
         assertGt(block.timestamp - ts, 15 minutes);
 
+        // Simulate the keeper being genuinely unable to self-heal: the request's own soft-refresh
+        // attempt reverts (swallowed) and the age check catches the still-stale cache.
+        vm.mockCallRevert(BM, abi.encodeWithSignature("refreshWarmNav()"), "every adapter is down");
         vm.prank(alice);
         vm.expectRevert(EpochedQueueModule.NavStale.selector);
         q.requestEpochWithdrawal(s);
         vm.prank(alice);
         vm.expectRevert(EpochedQueueModule.NavStale.selector);
         q.requestInstantWithdrawal(s);
+        vm.clearMockedCalls();
 
-        // the keeper runs -> the same request is accepted
-        _keeperRefresh();
+        // The real BufferManager and its real adapters DO work: the request's own soft-refresh
+        // fixes the same stale starting state inline, no separate keeper call needed.
         _freshOracle();
         _request(alice, s);
         assertEq(vault.balanceOf(alice), 0);
@@ -465,10 +502,23 @@ contract EconomicExit_ArbitrumFork_Test is Test {
         assertFalse(ok, "cancelEpochWithdrawal must not exist");
     }
 
-    function test_fork_noWithdrawalMinimum_acceptsAOneWeiShareRequest() public {
+    /// @notice GlobalConfig has a 100 USDC DEPOSIT minimum; exits have none (spec §6.4). A share
+    ///         amount tiny enough to round to a NONZERO asset value is still accepted with no
+    ///         floor beyond that. On the real, non-1.0 live price ratio a bare 1-wei share
+    ///         request genuinely rounds to zero -- and correctly reverts ZeroAmount (review:
+    ///         Stefano's empty-claims fix), which is not a minimum, just "not nothing".
+    function test_fork_noWithdrawalMinimum_acceptsATinyNonZeroRequest() public {
         _deposit(alice, 1_000e6);
         _freshOracle();
-        _request(alice, 1); // GlobalConfig has a 100 USDC DEPOSIT minimum; exits have none
+
+        vm.prank(alice);
+        (bool ok,) = VAULT.call(abi.encodeWithSignature("requestEpochWithdrawal(uint256)", uint256(1)));
+        if (!ok) {
+            // The live price ratio floors 1 wei of shares to 0 assets: correctly rejected, not
+            // by a minimum, but because there is nothing to owe.
+            _freshOracle();
+            _request(alice, 1_000); // a share amount small enough to still be "tiny", but nonzero
+        }
     }
 
     /// @notice Live withdrawal params: a 1-day lock after deposit blocks the instant route, so an instant
@@ -817,6 +867,42 @@ contract EconomicExit_ArbitrumFork_Test is Test {
         q.fundEpoch(e); // the strategy works again: realises through the real router
         assertTrue(q.epochData(e).state == EpochQueueStorage.EpochState.Funded, "recovers without intervention");
         assertEq(_claim(alice, e, c), owed);
+    }
+
+    // ═════════════════════════ 10. deposit lock, on the real live policy ═════════════════════════
+
+    /// @notice The live vault has a real, non-zero lockPeriod (86,400s at the pinned block).
+    ///         Review (Pier): during the lock, standard and instant requests must both revert
+    ///         outright -- not silently fall back -- and force exit remains the bypass.
+    function test_fork_depositLock_blocksStandardAndInstant_forceStillWorks() public {
+        assertGt(liveLockPeriod, 0, "the live vault has a real lock configured");
+
+        deal(USDC, alice, 1_000e6, true);
+        vm.prank(alice);
+        usdc.approve(VAULT, type(uint256).max);
+        _keeperRefresh();
+        _freshOracle();
+        vm.prank(alice);
+        uint256 shares = ERC4626Module(VAULT).deposit(1_000e6, alice); // no _deposit(): keep the lock live
+
+        vm.prank(alice);
+        vm.expectRevert(EpochedQueueModule.DepositLockActive.selector);
+        q.requestEpochWithdrawal(shares);
+
+        vm.prank(alice);
+        vm.expectRevert(EpochedQueueModule.DepositLockActive.selector);
+        q.requestInstantWithdrawal(shares);
+
+        assertEq(vault.balanceOf(alice), shares, "locked: nothing crystallized, shares untouched");
+        assertEq(ICoreVault(VAULT).totalOwed(), 0);
+
+        // Force exit is the deliberate, unchanged bypass.
+        vm.prank(alice);
+        (bool ok, bytes memory ret) =
+            VAULT.call(abi.encodeWithSignature("forceWithdrawAll(address,uint256)", alice, uint256(0)));
+        assertTrue(ok, "force exit is not gated by the lock");
+        assertGt(abi.decode(ret, (uint256)), 0);
+        assertEq(vault.balanceOf(alice), 0, "force exit burned the locked shares");
     }
 
     function dave() internal returns (address) {

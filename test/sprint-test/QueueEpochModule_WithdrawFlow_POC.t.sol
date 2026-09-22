@@ -202,15 +202,18 @@ contract QueueEpochModule_WithdrawFlow_POC is Test {
     // own shares) reverted, and the whole requestInstantWithdrawal() call
     // reverted instead of gracefully queueing the claim as documented.
     function test_instantWithdrawalFallback_attributesClaimToRealUser() public {
-        params.setLockPeriod(1 days);
+        // Deposit lock is now a hard revert on BOTH exit paths (review: Pier), so it can no
+        // longer be used to force the fallback branch here -- an exhausted cap does the same
+        // deterministic job without touching lock semantics.
+        params.setCapPerEpochBps(1);
         uint256 shares = _deposit(user, 1_000_000e6);
 
-        // Still within the lock period -> _canInstant() must fail -> fallback.
+        // Cap exhausted -> instantOk is false -> fallback.
         vm.prank(user);
         (bool settledImmediately, uint256 epochId, uint256 claimId) =
             EpochedQueueModule(address(core)).requestInstantWithdrawal(shares);
 
-        assertFalse(settledImmediately, "FIX CONFIRMED: locked withdrawal falls back to queue instead of reverting");
+        assertFalse(settledImmediately, "FIX CONFIRMED: cap-exhausted withdrawal falls back to queue instead of reverting");
 
         EpochQueueStorage.EpochClaim memory claim =
             EpochedQueueModule(address(core)).epochClaim(epochId, claimId);

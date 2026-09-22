@@ -348,11 +348,22 @@ contract Hardening_MissingTests is Test {
     function test_noClaimFloor_instantFallbackQueuesTinyResidual() public {
         params.setDepositLimits(0, 0, 100e6);
         params.setMinClaimAmount(0);
-        params.setLockPeriod(1 days); // force the instant path into the queue
         vm.warp(1 hours);
         address residualOwner = address(0xD057);
         vm.prank(user1);
         vault.transfer(residualOwner, 100);
+
+        // Deposit lock is now a hard revert on both exit paths (review: Pier), so it can no
+        // longer be used to force the fallback branch for this 100-wei withdrawal (a
+        // cap-bps reduction would still leave far more than 100 wei of headroom against a
+        // 10M-USDC deposit). Move all hot liquidity into the (mock) warm bucket instead --
+        // solvency is untouched, but the instant liquidity check now has nothing free.
+        uint256 hotBal = usdc.balanceOf(address(vault));
+        vm.prank(address(vault));
+        usdc.transfer(address(0xBEEF), hotBal);
+        MockBufferManagerForTests(address(vault.bufferManager())).setWarmNav(
+            hotBal, uint40(block.timestamp), true
+        );
         vm.prank(residualOwner);
         (bool instant,, uint256 claim) = IQueueModule(address(vault)).requestInstantWithdrawal(100);
         assertFalse(instant);

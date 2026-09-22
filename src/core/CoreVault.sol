@@ -809,7 +809,7 @@ contract CoreVault is ERC4626, ICoreVault {
         if (address(bm) == address(0)) return (false, 1);
         (, uint40 ts, bool warmOk) = bm.warmNavState();
         if (!warmOk) return (false, 2);
-        if (block.timestamp > uint256(ts) + 15 minutes) return (false, 3);
+        if (block.timestamp > uint256(ts) + CoreStorage.MAX_WARM_NAV_AGE) return (false, 3);
 
         IStrategyRouter r = core.router;
         if (address(r) != address(0)) {
@@ -951,7 +951,7 @@ contract CoreVault is ERC4626, ICoreVault {
         if (address(bm) == address(0)) return false;
         (, uint40 ts, bool valid) = bm.warmNavState();
         if (!valid) return false;
-        if (block.timestamp > uint256(ts) + 15 minutes) return false;
+        if (block.timestamp > uint256(ts) + CoreStorage.MAX_WARM_NAV_AGE) return false;
         // Insolvency mode (grossAssets < totalOwed), or zero shareholder equity
         // (grossAssets == totalOwed with shares outstanding): totalAssets() == 0, so share
         // pricing would divide by zero or mint unbounded shares. ERC-4626: maxDeposit == 0.
@@ -1133,6 +1133,14 @@ contract CoreVault is ERC4626, ICoreVault {
 
     function epochWithdrawn() external view returns (uint256) {
         return CoreStorage.layout().epochWithdrawn;
+    }
+
+    /// @notice The instant-withdrawal cap BASE snapshotted at the last cap-epoch rollover
+    ///         (0 before the vault's first instant/rollover call). This, not live totalAssets(),
+    ///         is what requestInstantWithdrawal() actually sizes the 10%-style bucket against, so
+    ///         it stays independent of standard-queue activity within the same cap epoch.
+    function capBaseSnapshot() external view returns (uint256) {
+        return CoreStorage.layout().capBaseSnapshot;
     }
 
     function paramMinDelay() external view returns (uint64) {

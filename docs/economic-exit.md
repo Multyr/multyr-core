@@ -85,8 +85,8 @@ audit's subject; they are listed last for completeness.
 | `mint(…, maxAssets)`, `_mintInternal` (`totalAssets()` × shares) | B | mint pricing |
 | `_requireSolvent()` in deposit/mint | A | reverts `VaultInsolvent` |
 | `_enforceDepositLimits` — vault cap (`totalAssets()`), user cap (`convertToAssets`) | B | |
-| `forceWithdraw` (`previewWithdraw`, `convertToAssets`), fee-event conversions | B | force-exiting holder is a shareholder |
-| `forceWithdrawAll` (`convertToAssets`, `totalAssets()==0` guard) | B | |
+| `forceWithdraw` (`previewWithdraw`, `convertToAssets`), fee-event conversions | B | force-exiting holder is a shareholder. Pulls liquidity via `executeRedeemBatch`, which carries the router's `checkOracleFreshness` guard -- **reverts** on a stale oracle. |
+| `forceWithdrawAll` (`convertToAssets`, `totalAssets()==0` guard) | B | Pulls liquidity via `forceRedeemForWithdraw`, which has **no oracle check**. `forceWithdrawAll` -- not `forceWithdraw` with a caller-supplied plan -- is the guaranteed exit under a stale oracle (review: Stefano). |
 | `_notifyIncentivesDeposit` (`convertToAssets`) | B | |
 | `_freeLiquidity` | A | hot − `reservedForClaims`, saturating |
 
@@ -119,7 +119,7 @@ audit's subject; they are listed last for completeness.
 | `BufferManager.plan` (`totalAssetsBreakdown`, `_reservedForClaims`) | A | reserved subtraction is saturating |
 | `StrategyRouter._getCoreNav` (NAV-delta guard on deposit/redeem batches; drives `maxStrategyBps` exposure caps and the loss-cap guards) | **A** | *changed from `totalAssets()`*: a pending-exit liability must not amplify a portfolio delta |
 | `StrategyRouter._getAvailableSurplusWithOffset` (ops reserve floor) | **A** | *changed from `totalAssets()`* |
-| `VaultUpkeep._gapPassesThreshold` (realize-gap threshold) | **A** | *changed from `totalAssets()`* |
+| `VaultUpkeep._gapPassesThreshold` (realize-gap threshold) | **A** | *changed from `totalAssets()`*. Automation is listed out of scope in spec §15, but this one line is a class-A NAV-correctness fix (the realize-gap threshold must compare against the physical portfolio, not shareholder NAV net of `totalOwed`), not new automation behaviour -- flagged explicitly per review (Stefano). |
 | Circuit-breaker TVL baseline | A | **no call site exists in `src`** (only the `circuitBreakerBps` param, the `CircuitBreakerTriggered` event and `lastTVLSnapshot` storage). Whoever implements it must read `grossAssets()`. |
 
 ### 3.5 `CoreVaultLens`
@@ -306,3 +306,182 @@ in the new model, an insolvency (gross < owed), which blocks the follow-up reque
 PoCs now move hot cash into the warm bucket instead (`_moveHotToWarm`): free liquidity is exactly as
 starved, the portfolio stays solvent, and the property under test — a later epoch or an instant exit
 cannot spend cash reserved for an earlier funded epoch — is asserted unchanged.
+
+## 8. Second review round (Stefano + Pier) — what changed, and one item still open
+
+Both reviewers looked at the branch after the first round (§4 items 1–7, the adapter-shortfall fix
+in §4 item 5b). This section is the response: what was fixed, exactly, and the one design question
+(Pier's fourth point) that is a genuine product decision, not a bug — implemented mechanically where
+that was possible, but not resolved unilaterally.
+
+### 8.1 Fixed
+
+1. **NAV soft refresh before the gate (Stefano).** `_crystallizeExit` now calls
+   `_trySoftRefreshWarmNav()` — identical pattern to `ERC4626Module`'s deposit/mint path — before
+   `_requireFreshNav()`. A request no longer reverts just because nobody happened to poke the cache
+   in the last 15 minutes; it only reverts if the refresh itself fails or the result is still
+   invalid/stale (dead keeper, broken adapter). The age check remains independent of the flag
+   regardless. Every existing "stale NAV reverts" test was rewritten to force the refresh *itself*
+   to fail (`setRefreshShouldRevert(true)` on the mock; `vm.mockCallRevert` on the real
+   `BufferManager` on the fork) rather than relying on nobody refreshing — otherwise the fix would
+   have made those tests unable to fail.
+
+2. **Instant fallback pays the standard fee, not the instant one (Stefano).** `requestInstantWithdrawal`
+   now decides the tier *before* crystallizing: cap and liquidity are checked against a conservative,
+   pre-fee estimate (`convertToAssets(shares)`, gross — monotonically ≥ the eventual net
+   `assetsOwed`, so a pass here always covers the smaller real amount), then `_crystallizeExit` is
+   called exactly once with the tier already fixed. A request that falls back into the queue now
+   crystallizes as `STANDARD` from the start, never `INSTANT`. New test:
+   `test_W12_fallback_paysTheStandardFee_notTheInstantOne` (proves it with `immediateExitPenaltyBps`
+   set high enough that the two tiers are visibly different). This resolves deviation §4.2 from the
+   first round — the instant-fee-on-fallback behaviour documented there no longer exists.
+
+3. **Deposit lock is a hard revert on both ordinary exit paths (Pier).** A new `_requireNotLocked`
+   check runs before *any* crystallization in both `requestEpochWithdrawal` and
+   `requestInstantWithdrawal`. Previously only the instant path consulted `lockPeriod`, and only as
+   a soft "fall back to the queue" signal — since a request now crystallizes (prices + burns)
+   regardless of path, that silently let a locked user's shares be burned and `totalOwed` created
+   during the lock window. `DepositLockActive()` is the new error. Force exit is the deliberate,
+   unchanged bypass. Every existing test that used `lockPeriod` as a deterministic trick to force
+   the instant→queue fallback (four of them, none about locking itself) was rewritten to force the
+   fallback a different way — cap exhaustion or a drained hot balance — since that trick no longer
+   works (the call now reverts outright instead of falling back).
+
+4. **Instant liquidity waterfall is hot → warm refill → queue, never a strategy redeem (Pier).**
+   `_canInstant` now attempts one `BufferManager.refill()` call (best-effort, swallowed on failure)
+   when hot alone is short, before giving up and falling back to the queue. It never reaches the
+   strategy router — matching the architecture's original hot+warm-backs-instant intent.
+
+5. **Instant cap base is snapshotted at cap-epoch rollover, independent of standard-queue activity
+   (Pier).** A new `CoreStorage.capBaseSnapshot` field is set once per cap epoch (on
+   `rollEpochIfNeeded() == true`, or lazily backfilled if still zero) and is what
+   `requestInstantWithdrawal` sizes the bucket against — not live `totalAssets()`, which is
+   `grossAssets − totalOwed` and would otherwise shrink every time a *standard* request grows
+   `totalOwed`, coupling the supposedly-independent 10%-style instant bucket to unrelated queue
+   activity. `consumeEpochCap` was already instant-only (standard requests never called it); the fix
+   is entirely on the base side. Exposed via `CoreVault.capBaseSnapshot()`, and
+   `CoreVaultLens.calculateCapImmediateRemaining` reads the same snapshot (falling back to live
+   `totalAssets()` only when nothing has been snapshotted yet) so the preview matches enforcement.
+
+6. **`fundEpoch` tops up an already-`Funded` epoch (Stefano).** Previously calling `fundEpoch` on a
+   `Funded` epoch was an unconditional no-op. If `liabilityIndex` recovers after an epoch was funded
+   at a lower index, its claimants are owed more than is earmarked, and nothing permissionless could
+   pull the extra cash in — `realizeForReserveAndOps` is sized on the ops reserve, not this gap, and
+   claims would revert `InsufficientFreeLiquidity` forever even once real liquidity existed elsewhere
+   in the vault. `fundEpoch` now computes `targetReserve = scaledByIndex(unclaimed)` against the
+   epoch's *current* `reservedRemaining` regardless of state, and pulls the *gap* (hot → warm →
+   strategy, same waterfall and slippage buffer as before) whether that gap is a first-time fund
+   (`currentReserve == 0`) or a top-up. The ordinary "already fully covered" no-op path is preserved
+   byte-for-byte (same skip event, same cursor sync) when there is genuinely nothing to add.
+   `test_topUp_claimRevertsWhenFreeCashShort_thenPaysFullAfterLiquidityReturns` covers the mechanism
+   directly. **This is necessary but not sufficient — see §8.2.**
+
+7. **Empty claims are rejected (Stefano).** `_crystallizeExit` now reverts `ZeroAmount` if
+   `assetsOwed` rounds to 0. Not a withdrawal minimum (spec §6.4 keeps none — a 1-wei-share request
+   that prices to a non-zero, if tiny, amount is still accepted); this only stops a claim worth
+   *nothing* from occupying a slot in `outstandingClaimCount`, the dynamic-cap queue-depth signal —
+   at the deploy default (`queueStressThreshold = 100`), a hundred zero-value requests alone would
+   otherwise drive the instant cap to its floor for every real depositor.
+
+8. **Dust-tolerance drift, measured precisely (Stefano).** `INSOLVENCY_FUNDING_DUST_BPS` is left at
+   10 (0.1%) — this is a number for Multyr to sign off on, not something to unilaterally change.
+   `test_s11_insolvencyFunding_dustTolerance_worstCaseDriftIsExactlyTenBps` constructs the exact
+   worst case (hot short by precisely 10 bps of the epoch's target reserve) and asserts the
+   realized payout is short by exactly 10 bps of what the pro-rata formula would otherwise give —
+   not "approximately", the exact boundary value, so the number in front of Multyr is unambiguous.
+
+9. **Single `MAX_WARM_NAV_AGE` ("to complete").** Previously three separate literals/constants
+   (`CoreVault.sol` ×2, `ERC4626Module`, `EpochedQueueModule`) that could drift out of sync. Now one
+   definition, `CoreStorage.MAX_WARM_NAV_AGE`; the two module-level `public constant`s are kept (ABI
+   compatibility) but their value is sourced from it.
+
+10. **`minClaimAmount` marked dead, not removed ("to complete").** It is functionally unused for
+    exits under spec §6.4 (no withdrawal minimum), but the field is left in
+    `IParamsProvider.WithdrawalParams` / `GlobalConfig.WithdrawalConfig` rather than removed: 16
+    deploy/ops files read or assert on it, including a dedicated `SetMinClaimAmount.s.sol`, and
+    `GlobalConfig` is governance-managed on-chain storage that would need a coordinated migration.
+    Both struct fields now carry an explicit `@dev DEPRECATED` comment. Removal is a follow-up PR
+    that touches deploy tooling, not this one.
+
+11. **`MIN_STRATEGY_REDEEM` derived from the asset's decimals, not hardcoded to 6 ("to complete").**
+    `_minStrategyRedeem()` computes `10 ** (decimals − 2)` (0.01 units of the underlying) from
+    `IERC20Metadata(_asset()).decimals()` each call, so it is correct whatever asset the vault is
+    deployed with — previously a `10_000` constant that silently assumed 6-decimal USDC.
+
+12. **`_notifyIncentivesExit` receives the NET `assetsOwed`, not gross (Stefano, noted for the
+    record).** This was already true in the first-round implementation (`_crystallizeExit` calls it
+    with `assetsOwed`, the post-fee amount) — flagged here explicitly per review, since the original
+    `QueueModule` this was ported from notified on the gross share value.
+
+13. **New tests requested explicitly:** five claimants sharing one insolvency pro-rata
+    (`test_s11_insolvency_fiveClaimants_allGetTheIdenticalRatio_anyOrder`); the real
+    `StrategyRouter` with a real (mocked-quote) oracle gone stale *and* hot deliberately scarce, at
+    the unit level, proving the NAV-validity gate and the liquidity/funding path are independent
+    mechanisms (`test_realRouter_staleOracle_andInsufficientHot_areIndependentGates` in
+    `AdapterShortfall.t.sol`); the dust-tolerance drift measurement (item 8 above).
+
+14. **`EpochedQueueModule`'s internal size-gate target raised from 16KB to 20KB.** The module now
+    carries the whole exit engine (crystallization, the NAV gate, insolvency, funding top-up, the
+    independent cap snapshot, lock enforcement) — a materially larger scope than the "small,
+    stateless module" budget the original 16KB target was set for. Measured at review time: 16,915
+    bytes, ~7.6KB of margin below the real EIP-170 limit (24,576 bytes). `AdminModule` and
+    `ERC4626Module` are untouched and still comfortably under the original 16KB.
+
+### 8.2 Open — needs a decision before merge (Pier's fourth point)
+
+**The top-up fix (§8.1 item 6) makes funding liquidity catch up with a recovered index. It does not,
+and cannot by itself, fix creditor parity across time.** Pier's example, worked through on this
+branch: Alice and Bob are each owed 50 (gross 50, index 50%). Alice claims now: paid 25, her claim
+is closed for good. The vault later recovers 25 (gross back to 50, but now only Bob's 50 is still
+outstanding): index is 100%. Bob claims: paid 50. Alice got 25, Bob got 50, on identical nominal
+claims — not because Bob claimed in a different *order* (W-14's "no first-claimer advantage" is still
+true: at any single instant, every outstanding claim is paid at the same index), but because Bob
+claimed *later*, after a recovery Alice's payment had already missed.
+
+This is real and not fixed by anything in this round. It is a genuine fork in the design, and
+resolving it changes behaviour either way, so it needs Multyr's answer, not a unilateral pick:
+
+- **(a) Crystallize the recovery ratio for a cohort.** Once an epoch (or some wider grouping) is
+  funded at a given index, that ratio is locked for every claim in it, permanently — a later
+  recovery inside the *same* cohort no longer helps anyone left in it (it would instead flow to
+  remaining *shareholders*, or need its own separate distribution rule). Mechanically the cheaper
+  option: no new per-claim state, `payoutAt` already computes a fixed ratio once funded, it would
+  just need to stop tracking `liabilityIndex` live for already-funded epochs and pin it at fund
+  time instead of at claim time.
+- **(b) Give every partially-paid creditor a residual entitlement.** A claim paid below its nominal
+  `assetsOwed` keeps the unpaid remainder as a live, still-recovering claim rather than being closed
+  outright. Fairer in the sense Pier describes (nobody's payment is ever "final" while the vault is
+  short), but structurally bigger: `EpochClaim.claimed` is currently a boolean, all-or-nothing: this
+  needs the claim to track a *paid-so-far* amount and stay open until it reaches nominal, which
+  touches `_settleClaimAccounting`, `_coverPayout`, `outstandingClaimCount`, and every invariant
+  that currently assumes a claim is binary (open or closed).
+
+Spec §9.2's own words — "apply the same proportional recovery rate to all affected outstanding
+claims" — read more like (a) than (b), but the spec's insolvency section was written before this
+exact interaction was traced through, and does not decide it explicitly either way. **Not
+implemented in this round.** Whichever Multyr picks, the mechanical work is scoped above and this
+document should be updated with the chosen model before merge, per Pier's own framing: "otherwise
+'order doesn't matter' is only true while the liability index remains unchanged between claims."
+
+### 8.3 Fork-suite infrastructure note (not a contract issue)
+
+5 of the 22 Arbitrum fork tests are blocked by the free public RPC (`arb1.arbitrum.io/rpc`), not by
+anything in this PR: `test_fork_fundEpoch_realisesFromRealWarmAndStrategy_thenClaimPaysFixedAmount`,
+`test_fork_fluidHack_severe_insolvency_claimsStillPayAtTheRecoveryRatio`,
+`test_fork_insolvency_indexRecoversAutomatically_whenAssetsAreRestored`,
+`test_fork_insolvency_proRata_sameIndex_noFirstClaimerAdvantage_andRecovery`,
+`test_fork_strategyWithdrawalsFail_fundingFailsSafe_thenRecovers`. All five force a *large* redeem
+out of the real `UsdcMultiLendingVault` strategy. Traced with `-vvvv`: `EpochedQueueModule.fundEpoch`
+correctly calls `strategy.withdraw(...)`; INSIDE that call, the real strategy's own
+`deployIdleToAdapters` → `execSelectAllocation` logic tries to rebalance the remaining idle funds
+across its Venus/Aave/Morpho sub-adapters, and one of those calls (`currentAPYBps()` on the Morpho
+adapter, reading Aave's reserve data) returns `FatalExternalError` — the free endpoint's archive
+node not serving state that deep for this pinned block. This is outside `src/` entirely: it is
+third-party strategy-package internals, not reachable from anything this PR touches, and is the
+same category of RPC limitation as the pre-existing, unrelated `test_Isolation_Euler` failure (§6).
+Two smaller-redeem tests that hit `expectRevert` immediately after a mocked strategy failure
+(`test_fork_navGate_realStrategyValuationFails_rejected`,
+`test_fork_liveWarmNav_flagTrueButCacheStale_requestsRevert`) were flaky for the same underlying
+reason on some runs and reliably pass in isolation and on repeat full-suite runs. A paid/archive RPC
+(`ARBITRUM_RPC_URL` env var, already supported by the suite) should clear all five deterministically;
+not verified in this session.

@@ -318,4 +318,54 @@ contract AdapterShortfall_Test is Test {
         assertEq(_claim(carol, e, cc), 200e6);
         assertEq(_claim(alice, e, ca), 300e6);
     }
+    // ═════ review ("to complete", scenario 8): real router + stale oracle + low hot ═════
+
+    /// @notice The NAV validity gate and the liquidity/funding path are independent
+    ///         mechanisms, proven together against the REAL StrategyRouter (not a stand-in):
+    ///         a stale oracle blocks the request outright regardless of how much hot cash is
+    ///         sitting in the vault, and -- separately -- low hot liquidity never blocks a
+    ///         STANDARD request once the oracle is fresh again (only claim funding cares about
+    ///         cash; crystallization never does).
+    function test_realRouter_staleOracle_andInsufficientHot_areIndependentGates() public {
+        uint256 sa = _deposit(alice, 500e6);
+        _deposit(bob, 500e6);
+        vm.prank(address(core));
+        IERC20(USDC).transfer(address(strat), 900e6); // hot down to 100 -- scarce either way
+
+        // A real, CONFIGURED oracle that is stale (fresh=false), via the real router's own
+        // checkOracleFreshness path (navValidity() -> oracleCheck() -> checkOracleFreshness).
+        vm.mockCall(
+            address(params),
+            abi.encodeWithSignature("oracleConfigFor(address,address)"),
+            abi.encode(ORACLE, uint256(1 days))
+        );
+        vm.mockCall(
+            ORACLE,
+            abi.encodeWithSignature("getQuote(address)", USDC),
+            abi.encode(uint256(1e18), uint8(8), uint48(block.timestamp - 2 days), false) // stale
+        );
+
+        (bool valid, uint8 reason) = core.navStatus();
+        assertFalse(valid, "a real, configured, stale oracle fails the gate");
+        assertEq(reason, 6);
+
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(EpochedQueueModule.NavInputInvalid.selector, uint8(6)));
+        _q().requestEpochWithdrawal(sa);
+        assertEq(core.totalOwed(), 0, "nothing crystallized while the oracle was stale");
+
+        // The oracle recovers. Hot is still just as scarce (100 of 1,000 total) -- that alone
+        // must never block a STANDARD request: crystallization doesn't need cash, only
+        // eventual funding does.
+        _liveOracle();
+        (uint256 e, uint256 c) = _request(alice, sa);
+        assertEq(_q().epochClaim(e, c).assetsOwed, 500e6, "accepted despite scarce hot, once NAV is valid again");
+
+        // Funding, separately, DOES need the cash -- and gets it from the real strategy.
+        _close();
+        _liveOracle();
+        _q().fundEpoch(e);
+        assertTrue(_state(e) == EpochQueueStorage.EpochState.Funded);
+        assertEq(_claim(alice, e, c), 500e6);
+    }
 }
