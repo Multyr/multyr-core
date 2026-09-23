@@ -9,7 +9,6 @@ import { IIncentives } from "../interfaces/IIncentives.sol";
 import { IParamsProvider } from "../interfaces/IParamsProvider.sol";
 import { Percentage } from "../libs/Percentage.sol";
 import { FixedPoint } from "../libs/FixedPoint.sol";
-import { WithdrawalCapLib } from "../core/libraries/WithdrawalCapLib.sol";
 import { EpochQueueStorage } from "../core/modules/EpochedQueueModule.sol";
 
 interface ICoreVaultLensTarget {
@@ -178,19 +177,22 @@ contract CoreVaultLens {
         return _calculateDynamicCapBps(vault);
     }
 
+    /// @dev Must match EpochedQueueModule._epochCapRemaining()'s cap SELECTION exactly. Standard
+    ///      queue depth (outstandingClaimCount) is no longer read here: it grew with ordinary
+    ///      STANDARD queued withdrawals too, coupling the supposedly-independent instant bucket
+    ///      to unrelated queue activity (review: Multyr, PR #19 second round). With its only
+    ///      signal gone, an enabled DynamicCapParams now simply pins the cap at maxBps.
+    ///      Returns the RAW bps (0 meaning unlimited, same convention as getWithdrawalParams()
+    ///      .capPerEpochBps and getEffectiveCapBps()'s other branch) rather than translating to
+    ///      a sentinel here -- that translation is calculateCapImmediateRemaining()'s job, done
+    ///      once, so every caller of this function (including getEffectiveCapBps(), which
+    ///      returns it as-is) sees one consistent "0 = unlimited" bps value.
     function _calculateDynamicCapBps(address vault) internal view returns (uint16) {
         ICoreVaultLensTarget v = ICoreVaultLensTarget(vault);
         IParamsProvider pp = v.params();
         IParamsProvider.DynamicCapParams memory d = pp.getDynamicCapParams(vault);
-        if (d.minBps == 0 || d.maxBps == 0) return pp.getWithdrawalParams(vault).capPerEpochBps;
-        // Must match EpochedQueueModule._epochCapRemaining()'s signal exactly —
-        // outstandingClaimCount (cross-epoch total), not a per-epoch count —
-        // otherwise this preview would show a different cap than the vault enforces.
-        uint256 queueDepth = v.outstandingClaimCount();
-        return
-            WithdrawalCapLib.calculateDynamicCapBps(
-                d.minBps, d.maxBps, d.queueStressThreshold, queueDepth
-            );
+        if (d.minBps != 0 && d.maxBps != 0) return d.maxBps;
+        return pp.getWithdrawalParams(vault).capPerEpochBps;
     }
 
     function calculateCapImmediateRemaining(address vault) external view returns (uint256) {
@@ -198,10 +200,12 @@ contract CoreVaultLens {
         IParamsProvider pp = v.params();
         IParamsProvider.WithdrawalParams memory wp = pp.getWithdrawalParams(vault);
         IParamsProvider.DynamicCapParams memory dcp = pp.getDynamicCapParams(vault);
-        uint16 cap = dcp.enabled
-            ? _calculateDynamicCapBps(vault)
-            : (wp.capPerEpochBps == 0 ? type(uint16).max : wp.capPerEpochBps);
-        if (cap == type(uint16).max) return type(uint256).max;
+        uint16 cap = dcp.enabled ? _calculateDynamicCapBps(vault) : wp.capPerEpochBps;
+        // 0 is the codebase-wide "no cap configured" sentinel for a raw bps value (matches
+        // EpochedQueueModule._epochCapRemaining()'s own capPerEpochBps==0 -> unlimited
+        // translation) -- checked here, once, rather than inside _calculateDynamicCapBps, so
+        // that function's return value stays a plain bps number for every caller.
+        if (cap == 0) return type(uint256).max;
         // Match enforcement exactly (review: Pier): the vault sizes the instant bucket off a
         // snapshot taken at cap-epoch rollover, not live totalAssets(), so standard-queue
         // activity mid-epoch cannot silently shrink it here either. Falls back to live
@@ -361,12 +365,17 @@ contract CoreVaultLens {
         uint256 shares;
         uint256 assetsValue;          // class B: live value of the user's remaining shares
         uint256 pendingClaims;        // nominal, fixed assetsOwed of unclaimed claims
-        uint256 pendingClaimsPayable; // pendingClaims at the current liabilityIndex
+        uint256 pendingClaimsPayable; // see getUserReport
         uint256 pendingBonus;
     }
 
     /// @param fromEpoch/toEpoch bounds the epoch scan for pendingClaims — see
     ///        getUserEpochClaims() for why this isn't a full-history scan.
+    /// @dev pendingClaimsPayable is computed PER CLAIM, not by scaling the nominal sum by one
+    ///      global index (Option A, review: Multyr, PR #19 second round): a FUNDED epoch's
+    ///      cohort recoveryIndex is crystallized and immutable, so its claims use that exact
+    ///      value; a claim still in an Open/Closed (not yet crystallized) epoch has no final
+    ///      ratio yet, so it is shown at the live liabilityIndex() as a not-yet-final estimate.
     function getUserReport(address vault, address user, uint256 fromEpoch, uint256 toEpoch)
         external
         view
@@ -377,14 +386,16 @@ contract CoreVaultLens {
         r.assetsValue = v.convertToAssets(r.shares);
         (uint256[] memory epochIds, uint256[] memory claimIds) =
             this.getUserEpochClaims(vault, user, fromEpoch, toEpoch);
-        // Every claim is a fixed liability priced at request: nothing to
-        // convert here, only to sum.
+        uint256 liveIndex = v.liabilityIndex();
         for (uint256 i = 0; i < claimIds.length; ++i) {
             EpochQueueStorage.EpochClaim memory c = v.epochClaim(epochIds[i], claimIds[i]);
             if (c.claimed) continue;
             r.pendingClaims += c.assetsOwed;
+
+            EpochQueueStorage.EpochData memory e = v.epochData(epochIds[i]);
+            uint256 index = e.state == EpochQueueStorage.EpochState.Funded ? e.recoveryIndex : liveIndex;
+            r.pendingClaimsPayable += FixedPoint.mulWadDown(c.assetsOwed, index);
         }
-        r.pendingClaimsPayable = FixedPoint.mulWadDown(r.pendingClaims, v.liabilityIndex());
         r.pendingBonus = this.pendingLoyaltyBonus(vault, user);
     }
 }

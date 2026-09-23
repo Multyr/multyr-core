@@ -39,11 +39,24 @@ interface IParamsProvider {
     }
 
     /// @notice Dynamic withdrawal cap parameters (B5)
+    /// @dev DEAD as a stress throttle. The only signal this scaled against, queue depth
+    ///      (outstandingClaimCount), was removed from EpochedQueueModule._epochCapRemaining()
+    ///      because it grew with ordinary STANDARD queued withdrawals and coupled the
+    ///      supposedly-independent instant bucket to unrelated queue activity (review: Multyr,
+    ///      PR #19 second round -- "the instant-cap coupling is not fully closed yet"). With
+    ///      that signal gone, `enabled: true` now simply pins the effective cap at `maxBps`
+    ///      unconditionally: `minBps` is read only as a `!= 0` gate (whether to prefer this
+    ///      struct's `maxBps` over `WithdrawalParams.capPerEpochBps`, not scaled toward), and
+    ///      `queueStressThreshold` is never read at all. No code path lowers the cap toward
+    ///      `minBps` any more. Left in the struct/storage rather than removed -- governance-
+    ///      managed `GlobalConfig` storage would need a coordinated migration (same treatment
+    ///      as `WithdrawalParams.minClaimAmount` above). A vault that wants a plain static
+    ///      instant-withdrawal cap should configure `WithdrawalParams.capPerEpochBps` directly.
     struct DynamicCapParams {
-        uint16 minBps; // Min cap when queue stressed (e.g., 200 = 2%)
-        uint16 maxBps; // Max cap when queue empty (e.g., 2000 = 20%)
-        uint256 queueStressThreshold; // Queue depth triggering min cap
-        bool enabled; // Enable dynamic adjustment
+        uint16 minBps; // DEAD as a floor -- see @dev above. Only its zero-ness still matters.
+        uint16 maxBps; // Max cap when queue empty (e.g., 2000 = 20%) -- the ONLY value used now
+        uint256 queueStressThreshold; // DEPRECATED, unused -- see @dev above
+        bool enabled; // Enable dynamic adjustment -- see @dev above: pins the cap at maxBps
     }
 
     /// @notice Queue anti-spam parameters (A4)

@@ -343,31 +343,35 @@ contract QueueEpochModule_WithdrawFlow_POC is Test {
     // BUG D (MEDIUM) -- instant cap check must honor dynamic cap policy
     // =========================================================================
     //
-    // Dynamic cap enabled: min 1% (stressed) / max 20% (empty queue), stress
-    // threshold of 1 pending claim. userB queues one claim first (claimCount
-    // becomes 1 in the open epoch -> "stressed" -> effective cap = 1%).
-    // With the bug, _canInstant() ignored dynamic cap params entirely and used
-    // the (100%, i.e. unlimited) static capPerEpochBps, letting a 5%-of-TVL
-    // instant withdrawal straight through despite queue stress.
-    function test_instantWithdrawal_respectsDynamicCapUnderQueueStress() public {
+    // Historically: dynamic cap enabled (min 1% / max 20%, stress threshold 1 pending
+    // claim), and a standard claim queued by another user drove the instant cap down to
+    // its 1% floor via `outstandingClaimCount`. That coupling -- an ordinary STANDARD
+    // queued withdrawal shrinking the INSTANT bucket -- was itself later identified as a
+    // bug and removed (review: Multyr, PR #19 second round -- "standard queued withdrawals
+    // must have zero effect on the instant 10% bucket"). Queue depth is no longer read by
+    // the dynamic-cap calculation at all: an enabled DynamicCapParams now simply pins the
+    // cap at maxBps, regardless of standard-queue activity.
+    function test_instantWithdrawal_unaffectedByStandardQueueDepth() public {
         params.setDynamicCap(true, 100, 2000, 1); // enabled, min 1%, max 20%, threshold 1
         uint256 sharesA = _deposit(user, 1_000_000e6);
         _deposit(userB, 10_000e6);
 
-        // userB queues a small claim -> current-epoch claimCount = 1 -> stressed.
+        // userB queues a small standard claim -- must have no bearing on userA's
+        // instant-withdrawal cap.
         vm.prank(userB);
         EpochedQueueModule(address(core)).requestEpochWithdrawal(1_000e6);
 
-        // userA requests an instant withdrawal worth ~5% of TVL -- exceeds the
-        // 1%-under-stress dynamic cap, so it must NOT settle immediately.
+        // userA requests an instant withdrawal worth ~5% of TVL -- well under the 20%
+        // (maxBps) cap dynamic-cap pins at now that queue depth no longer scales it down,
+        // so it must settle immediately.
         uint256 fivePctShares = sharesA / 20;
         vm.prank(user);
         (bool settledImmediately,,) =
             EpochedQueueModule(address(core)).requestInstantWithdrawal(fivePctShares);
 
-        assertFalse(
+        assertTrue(
             settledImmediately,
-            "FIX CONFIRMED: 5% instant withdrawal correctly rejected under a 1% dynamic cap while queue is stressed"
+            "FIX CONFIRMED: standard queue depth no longer shrinks the instant cap"
         );
     }
 }

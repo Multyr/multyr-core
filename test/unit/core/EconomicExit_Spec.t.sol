@@ -537,6 +537,11 @@ contract EconomicExit_Spec_Test is Test {
     // ═════════════════════════ W-13 / W-14 pro-rata index ═════════════════════════
 
     /// @dev alice 600 (epoch 0) and bob 400 + carol 100 (epoch 1), all funded while solvent; then a loss.
+    /// @dev Both epochs are closed but NOT YET funded when the loss lands. Only e0 is funded
+    ///      here: Option A's crystallization writes e0's haircut out of totalOwed the instant it
+    ///      is funded, which makes e1's live-index-based target OVERSHOOT the shared physical
+    ///      pool (still unmoved -- nothing has been claimed yet) until e0's cash is actually
+    ///      paid out. e1 can only be funded, by the caller, after alice claims e0.
     function _fundedThenLoss()
         internal
         returns (uint256 e0, uint256 ca, uint256 e1, uint256 cb, uint256 cc)
@@ -548,62 +553,76 @@ contract EconomicExit_Spec_Test is Test {
 
         (e0, ca) = _request(alice, sa);
         _closeEpoch();
-        _q().fundEpoch(e0);
 
         (e1, cb) = _request(bob, sb);
         uint256 e1b;
         (e1b, cc) = _request(carol, sc);
         assertEq(e1, e1b);
         _closeEpoch();
-        _q().fundEpoch(e1);
-        assertEq(_q().reservedForClaims(), 1_100e6);
 
-        _loss(1_400e6); // hot 2000 -> 600 vs owed 1100
+        _loss(1_400e6); // hot 2000 -> 600 vs owed 1100, before either epoch is funded/crystallized
         assertTrue(core.isInsolvent());
+
+        _q().fundEpoch(e0);
+        assertTrue(_q().epochData(e0).state == EpochQueueStorage.EpochState.Funded);
     }
 
+    /// @notice Option A: each epoch crystallizes its OWN recoveryIndex, at fund time, from what
+    ///         was actually available then -- not one shared global index (see
+    ///         test_s11_insolvency_fullScenario for a case where two epochs' ratios diverge
+    ///         further). Here e1 can only fund once alice's claim has actually released e0's
+    ///         cash, at which point the SAME ratio recurs (algebraically exact with only two
+    ///         parties sharing one pool). W-13: claiming from a cohort never moves its
+    ///         (immutable) index. W-14: every claim WITHIN the same epoch pays that epoch's
+    ///         identical index.
     function test_W13_W14_fundedClaimsAcrossEpochs_getTheSameIndex_andClaimingDoesNotMoveIt() public {
         (uint256 e0, uint256 ca, uint256 e1, uint256 cb, uint256 cc) = _fundedThenLoss();
 
-        uint256 index0 = core.liabilityIndex();
-        assertEq(index0, 600e6 * WAD / 1_100e6, "index = gross / owed");
+        uint256 index0 = _q().epochData(e0).recoveryIndex;
+        // Two floors deep (target sizing, then the ratio derived from what was actually
+        // reserved), so this lands a hair under the pure division, never over.
+        assertApproxEqAbs(index0, 600e6 * WAD / 1_100e6, 1e9, "crystallized from the pre-crystallization global ratio");
         assertLt(index0, WAD);
 
         uint256 paidA = _claim(alice, e0, ca);
-        assertEq(paidA, 600e6 * index0 / WAD, "alice (epoch 0) paid at the index");
-        _assertIndexHeld(index0, "W-13: claiming does not move the index");
+        assertEq(paidA, 600e6 * index0 / WAD, "alice (epoch 0) paid at epoch 0's crystallized index");
+        assertEq(_q().epochData(e0).recoveryIndex, index0, "W-13: claiming does not move the index");
+
+        // Only now can epoch 1 fund: its target overshot the shared pool while alice's
+        // crystallized-but-unclaimed liability was still counted in totalOwed (see
+        // _fundedThenLoss).
+        _q().fundEpoch(e1);
+        assertTrue(_q().epochData(e1).state == EpochQueueStorage.EpochState.Funded);
+        uint256 index1 = _q().epochData(e1).recoveryIndex;
+        assertApproxEqAbs(index1, index0, 1e9, "the same ratio recurs once e0's cash actually left");
 
         uint256 paidB = _claim(bob, e1, cb);
-        assertApproxEqAbs(paidB, 400e6 * index0 / WAD, 1e3, "bob (epoch 1) paid at the same index");
-        _assertIndexHeld(index0, "W-13 again after the second claim");
+        assertApproxEqAbs(paidB, 400e6 * index0 / WAD, 1e3, "bob (epoch 1) paid at epoch 1's crystallized index");
+        assertEq(_q().epochData(e1).recoveryIndex, index1, "W-13 again after the second claim");
 
         uint256 paidC = _claim(carol, e1, cc);
-        // W-14: whichever epoch a claim sits in, funded earlier or later, the same index applies.
-        assertApproxEqAbs(paidA, 600e6 * index0 / WAD, 1e3, "epoch 0");
+        // W-14: within the SAME epoch (cohort), every claim pays the identical crystallized index.
         assertApproxEqAbs(paidB, 400e6 * index0 / WAD, 1e3, "epoch 1");
         assertApproxEqAbs(paidC, 100e6 * index0 / WAD, 1e3, "epoch 1, second claim");
         assertEq(core.totalOwed(), 0);
     }
 
-    /// @dev Paying assetsOwed*index/1e18 (rounded down) removes value from gross and owed in the
-    ///      same proportion, so the index cannot move except by that rounding dust, and only UPWARD
-    ///      (never in the claimant's favour at the expense of the claimants still waiting).
-    function _assertIndexHeld(uint256 before, string memory why) internal view {
-        uint256 nowIdx = core.liabilityIndex();
-        assertGe(nowIdx, before, why);
-        assertLe(nowIdx - before, 1e12, why);
-    }
-
     function test_W13_batchClaim_paysEveryClaimAtOneIndex() public {
-        (, , uint256 e1, uint256 cb, uint256 cc) = _fundedThenLoss();
-        uint256 index0 = core.liabilityIndex();
+        (uint256 e0, uint256 ca, uint256 e1, uint256 cb, uint256 cc) = _fundedThenLoss();
+        // e1 can only fund once alice's claim on e0 has actually released its cash (see
+        // _fundedThenLoss); do that first, exactly as test_W13_W14_... does.
+        _claim(alice, e0, ca);
+        _q().fundEpoch(e1);
+        assertTrue(_q().epochData(e1).state == EpochQueueStorage.EpochState.Funded);
+        uint256 index1 = _q().epochData(e1).recoveryIndex;
+
         // bob & carol are different users: batch only claims the caller's own; claim bob's via batch
         uint256[] memory ids = new uint256[](1);
         ids[0] = cb;
         vm.prank(bob);
         uint256 paid = _q().batchClaimEpochAssets(e1, ids);
-        assertEq(paid, 400e6 * index0 / WAD);
-        _assertIndexHeld(index0, "W-13 batch");
+        assertEq(paid, 400e6 * index1 / WAD);
+        assertEq(_q().epochData(e1).recoveryIndex, index1, "W-13 batch: claiming does not move the immutable index");
         cc;
     }
 
@@ -734,6 +753,12 @@ contract EconomicExit_Spec_Test is Test {
         _q().requestEpochWithdrawal(s);
     }
 
+    /// @notice Option A (review: Multyr, PR #19 second round -- "creditor parity after
+    ///         recovery"): a cohort funded WHILE SOLVENT crystallizes recoveryIndex = 1e18 and is
+    ///         immutable from then on -- it is immune to a loss that lands afterward. Alice's
+    ///         epoch is funded before the loss and is paid in full; carol's epoch, still closed
+    ///         when the loss lands, absorbs the entire remaining shortfall alone once it is
+    ///         funded afterward.
     function test_s11_insolvency_fullScenario() public {
         // alice 600 -> epoch 0 (funded while solvent)
         uint256 sa = _deposit(alice, 600e6);
@@ -742,6 +767,7 @@ contract EconomicExit_Spec_Test is Test {
         (uint256 e0, uint256 ca) = _request(alice, sa);
         _closeEpoch();
         _q().fundEpoch(e0);
+        assertEq(_q().epochData(e0).recoveryIndex, WAD, "funded while solvent: full nominal crystallized");
 
         // carol 200 -> epoch 1 (closed, not yet funded)
         (uint256 e1, uint256 cc) = _request(carol, core.balanceOf(carol));
@@ -752,8 +778,6 @@ contract EconomicExit_Spec_Test is Test {
         assertTrue(core.isInsolvent());
         assertEq(core.totalAssets(), 0, "totalAssets() == 0 without reverting");
         assertEq(core.grossAssets(), 700e6);
-        uint256 index = core.liabilityIndex();
-        assertEq(index, 700e6 * WAD / 800e6);
 
         // deposits and requests revert
         vm.prank(bob);
@@ -763,37 +787,39 @@ contract EconomicExit_Spec_Test is Test {
         vm.expectRevert(EpochedQueueModule.VaultInsolvent.selector);
         _q().requestEpochWithdrawal(sd);
 
-        // settlement keeps working. Epoch 1 needs 200 * index = 175, but alice's epoch still
-        // holds a 600 earmark, so it cannot be funded yet (no revert, just not yet).
+        // settlement keeps working. Epoch 1 needs 200 * liveIndex = 175, but alice's epoch still
+        // holds its untouchable 600 earmark, so it cannot be funded yet (no revert, just not yet).
         _q().fundEpoch(e1);
         assertTrue(_q().epochData(e1).state == EpochQueueStorage.EpochState.Closed);
         vm.prank(carol);
         vm.expectRevert(EpochedQueueModule.EpochNotFunded.selector);
         _q().claimEpochAssets(e1, cc);
 
-        // alice (funded while solvent) is paid pro-rata at the index; claiming does not move it,
-        // and the surplus of her nominal earmark (600 - 525) is released to everyone else.
+        // alice (funded while solvent, recoveryIndex crystallized at 1e18) is immune to the loss:
+        // paid in full, and her whole earmark is released once claimed.
         uint256 paid = _claim(alice, e0, ca);
-        assertEq(paid, 600e6 * index / WAD, "pro-rata, not nominal");
-        assertLt(paid, 600e6);
-        _assertIndexHeld(index, "claiming does not move the index");
+        assertEq(paid, 600e6, "funded-while-solvent cohort is immune to a loss that lands afterward");
+        assertEq(_q().epochData(e0).recoveryIndex, WAD, "W-13: immutable");
         assertEq(_q().reservedForClaims(), 0, "her whole earmark was released");
 
-        // NO full nominal coverage is demanded: epoch 1 now funds at the SAME ratio (175 <= 175 hot)
+        // Only now does anything remain for carol's epoch to fund from: gross fell to whatever
+        // alice's full payout left behind, and carol's 200 nominal absorbs the shortfall alone.
         _q().fundEpoch(e1);
-        assertTrue(_q().epochData(e1).state == EpochQueueStorage.EpochState.Funded, "funded at nominal * index");
-        assertApproxEqAbs(_q().reservedForClaims(), 200e6 * index / WAD, 2);
+        assertTrue(_q().epochData(e1).state == EpochQueueStorage.EpochState.Funded, "funds at whatever recovery ratio is left");
+        uint256 carolIndex = _q().epochData(e1).recoveryIndex;
+        assertLt(carolIndex, WAD, "carol absorbs the loss alice was protected from");
 
-        // carol is paid the same fraction alice got
         uint256 paidC = _claim(carol, e1, cc);
-        assertApproxEqAbs(paidC, 200e6 * index / WAD, 1e3);
-        assertApproxEqRel(paidC * WAD / 200e6, paid * WAD / 600e6, 1e9, "same recovery ratio for every claim");
+        assertApproxEqRel(paidC, 200e6 * carolIndex / WAD, 1e12);
+        assertEq(_q().epochData(e1).recoveryIndex, carolIndex, "W-13: immutable");
         assertEq(core.totalOwed(), 0);
     }
 
-    /// @notice Recovery AFTER funding is not a permanent haircut: a claim funded at a low index and
-    ///         claimed after assets came back pays the full nominal, topped up from free liquidity.
-    function test_s11_recoveryAfterFunding_claimPaysFullNominal() public {
+    /// @notice Option A: once a cohort is crystallized, a recovery afterward is NOT owed to it --
+    ///         it flows to remaining shareholders instead. A claim funded at a low index still
+    ///         pays exactly that crystallized ratio even after assets fully come back; nothing
+    ///         is topped up.
+    function test_s11_recoveryAfterFunding_doesNotTopUp() public {
         uint256 sa = _deposit(alice, 600e6);
         _deposit(dave, 1_400e6);
         (uint256 e0, uint256 ca) = _request(alice, sa);
@@ -801,13 +827,15 @@ contract EconomicExit_Spec_Test is Test {
         _loss(1_700e6); // gross 300 < owed 600: index 0.5
         assertEq(core.liabilityIndex(), WAD / 2);
 
-        _q().fundEpoch(e0); // funds at 0.5 * 600 = 300, not at an impossible 600
+        _q().fundEpoch(e0); // crystallizes recoveryIndex = 0.5 * 600 = 300, not an impossible 600
         assertTrue(_q().epochData(e0).state == EpochQueueStorage.EpochState.Funded);
         assertEq(_q().reservedForClaims(), 300e6);
+        assertEq(_q().epochData(e0).recoveryIndex, WAD / 2);
 
-        _gain(1_000e6); // recovery: index back to 1e18
-        assertEq(core.liabilityIndex(), WAD);
-        assertEq(_claim(alice, e0, ca), 600e6, "full nominal: no permanent haircut");
+        _gain(1_000e6); // a recovery -- NOT owed to this already-crystallized cohort
+        assertFalse(core.isInsolvent());
+        assertEq(_q().epochData(e0).recoveryIndex, WAD / 2, "immutable: never re-crystallized");
+        assertEq(_claim(alice, e0, ca), 300e6, "paid the crystallized share, not topped up to nominal");
         assertEq(_q().reservedForClaims(), 0);
     }
 

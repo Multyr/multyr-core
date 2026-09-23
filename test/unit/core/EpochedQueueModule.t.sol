@@ -6,9 +6,9 @@ pragma solidity ^0.8.28;
 // regression suite in test/sprint-test/QueueEpochModule_WithdrawFlow_POC.t.sol
 // (which stays scoped to its 4 originally-fixed bugs and is left untouched).
 //
-// Covers: the outstandingClaimCount dynamic-cap fix (the reason this suite
-// exists), cancellation, EpochTooYoung, double-claim, multi-retry fundEpoch,
-// and closing a zero-claim epoch.
+// Covers: outstandingClaimCount persisting across epoch close and its removal as the
+// instant-cap "queue depth" signal (the reason this suite exists), cancellation,
+// EpochTooYoung, double-claim, multi-retry fundEpoch, and closing a zero-claim epoch.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { Test } from "lib/forge-std/src/Test.sol";
@@ -69,20 +69,22 @@ contract EpochedQueueModule_Test is Test {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // BUG FIX: outstandingClaimCount persists across epoch close (the reason
-    // this suite exists) — dynamic cap stress must not reset just because a
-    // fresh epoch opened while a claim from the closed epoch is still
-    // unfunded/unclaimed.
+    // outstandingClaimCount persists across epoch close (still true, and still relied on by
+    // FixedMaturityModule's Matured->Closed gate) but is NO LONGER the dynamic-cap "queue
+    // depth" signal: standard queue depth must have zero effect on the instant bucket (review:
+    // Multyr, PR #19 second round -- "the instant-cap coupling is not fully closed yet"). This
+    // used to assert the OPPOSITE (that a standard claim, even from a closed epoch, tightened
+    // the instant cap) -- that coupling is exactly what was removed.
     // ═══════════════════════════════════════════════════════════════════════
 
-    function test_dynamicCap_staysTightened_afterEpochClose_withOutstandingClaim() public {
+    function test_dynamicCap_unaffectedByStandardQueueDepth_evenAfterEpochClose() public {
         params.setDynamicCap(true, 100, 2000, 1); // enabled, min 1%, max 20%, threshold 1
         uint256 sharesA = _deposit(user, 1_000_000e6);
         _deposit(userB, 10_000e6);
 
-        // userB queues a small claim, then the epoch closes -- with the old
-        // per-open-epoch claimCount signal, this would reset queueDepth to 0
-        // and the dynamic cap would wrongly relax back to max (20%).
+        // userB queues a small standard claim, then the epoch closes. Under the old
+        // outstandingClaimCount-driven dynamic cap this would have tightened the instant
+        // bucket to its 1% floor; queue depth is no longer read at all now.
         vm.prank(userB);
         EpochedQueueModule(address(core)).requestEpochWithdrawal(1_000e6);
 
@@ -95,16 +97,17 @@ contract EpochedQueueModule_Test is Test {
             "userB's claim is still outstanding (unfunded/unclaimed) after the epoch closed"
         );
 
-        // userA now requests an instant withdrawal worth 5% of TVL -- exceeds
-        // the 1%-under-stress dynamic cap. Must still be rejected.
+        // userA now requests an instant withdrawal worth 5% of TVL -- with queue depth no
+        // longer feeding the dynamic cap, an enabled DynamicCapParams pins the cap at maxBps
+        // (20% here), so this must settle immediately despite the outstanding standard claim.
         uint256 fivePctShares = sharesA / 20;
         vm.prank(user);
         (bool settledImmediately,,) =
             EpochedQueueModule(address(core)).requestInstantWithdrawal(fivePctShares);
 
-        assertFalse(
+        assertTrue(
             settledImmediately,
-            "dynamic cap must stay tightened: outstanding claim from the closed epoch still counts as queue depth"
+            "standard queue depth must have zero effect on the instant bucket: cap pins at maxBps"
         );
     }
 

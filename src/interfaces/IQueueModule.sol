@@ -38,6 +38,12 @@ interface IQueueModule {
     /// @notice Emit InsolvencyEntered / InsolvencyExited if the derived state changed
     function syncInsolvencyState() external;
 
+    /// @notice Roll the instant-withdrawal cap epoch if due and (re)snapshot capBaseSnapshot
+    ///         for it. Permissionless -- lets a keeper checkpoint right at the cap-epoch
+    ///         boundary instead of the snapshot being taken lazily by whichever instant
+    ///         withdrawal happens to be first after rollover.
+    function rollCapEpochIfNeeded() external;
+
     /// @notice End epoch and crystallize performance fee
     /// @dev Calls performance fee crystallization and updates NAV smoothing
     function endEpochCrystallize() external;
@@ -65,7 +71,9 @@ interface IQueueModule {
     ///         (NOT subtracted from NAV: see ICoreVault.totalOwed())
     function reservedForClaims() external view returns (uint256);
 
-    /// @notice Total unclaimed claims across all epochs -- dynamic-cap "queue depth" signal
+    /// @notice Total unclaimed claims across all epochs. No longer the instant-cap "queue depth"
+    ///         signal (standard queue depth has zero effect on the instant bucket); still the
+    ///         FixedMaturityModule Matured->Closed gate (== 0 required).
     function outstandingClaimCount() external view returns (uint256);
 
     /// @notice Oldest epoch that is CLOSED but not yet FUNDED

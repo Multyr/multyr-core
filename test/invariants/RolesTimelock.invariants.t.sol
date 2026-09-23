@@ -777,7 +777,7 @@ contract RolesTimelockInvariants is Test {
 
         bytes4[] memory queueSels = SelectorLib.getQueueModuleSelectors();
         // "Queue module" = EpochedQueueModule (the sole queue-settlement mechanism).
-        string[9] memory queueNames = [
+        string[10] memory queueNames = [
             "requestEpochWithdrawal",
             "closeCurrentEpoch",
             "fundEpoch",
@@ -786,7 +786,8 @@ contract RolesTimelockInvariants is Test {
             "requestInstantWithdrawal",
             "endEpochCrystallize",
             "syncOldestUnfundedEpoch",
-            "syncInsolvencyState"
+            "syncInsolvencyState",
+            "rollCapEpochIfNeeded"
         ];
 
         for (uint256 i = 0; i < queueSels.length; i++) {

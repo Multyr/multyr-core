@@ -293,10 +293,15 @@ contract AdapterShortfall_Test is Test {
         assertTrue(_state(e) == EpochQueueStorage.EpochState.Funded, "funds at the (lower) recovery ratio");
         assertLe(calls, 8);
 
-        uint256 idxNow = core.liabilityIndex();
-        assertLe(idxNow, idx0 + 1e12, "the recognised shortfall can only lower the ratio (or leave it)");
+        // Option A: the cohort's recovery ratio is crystallized once, at fund time
+        // (EpochData.recoveryIndex), not read from the live liabilityIndex() -- which
+        // normalizes back toward 1e18 once totalOwed is written down to match exactly what
+        // was reserved for this (sole outstanding) cohort (review: Multyr, PR #19 second
+        // round).
+        uint256 recoveryIndex = _q().epochData(e).recoveryIndex;
+        assertLe(recoveryIndex, idx0 + 1e12, "the recognised shortfall can only lower the crystallized ratio (or leave it)");
         uint256 paid = _claim(alice, e, c);
-        assertApproxEqRel(paid, 500e6 * idxNow / WAD, 0.002e18, "paid at the index that actually exists");
+        assertApproxEqRel(paid, 500e6 * recoveryIndex / WAD, 0.002e18, "paid at the crystallized recovery ratio");
         assertLt(paid, 500e6);
         assertLe(paid, 400e6, "never more than the cash that was really left");
     }

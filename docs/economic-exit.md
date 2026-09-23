@@ -36,7 +36,8 @@ Removed storage / API: `EpochData.ppsAtClose`, `EpochData.totalNetAssets`, `Epoc
 Added: `navStatus()` (vault) / `navValidity()` (router), `EpochData.reservedRemaining`, `grossAssets()`, `totalOwed()`, `liabilityIndex()`, `isInsolvent()`, `liabilityState()` on the
 vault; `EpochData.totalAssetsOwed`, `EpochClaim.{assetsOwed,requestedAt,grossShares}`,
 `Layout.totalOwed`, `syncInsolvencyState()`, events `InsolvencyEntered` / `InsolvencyExited`,
-errors `VaultInsolvent`, `NavStale`, `NavInvalid`, `NothingToWithdraw`.
+errors `VaultInsolvent`, `NavStale`, `NavInvalid`, `NothingToWithdraw`. Second round (§8): `CoreStorage.capBaseSnapshot`,
+`EpochData.recoveryIndex`, `rollCapEpochIfNeeded()`, event `EpochRecoveryCrystallized`.
 
 ## 2. Accounting primitives (single source of truth)
 
@@ -178,11 +179,12 @@ Each is small, but each is a decision the reviewer should confirm.
    `ceil(unclaimed nominal × index / 1e18)` (identity while solvent) and earmarks exactly that in a new
    per-epoch `reservedRemaining`; each claim releases its proportional share of *its own* epoch's earmark.
    So with owed 50 and assets 30, the epoch funds at 30 and every claim is paid 60% in any order
-   (`test_s11_insolvency_proRata_orderIndependent`). If the index *recovers* after funding, a claim pays the
-   larger amount and the difference comes from free liquidity; if that is short the claim reverts
-   `InsufficientFreeLiquidity` and is retried later — it is never paid short, so a transient loss is not a
-   permanent haircut (`test_s11_recoveryAfterFunding_claimPaysFullNominal`). Residual limitation: that top-up
-   needs free hot cash, and nothing realises strategy assets for it automatically.
+   (`test_s11_insolvency_proRata_orderIndependent`). **Superseded by §8.1 item 6 / §8.2 (Option A):** the
+   ratio locked in the moment `fundEpoch` first transitions the epoch to `Funded` — `EpochData.recoveryIndex`
+   — is now crystallized and immutable for that cohort; a later recovery in `grossAssets` is never paid to it
+   (it flows to remaining shareholders instead — see §8.2). The sentence that used to be here, describing a
+   `fundEpoch` top-up on recovery, described a real but since-removed behaviour; see §8.2 for why and for the
+   replacement mechanism.
    **Dust tolerance (found on the Arbitrum fork).** In insolvency the whole remaining portfolio is owed, so
    funding needs every last unit to be liquid. The live lending adapters cannot return the last wei of a
    position: realising 1,218,285 units returned 1,213,315 and left 4,975 stuck, which made the epoch unfundable
@@ -362,19 +364,40 @@ that was possible, but not resolved unilaterally.
    is entirely on the base side. Exposed via `CoreVault.capBaseSnapshot()`, and
    `CoreVaultLens.calculateCapImmediateRemaining` reads the same snapshot (falling back to live
    `totalAssets()` only when nothing has been snapshotted yet) so the preview matches enforcement.
+   **Not fully closed — two follow-ups, both closed in the second round of review (Multyr):**
+   - `_epochCapRemaining()`'s dynamic-cap branch still scaled the bps down by
+     `outstandingClaimCount` — a *cross-epoch* counter that grows with ordinary **standard** queued
+     withdrawals, not just instant activity, so a burst of standard-queue traffic still shrank the
+     instant bucket on the bps side even though the NAV-base side was fixed. Standard queue depth
+     is no longer read anywhere in `_epochCapRemaining()` / `CoreVaultLens._calculateDynamicCapBps()`;
+     an enabled `DynamicCapParams` now simply pins the cap at `maxBps` (its only remaining signal is
+     gone). Formally marked `@dev DEAD` / `DEPRECATED` in `IParamsProvider.DynamicCapParams` and
+     `GlobalConfig.DynamicCapConfig` (per-field: `minBps` is read only as a `!= 0` gate,
+     `queueStressThreshold` is unused entirely), and `setVaultDynamicCapOverride`'s docstring
+     rewritten so it no longer claims queue-stress scaling. Same treatment, and same reason for not
+     removing the fields outright (governance-managed on-chain storage, coordinated deploy-tooling
+     migration needed), as `minClaimAmount` (item 10 below) — audit finding, review: Multyr.
+   - `capBaseSnapshot` was written lazily, inside `requestInstantWithdrawal`, at whichever instant
+     request happened to be the first to touch the module after the cap epoch's duration had
+     elapsed — not at the epoch's actual start. Standard-queue activity landing between the true
+     boundary and that first touch had already moved `totalAssets()` by the time the snapshot was
+     taken, silently reproducing the exact coupling this field exists to prevent, just delayed
+     instead of continuous. A new permissionless `rollCapEpochIfNeeded()` extracts the roll+snapshot
+     logic (`_rollCapEpochIfNeeded`) so a keeper can checkpoint it right at the boundary, independent
+     of any instant withdrawal ever being submitted; `requestInstantWithdrawal` calls the same
+     internal helper, so a caller who genuinely is first is unaffected.
 
-6. **`fundEpoch` tops up an already-`Funded` epoch (Stefano).** Previously calling `fundEpoch` on a
-   `Funded` epoch was an unconditional no-op. If `liabilityIndex` recovers after an epoch was funded
-   at a lower index, its claimants are owed more than is earmarked, and nothing permissionless could
-   pull the extra cash in — `realizeForReserveAndOps` is sized on the ops reserve, not this gap, and
-   claims would revert `InsufficientFreeLiquidity` forever even once real liquidity existed elsewhere
-   in the vault. `fundEpoch` now computes `targetReserve = scaledByIndex(unclaimed)` against the
-   epoch's *current* `reservedRemaining` regardless of state, and pulls the *gap* (hot → warm →
-   strategy, same waterfall and slippage buffer as before) whether that gap is a first-time fund
-   (`currentReserve == 0`) or a top-up. The ordinary "already fully covered" no-op path is preserved
-   byte-for-byte (same skip event, same cursor sync) when there is genuinely nothing to add.
-   `test_topUp_claimRevertsWhenFreeCashShort_thenPaysFullAfterLiquidityReturns` covers the mechanism
-   directly. **This is necessary but not sufficient — see §8.2.**
+6. **`fundEpoch` on a `Funded` epoch is a pure no-op forever (superseded — see §8.2, Option A).**
+   The first round of the second review (Stefano) had this topping up an already-`Funded` epoch
+   when `liabilityIndex` recovered, so claimants weren't stuck reverting `InsufficientFreeLiquidity`
+   forever once real liquidity returned. Option A (§8.2) replaces this: a `Funded` epoch's cohort
+   `recoveryIndex` is crystallized once, at the moment it is funded, and is immutable from then on
+   — a later recovery in `grossAssets` is not owed to that cohort at all, so there is nothing left
+   to top up. `fundEpoch` on an already-`Funded` epoch reverts to a pure cursor-sync no-op (its
+   pre-top-up behaviour). `test_topUp_claimRevertsWhenFreeCashShort_thenPaysFullAfterLiquidityReturns`
+   and `test_s11_recoveryAfterFunding_claimPaysFullNominal` asserted the now-removed top-up path and
+   were replaced by tests asserting recovery-after-crystallization flows to shareholders instead
+   (§8.2).
 
 7. **Empty claims are rejected (Stefano).** `_crystallizeExit` now reverts `ZeroAmount` if
    `assetsOwed` rounds to 0. Not a withdrawal minimum (spec §6.4 keeps none — a 1-wei-share request
@@ -421,54 +444,111 @@ that was possible, but not resolved unilaterally.
     `AdapterShortfall.t.sol`); the dust-tolerance drift measurement (item 8 above).
 
 14. **`EpochedQueueModule`'s internal size-gate target raised from 16KB to 20KB.** The module now
-    carries the whole exit engine (crystallization, the NAV gate, insolvency, funding top-up, the
-    independent cap snapshot, lock enforcement) — a materially larger scope than the "small,
-    stateless module" budget the original 16KB target was set for. Measured at review time: 16,915
-    bytes, ~7.6KB of margin below the real EIP-170 limit (24,576 bytes). `AdminModule` and
-    `ERC4626Module` are untouched and still comfortably under the original 16KB.
+    carries the whole exit engine (crystallization, the NAV gate, insolvency, cohort recovery
+    crystallization, the independent cap snapshot, lock enforcement) — a materially larger scope
+    than the "small, stateless module" budget the original 16KB target was set for. Measured at
+    review time: 16,979 bytes, ~7.5KB of margin below the real EIP-170 limit (24,576 bytes).
+    `AdminModule` and `ERC4626Module` are untouched and still comfortably under the original 16KB.
 
-### 8.2 Open — needs a decision before merge (Pier's fourth point)
+### 8.2 Resolved — Option A, crystallized recovery ratio per insolvency cohort (Multyr's decision)
 
-**The top-up fix (§8.1 item 6) makes funding liquidity catch up with a recovered index. It does not,
-and cannot by itself, fix creditor parity across time.** Pier's example, worked through on this
-branch: Alice and Bob are each owed 50 (gross 50, index 50%). Alice claims now: paid 25, her claim
-is closed for good. The vault later recovers 25 (gross back to 50, but now only Bob's 50 is still
-outstanding): index is 100%. Bob claims: paid 50. Alice got 25, Bob got 50, on identical nominal
-claims — not because Bob claimed in a different *order* (W-14's "no first-claimer advantage" is still
-true: at any single instant, every outstanding claim is paid at the same index), but because Bob
-claimed *later*, after a recovery Alice's payment had already missed.
+Pier's fourth point (quoted below) was left open at the end of the first round of the second
+review. Multyr's answer, given directly on the PR (`#19`, second round): **Option A**, with two
+requirements beyond the mechanical sketch in the first draft of this section — (1) it must read as
+an explicit **insolvency-settlement process**, not a ratio that freezes at the first block
+`grossAssets < totalOwed` is observed, and (2) the haircut must be **written out of `totalOwed`
+the instant it is crystallized**, so an already-settled cohort does not keep inflating the vault's
+apparent liabilities (and therefore NAV, deposits, performance fees, shutdown/migration accounting)
+for as long as it happens to stay unclaimed.
 
-This is real and not fixed by anything in this round. It is a genuine fork in the design, and
-resolving it changes behaviour either way, so it needs Multyr's answer, not a unilateral pick:
+**Pier's original example, for reference.** Alice and Bob are each owed 50 (gross 50, index 50%).
+Alice claims now: paid 25, her claim is closed for good. The vault later recovers 25 (gross back to
+50, but now only Bob's 50 is still outstanding): index is 100%. Bob claims: paid 50. Alice got 25,
+Bob got 50, on identical nominal claims — not because Bob claimed in a different *order* (W-14's "no
+first-claimer advantage" was already true: at any single instant, every outstanding claim was paid
+at the same index), but because Bob claimed *later*, after a recovery Alice's payment had already
+missed.
 
-- **(a) Crystallize the recovery ratio for a cohort.** Once an epoch (or some wider grouping) is
-  funded at a given index, that ratio is locked for every claim in it, permanently — a later
-  recovery inside the *same* cohort no longer helps anyone left in it (it would instead flow to
-  remaining *shareholders*, or need its own separate distribution rule). Mechanically the cheaper
-  option: no new per-claim state, `payoutAt` already computes a fixed ratio once funded, it would
-  just need to stop tracking `liabilityIndex` live for already-funded epochs and pin it at fund
-  time instead of at claim time.
-- **(b) Give every partially-paid creditor a residual entitlement.** A claim paid below its nominal
-  `assetsOwed` keeps the unpaid remainder as a live, still-recovering claim rather than being closed
-  outright. Fairer in the sense Pier describes (nobody's payment is ever "final" while the vault is
-  short), but structurally bigger: `EpochClaim.claimed` is currently a boolean, all-or-nothing: this
-  needs the claim to track a *paid-so-far* amount and stay open until it reaches nominal, which
-  touches `_settleClaimAccounting`, `_coverPayout`, `outstandingClaimCount`, and every invariant
-  that currently assumes a claim is binary (open or closed).
+**What "cohort" means here.** The codebase already has exactly the right-shaped grouping for this:
+an epoch's settlement bucket (`EpochQueueStorage.EpochData`), which groups every claim that shares
+one `fundEpoch()` call. Nothing new was introduced to represent a cohort.
 
-Spec §9.2's own words — "apply the same proportional recovery rate to all affected outstanding
-claims" — read more like (a) than (b), but the spec's insolvency section was written before this
-exact interaction was traced through, and does not decide it explicitly either way. **Not
-implemented in this round.** Whichever Multyr picks, the mechanical work is scoped above and this
-document should be updated with the chosen model before merge, per Pier's own framing: "otherwise
-'order doesn't matter' is only true while the liability index remains unchanged between claims."
+**The settlement sequence, mechanically, inside `fundEpoch()`:**
+
+```
+CLOSED epoch, insolvency suspected
+  -> block new ordinary liabilities        (already true: W-3, gross <= owed reverts requests)
+  -> reconcile / realize recoverable assets (the existing hot -> warm refill -> strategy redeem
+                                              waterfall, unchanged -- this already IS "attempt to
+                                              realize what's reasonably recoverable")
+  -> determine the final recovery pool      (what was actually raised: reservedRemaining)
+  -> crystallize ONE recoveryIndex          (EpochData.recoveryIndex = reservedRemaining / unclaimed,
+     for the cohort, once, immutably           set exactly once, at the Closed -> Funded transition)
+  -> write the haircut out of totalOwed     (totalOwed -= unclaimed - reservedRemaining, the same
+     immediately, not at claim time            instant -- EpochRecoveryCrystallized event)
+  -> settle all affected claims pro-rata    (claimEpochAssets / batchClaimEpochAssets pay
+                                              assetsOwed * recoveryIndex / 1e18, from
+                                              EpochData.recoveryIndex -- never the live,
+                                              cross-epoch liabilityIndex())
+```
+
+This is deliberately **not** "the ratio freezes at the first block where `grossAssets < totalOwed`":
+insolvency is *detected* the moment `gross < owed` (unchanged, W-3 still blocks new requests
+immediately), but nothing is *crystallized* until `fundEpoch()` actually runs its realize waterfall
+and the epoch transitions to `Funded` — exactly the "reconcile, then crystallize" sequencing asked
+for. A `fundEpoch()` call that cannot yet fully cover the epoch (beyond the existing
+`INSOLVENCY_FUNDING_DUST_BPS` tolerance) leaves it `Closed` and crystallizes nothing; the caller
+(a keeper, in practice) simply retries once more liquidity has been realized.
+
+**What changed, concretely, from the first draft:**
+- `EpochData` gained one field, `recoveryIndex` (WAD, `<= 1e18`), written exactly once, at the
+  `Closed -> Funded` transition, from `reservedRemaining / unclaimed` — not from the live index.
+- `claimEpochAssets` / `batchClaimEpochAssets` pay `assetsOwed * epochData(epochId).recoveryIndex`,
+  never `liabilityIndex()`. Different epochs funded at different times can (and, under a loss that
+  lands between two fundings, will) carry different recoveryIndex values — there is no longer one
+  shared global "the" index for payout purposes, only per-cohort crystallized ones. A cohort funded
+  *while solvent* crystallizes at exactly `1e18` and is thereafter immune to any later loss.
+- `fundEpoch()` on an already-`Funded` epoch reverts to a pure no-op (self-heals the keeper cursor
+  only) — the §8.1 item 6 top-up path is **removed**, because it directly contradicted requirement
+  (2): topping up an already-crystallized cohort from a later recovery is exactly "the ratio isn't
+  final until claimed", the opposite of what was asked for.
+- `fundEpoch()` writes `totalOwed -= (unclaimed - reservedRemaining)` in the same transaction as
+  crystallization (`EpochRecoveryCrystallized` event). Practical effect, directly requested:
+  `totalOwed`, `grossAssets`/`totalOwed`'s ratio (`isInsolvent()`, `liabilityIndex()`), NAV,
+  `maxDeposit`, and every downstream consumer of `totalAssets()` stop being held hostage by a
+  haircut that is already final — a vault can return to `!isInsolvent()` (and accept new deposits
+  and requests again) the moment its crystallized cohorts are covered, without waiting for those
+  specific claimants to physically withdraw.
+- A recovery in `grossAssets` after a cohort is crystallized is not paid to that cohort at all: it
+  simply flows through to `totalAssets()` (remaining shareholders), because `totalOwed` no longer
+  carries that cohort's nominal, only its crystallized, already-fully-reserved remainder.
+
+**What did NOT change:** `EpochClaim.claimed` stays a boolean (Option B — residual, partially-paid,
+still-live claims — was not implemented; it remains a strictly bigger, structurally different
+change, sketched but not pursued, per Multyr's Option A decision). Within one cohort, W-14 ("no
+first-claimer advantage") still holds exactly as before — claim order inside a `Funded` epoch never
+changes what it pays. `INSOLVENCY_FUNDING_DUST_BPS` and the realize waterfall (hot → warm refill →
+strategy redeem) are unchanged; they are the "reconcile / realize recoverable assets" step Multyr
+asked to keep in front of crystallization, not something this round touched.
+
+**Tests:** `EconomicExit_Gaps.t.sol` (`test_recoveryAfterFunding_isNotOwedToTheCohort_flowsToShareholdersInstead`,
+`test_adversarial_recoveryAfterFunding_bothClaimantsPaidTheCrystallizedShare_noRace`,
+`test_multiEpoch_twoSuccessiveHacks_aliceProtectedAfterFunding_bobAbsorbsBoth`),
+`EconomicExit_Spec.t.sol` (`test_s11_insolvency_fullScenario`, `test_s11_recoveryAfterFunding_doesNotTopUp`,
+`test_W13_W14_fundedClaimsAcrossEpochs_getTheSameIndex_andClaimingDoesNotMoveIt`,
+`test_W13_batchClaim_paysEveryClaimAtOneIndex`), `AdapterShortfall.t.sol`
+(`test_insolvent_andAdapterPaysShort_indexDropsWithEachRecognisedShortfall_fundingConverges`,
+adapted), `EconomicExit_Invariants.t.sol` (W-5, W-13, W-14 redefined per-cohort, see the handler),
+and the fork suite (§8.3).
 
 ### 8.3 Fork-suite infrastructure note (not a contract issue)
 
 5 of the 22 Arbitrum fork tests are blocked by the free public RPC (`arb1.arbitrum.io/rpc`), not by
 anything in this PR: `test_fork_fundEpoch_realisesFromRealWarmAndStrategy_thenClaimPaysFixedAmount`,
 `test_fork_fluidHack_severe_insolvency_claimsStillPayAtTheRecoveryRatio`,
-`test_fork_insolvency_indexRecoversAutomatically_whenAssetsAreRestored`,
+`test_fork_insolvency_recoveryAfterFunding_doesNotTopUp` (renamed from
+`test_fork_insolvency_indexRecoversAutomatically_whenAssetsAreRestored`, Option A: a recovery no
+longer tops up an already-crystallized cohort, see §8.2),
 `test_fork_insolvency_proRata_sameIndex_noFirstClaimerAdvantage_andRecovery`,
 `test_fork_strategyWithdrawalsFail_fundingFailsSafe_thenRecovers`. All five force a *large* redeem
 out of the real `UsdcMultiLendingVault` strategy. Traced with `-vvvv`: `EpochedQueueModule.fundEpoch`

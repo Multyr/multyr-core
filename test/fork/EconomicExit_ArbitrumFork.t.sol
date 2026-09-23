@@ -593,6 +593,11 @@ contract EconomicExit_ArbitrumFork_Test is Test {
 
     // ═════════════════════════ 6. insolvency, end to end, on real USDC ═════════════════════════
 
+    /// @dev Option A (review: Multyr, PR #19 second round): payout is compared against the
+    ///      cohort's crystallized `epochData(e).recoveryIndex`, not the live, cross-epoch
+    ///      `liabilityIndex()` -- which, for a single fully-crystallized epoch, normalizes back
+    ///      toward 1e18 the instant it is funded (totalOwed is written down to match what was
+    ///      actually reserved), so it is no longer a stand-in for "what this claim pays".
     function test_fork_insolvency_proRata_sameIndex_noFirstClaimerAdvantage_andRecovery() public {
         uint256 sa = _deposit(alice, 6_000e6);
         uint256 sb = _deposit(bob, 4_000e6);
@@ -635,24 +640,26 @@ contract EconomicExit_ArbitrumFork_Test is Test {
         console2.log("post-fund hot", _hot());
         console2.log("post-fund gross", ICoreVault(VAULT).grossAssets());
         assertTrue(q.epochData(e).state == EpochQueueStorage.EpochState.Funded, "funds at the recovery ratio");
+        uint256 recoveryIndex = q.epochData(e).recoveryIndex;
+        assertApproxEqRel(recoveryIndex, index, 0.01e18, "crystallized close to the pre-fund estimate");
 
-        // bob (later, smaller) claims first; both get the SAME fraction; the index does not move
+        // bob (later, smaller) claims first; both get the SAME fraction; the crystallized index
+        // (write-once storage) does not move.
         uint256 paidB = _claim(bob, e, cb);
-        uint256 idxAfterB = ICoreVault(VAULT).liabilityIndex();
+        assertEq(q.epochData(e).recoveryIndex, recoveryIndex, "W-13: claiming does not move the immutable index");
         uint256 paidA = _claim(alice, e, ca);
-        assertApproxEqRel(paidB * WAD / owedB, index, 1e12, "bob paid at the index");
-        assertApproxEqRel(paidA * WAD / owedA, index, 1e12, "alice paid at the same index");
-        assertGe(idxAfterB, index);
-        // W-13. It can only rise, and only by the funding dust tolerance: the real strategy cannot return the
-        // last ~5k units of its position, the epoch funded inside INSOLVENCY_FUNDING_DUST_BPS (10 bps), and the
-        // claim was paid what was on hand -- so the gross that stays behind is a hair above the exact ratio.
-        assertLe(idxAfterB - index, index / 1000, "W-13: claiming does not move the index (beyond 10 bps dust)");
+        assertApproxEqRel(paidB * WAD / owedB, recoveryIndex, 1e12, "bob paid at the crystallized index");
+        assertApproxEqRel(paidA * WAD / owedA, recoveryIndex, 1e12, "alice paid at the same index");
+        assertEq(q.epochData(e).recoveryIndex, recoveryIndex, "W-13 again after the second claim");
         assertEq(ICoreVault(VAULT).totalOwed(), 0);
     }
 
-    function test_fork_insolvency_indexRecoversAutomatically_whenAssetsAreRestored() public {
+    /// @notice Option A (review: Multyr, PR #19 second round): once funded/crystallized, a
+    ///         recovery is NOT owed to the cohort any more -- it flows to remaining shareholders
+    ///         (bob) instead. Alice is paid exactly the crystallized ~50%, never topped up.
+    function test_fork_insolvency_recoveryAfterFunding_doesNotTopUp() public {
         uint256 sa = _deposit(alice, 6_000e6);
-        _deposit(bob, 6_000e6);
+        uint256 sb = _deposit(bob, 6_000e6);
         _freshOracle();
         (uint256 e, uint256 c) = _request(alice, sa);
         uint256 owed = q.epochClaim(e, c).assetsOwed;
@@ -662,12 +669,20 @@ contract EconomicExit_ArbitrumFork_Test is Test {
         uint256 gross0 = ICoreVault(VAULT).grossAssets();
         _lose(gross0 - owed / 2); // gross = 50% of owed
         assertTrue(ICoreVault(VAULT).isInsolvent());
-        q.fundEpoch(e); // funded at 50%
+        q.fundEpoch(e); // crystallizes recoveryIndex ~= 50%
+        uint256 recoveryIndex = q.epochData(e).recoveryIndex;
+        assertApproxEqRel(recoveryIndex, WAD / 2, 0.01e18);
+        assertFalse(ICoreVault(VAULT).isInsolvent(), "totalOwed written down: solvent again immediately");
 
-        _gain(owed * 3); // assets come back (e.g. a transient valuation error resolves)
-        assertFalse(ICoreVault(VAULT).isInsolvent());
-        assertEq(ICoreVault(VAULT).liabilityIndex(), WAD, "recovered with no intervention");
-        assertEq(_claim(alice, e, c), owed, "no permanent haircut: paid the full nominal");
+        uint256 bobValueBefore = vault.convertToAssets(sb);
+        _gain(owed * 3); // a recovery -- NOT owed to alice's already-crystallized cohort
+
+        assertEq(q.epochData(e).recoveryIndex, recoveryIndex, "immutable: never re-crystallized");
+        assertEq(_claim(alice, e, c), owed * recoveryIndex / WAD, "paid exactly the crystallized share");
+        assertGt(
+            vault.convertToAssets(sb), bobValueBefore,
+            "the recovery instead raised the remaining shareholder's value"
+        );
     }
 
     function test_fork_insolvencyEvents_areEmittedWhenSelectorIsRouted() public {
@@ -789,10 +804,12 @@ contract EconomicExit_ArbitrumFork_Test is Test {
 
         _closeEpoch();
         _freshOracle();
-        q.fundEpoch(e); // realises the rest of the real strategy; funds at the recovery ratio
+        q.fundEpoch(e); // realises the rest of the real strategy; crystallizes the cohort's recoveryIndex
         assertTrue(q.epochData(e).state == EpochQueueStorage.EpochState.Funded, "NOT blocked by an impossible nominal target");
+        uint256 recoveryIndex = q.epochData(e).recoveryIndex;
+        assertApproxEqRel(recoveryIndex, index, 0.01e18, "crystallized close to the pre-fund estimate");
         uint256 paid = _claim(alice, e, c);
-        assertApproxEqRel(paid, owed * index / WAD, 0.002e18, "paid the recovery ratio");
+        assertEq(paid, owed * recoveryIndex / WAD, "paid the crystallized recovery ratio");
         assertLt(paid, owed);
     }
 

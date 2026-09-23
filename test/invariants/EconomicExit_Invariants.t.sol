@@ -165,27 +165,29 @@ contract EconomicExitHandler is Test {
         Tracked storage tr = tracked[i];
         if (tr.claimed) return;
 
-        (, , uint256 indexBefore) = core.liabilityState();
+        // Option A: a claim can only be claimed from a FUNDED epoch, whose cohort
+        // recoveryIndex was crystallized ONCE, at fund time, and is immutable from then on
+        // -- not the live, cross-epoch liabilityIndex().
+        EpochQueueStorage.EpochData memory epochBefore =
+            EpochedQueueModule(address(core)).epochData(tr.epochId);
+        uint256 indexBefore = epochBefore.recoveryIndex;
         uint256 balBefore = IERC20(EE_USDC).balanceOf(tr.user);
 
         vm.prank(tr.user);
         try EpochedQueueModule(address(core)).claimEpochAssets(tr.epochId, tr.claimId) returns (uint256 paid) {
             calls_claim++;
             tr.claimed = true;
-            // W-14: every claim is paid at the one index
+            // W-14: every claim in the cohort is paid at that cohort's crystallized index
             uint256 expected = indexBefore >= 1e18 ? tr.assetsOwed : tr.assetsOwed * indexBefore / 1e18;
             if (paid != expected || IERC20(EE_USDC).balanceOf(tr.user) - balBefore != paid) {
                 claimNotPaidAtIndex = true;
             }
-            // W-13: paying at the current index leaves the index unchanged. The payout is rounded
-            // DOWN, so gross can be at most 1 wei higher than the exact proportional value: the index
-            // can rise by at most 1e18 / totalOwed_after (+1 for its own floor), and never fall.
-            // When the last claim leaves totalOwed == 0 the index is 1e18 by definition.
-            (, uint256 owedAfter, uint256 indexAfter) = core.liabilityState();
-            if (owedAfter > 0) {
-                if (indexAfter < indexBefore || indexAfter - indexBefore > 1e18 / owedAfter + 2) {
-                    indexMovedByClaim = true;
-                }
+            // W-13: recoveryIndex is write-once storage -- claiming from the cohort can
+            // never change it (nothing left to move).
+            EpochQueueStorage.EpochData memory epochAfter =
+                EpochedQueueModule(address(core)).epochData(tr.epochId);
+            if (epochAfter.recoveryIndex != indexBefore) {
+                indexMovedByClaim = true;
             }
         } catch {}
     }
@@ -273,13 +275,27 @@ contract EconomicExit_Invariants_Test is StdInvariant, Test {
 
     // W-5 + W-9
     function invariant_W5_W9_totalOwedIsTheSumOfUnclaimedFixedAmounts() public view {
-        uint256 sum;
         uint256 n = handler.trackedLength();
         for (uint256 i; i < n; i++) {
-            (uint256 e, uint256 c,, uint256 fixedOwed, bool claimed) = handler.tracked(i);
+            (uint256 e, uint256 c,, uint256 fixedOwed,) = handler.tracked(i);
             // W-9: never changes after request
             assertEq(EpochedQueueModule(address(core)).epochClaim(e, c).assetsOwed, fixedOwed, "W-9");
-            if (!claimed) sum += fixedOwed;
+        }
+
+        // W-5 (Option A): totalOwed is the sum, across every epoch, of that epoch's true
+        // remaining liability -- nominal unclaimed for a not-yet-crystallized (Open/Closed)
+        // epoch, or the cohort's exactly-tracked reservedRemaining for a FUNDED one (its
+        // recoveryIndex haircut, if any, was already written off totalOwed in one shot at
+        // fund time -- see EpochRecoveryCrystallized / fundEpoch's writeOff). reservedRemaining
+        // and totalOwed move by the identical `released` amount at every claim from a FUNDED
+        // epoch, so this holds exactly, not just to a rounding tolerance.
+        uint256 sum;
+        uint256 cur = EpochedQueueModule(address(core)).currentEpochId();
+        for (uint256 id; id <= cur; id++) {
+            EpochQueueStorage.EpochData memory e = EpochedQueueModule(address(core)).epochData(id);
+            sum += e.state == EpochQueueStorage.EpochState.Funded
+                ? e.reservedRemaining
+                : e.totalAssetsOwed - e.claimedAssets;
         }
         assertEq(core.totalOwed(), sum, "W-5");
     }
