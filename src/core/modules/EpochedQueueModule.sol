@@ -818,6 +818,71 @@ contract EpochedQueueModule {
         _exitNonReentrant();
     }
 
+    /// @notice Permissionless: settle a batch of FUNDED, unclaimed claims and pay each one
+    ///         directly to its owner (`claim.user`), regardless of who calls this. Unlike
+    ///         claimEpochAssets/batchClaimEpochAssets (self-claim only, `msg.sender` must own
+    ///         the claim), this lets anyone -- a keeper, in practice -- sweep an epoch's claims
+    ///         without every user submitting their own transaction. Self-claim remains the
+    ///         permissionless fallback if no keeper is run, or one lags: nothing here changes
+    ///         claimEpochAssets/batchClaimEpochAssets, and a claim already paid by either path
+    ///         is silently skipped by the other (idempotent on `claim.claimed`).
+    /// @dev Atomic, not try/catch-per-claim: if one claim's transfer reverts (e.g. `claim.user`
+    ///      is a contract that rejects the token), the WHOLE batch reverts, exactly like
+    ///      batchClaimEpochAssets today. Swallowing a failed transfer here would be a fund-loss
+    ///      bug -- claim.claimed and the epoch's accounting are only safe to update together
+    ///      with the transfer that backs them, not independently of it. A caller (the keeper
+    ///      contract, in the automation layer, not here) is expected to try/catch this call and
+    ///      exclude/retry-smaller on failure, the same pattern VaultUpkeep already uses for
+    ///      every other op.
+    /// @return totalSettled sum of assets paid out across the batch
+    function keeperSettleClaims(uint256 epochId, uint256[] calldata claimIds)
+        external
+        returns (uint256 totalSettled)
+    {
+        _notPausedFundedClaim();
+        _enterNonReentrant();
+
+        EpochQueueStorage.Layout storage eq = EpochQueueStorage.layout();
+        EpochQueueStorage.EpochData storage epoch = eq.epochs[epochId];
+        if (epoch.state != EpochQueueStorage.EpochState.Funded) revert EpochNotFunded();
+
+        (uint256 gross, uint256 owed, uint256 index) = _navState();
+        _syncInsolvencyLatch(eq, gross, owed, index);
+
+        uint256 recoveryIndex = epoch.recoveryIndex;
+        address assetAddr = _asset();
+
+        for (uint256 i = 0; i < claimIds.length; ) {
+            EpochQueueStorage.EpochClaim storage claim = eq.claims[epochId][claimIds[i]];
+            address user = claim.user;
+            // user == address(0): claimId was never created for this epoch -- skip, rather
+            // than let a bogus ID corrupt outstandingClaimCount/reservedForClaims bookkeeping.
+            if (user != address(0) && !claim.claimed) {
+                uint256 assetsOwed = claim.assetsOwed;
+                uint256 assets = _payoutAt(assetsOwed, recoveryIndex);
+                claim.claimed = true;
+                uint256 reservedBefore = eq.reservedForClaims;
+                uint256 released = _settleClaimAccounting(eq, epoch, assetsOwed);
+                // Each claim pays a DIFFERENT recipient, so the transfer happens immediately
+                // below rather than summed into one final transfer (unlike
+                // batchClaimEpochAssets) -- paidSoFar is 0 every iteration because the hot
+                // balance _coverPayout reads already reflects every prior transfer in this loop.
+                assets = _coverPayout(assets, released, reservedBefore, 0);
+
+                if (assets > 0) {
+                    IERC20(assetAddr).safeTransfer(user, assets);
+                }
+                totalSettled += assets;
+
+                emit EpochAssetsClaimed(epochId, claimIds[i], user, assets, assetsOwed);
+                emit IERC4626.Withdraw(address(this), user, user, assets, claim.grossShares);
+            }
+            unchecked { ++i; }
+        }
+
+        _exitNonReentrant();
+    }
+
     /// @dev Bookkeeping for one claim leaving the books. The claim releases its proportional
     ///      share of ITS OWN epoch's earmark (`reservedRemaining`), never another epoch's: the
     ///      earmark was crystallized at fund time (Option A) as exactly what was reserved for
