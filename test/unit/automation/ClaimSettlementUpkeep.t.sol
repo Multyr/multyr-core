@@ -381,7 +381,7 @@ contract ClaimSettlementUpkeep_Test is Test {
         assertTrue(needed, "bounded empty page needs cursor progress");
         upkeep.performUpkeep("");
         assertEq(upkeep.cursorClaimId(), cb);
-        vm.warp(block.timestamp + 1 minutes);
+        vm.warp(vm.getBlockTimestamp() + 1 minutes);
         upkeep.performUpkeep("");
         assertTrue(_q().epochClaim(e, cb).claimed);
     }
@@ -408,7 +408,7 @@ contract ClaimSettlementUpkeep_Test is Test {
         uint256 cursor = upkeep.cursorClaimId();
         uint256 epoch = upkeep.cursorEpochId();
         for (uint256 i; i < 60; ++i) {
-            vm.warp(block.timestamp + 1 minutes);
+            vm.warp(vm.getBlockTimestamp() + 1 minutes);
             (bool needed,) = upkeep.checkUpkeep("");
             assertFalse(needed, "settled history must not spend LINK");
             upkeep.performUpkeep("");
@@ -457,4 +457,167 @@ contract ClaimSettlementUpkeep_Test is Test {
         (needed,) = upkeep.checkUpkeep("");
         assertFalse(needed);
     }
+    function _historyWithOneRemainingClaim() internal returns (uint256 e, uint256 c) {
+        _deposit(alice, 1_000e6);
+        uint256[] memory settledIds = new uint256[](229);
+        for (uint256 i; i < 230; ++i) {
+            (e, c) = _request(alice, 1e6);
+            if (i < 229) settledIds[i] = c;
+        }
+        _close();
+        _q().fundEpoch(e);
+        vm.prank(alice);
+        _q().batchClaimEpochAssets(e, settledIds);
+        assertEq(_q().fundedOutstandingClaimCount(), 1);
+    }
+
+    function _finishNoWorkPass() internal returns (uint256 executions) {
+        for (uint256 i; i < 5; ++i) {
+            vm.warp(vm.getBlockTimestamp() + 1 minutes);
+            (bool needed,) = upkeep.checkUpkeep("");
+            if (!needed) return executions;
+            upkeep.performUpkeep("");
+            ++executions;
+        }
+        fail("no-work pass must terminate across bounded pages");
+    }
+
+    function test_v3_maintenanceWithOneExcludedClaim() public {
+        (uint256 e, uint256 c) = _historyWithOneRemainingClaim();
+        upkeep.excludeClaim(e, c, true);
+        assertEq(_finishNoWorkPass(), 2, "one bounded pass, including idle checkpoint");
+        assertTrue(upkeep.scanIdle());
+        uint256 epoch = upkeep.cursorEpochId();
+        uint256 claim = upkeep.cursorClaimId();
+        uint256 nextAttempt = upkeep.nextAttemptAt();
+        for (uint256 i; i < 60; ++i) {
+            vm.warp(vm.getBlockTimestamp() + 1 minutes);
+            (bool needed,) = upkeep.checkUpkeep("");
+            assertFalse(needed, "excluded-only backlog must not keep spending LINK");
+            upkeep.performUpkeep(abi.encode(type(uint256).max));
+        }
+        assertEq(upkeep.cursorEpochId(), epoch);
+        assertEq(upkeep.cursorClaimId(), claim);
+        assertEq(upkeep.nextAttemptAt(), nextAttempt);
+        assertFalse(_q().epochClaim(e, c).claimed);
+        // Automated exclusion never removes the owner's fallback.
+        vm.prank(alice);
+        _q().claimEpochAssets(e, c);
+        assertEq(_q().fundedOutstandingClaimCount(), 0);
+    }
+
+    function test_v3_backoffSleepsUntilRetryExpires() public {
+        (uint256 e, uint256 c) = _historyWithOneRemainingClaim();
+        upkeep.setCursor(e, c);
+        vm.mockCallRevert(
+            USDC, abi.encodeWithSelector(IERC20.transfer.selector, alice, 1e6), "blocked"
+        );
+        upkeep.performUpkeep("");
+        uint256 retryAt = upkeep.retryAfter(e, c);
+        assertEq(retryAt, vm.getBlockTimestamp() + upkeep.RETRY_DELAY());
+        assertEq(_finishNoWorkPass(), 2);
+        assertTrue(upkeep.scanIdle());
+        while (vm.getBlockTimestamp() + 1 minutes < retryAt) {
+            vm.warp(vm.getBlockTimestamp() + 1 minutes);
+            (bool needed,) = upkeep.checkUpkeep("");
+            assertFalse(needed, "backoff must not generate maintenance transactions");
+            upkeep.performUpkeep("");
+        }
+        vm.warp(retryAt - 1);
+        (bool early,) = upkeep.checkUpkeep("");
+        assertFalse(early);
+        vm.clearMockedCalls();
+        vm.warp(retryAt);
+        (bool due,) = upkeep.checkUpkeep("");
+        assertTrue(due, "expiry restarts bounded scanning without owner intervention");
+        for (uint256 i; i < 3 && !_q().epochClaim(e, c).claimed; ++i) {
+            upkeep.performUpkeep("");
+            vm.warp(vm.getBlockTimestamp() + 1 minutes);
+        }
+        assertTrue(_q().epochClaim(e, c).claimed);
+    }
+
+    function test_v3_newFundedCountWakesIdleScan() public {
+        (uint256 e, uint256 c) = _historyWithOneRemainingClaim();
+        upkeep.excludeClaim(e, c, true);
+        _finishNoWorkPass();
+        (uint256 nextEpoch, uint256 nextClaim) = _request(alice, 1e6);
+        _close();
+        (bool beforeFunding,) = upkeep.checkUpkeep("");
+        assertFalse(beforeFunding, "new unfunded claims do not wake idle maintenance");
+        _q().fundEpoch(nextEpoch);
+        (bool needed,) = upkeep.checkUpkeep("");
+        assertTrue(needed, "new funded work wakes the scan");
+        for (uint256 i; i < 3 && !_q().epochClaim(nextEpoch, nextClaim).claimed; ++i) {
+            upkeep.performUpkeep("");
+            vm.warp(vm.getBlockTimestamp() + 1 minutes);
+        }
+        assertTrue(_q().epochClaim(nextEpoch, nextClaim).claimed);
+        assertFalse(_q().epochClaim(e, c).claimed);
+    }
+
+    function test_v3_removingExclusionWakesIdleScan() public {
+        (uint256 e, uint256 c) = _historyWithOneRemainingClaim();
+        upkeep.excludeClaim(e, c, true);
+        _finishNoWorkPass();
+        upkeep.excludeClaim(e, c, false);
+        (bool needed,) = upkeep.checkUpkeep("");
+        assertTrue(needed);
+        for (uint256 i; i < 3 && !_q().epochClaim(e, c).claimed; ++i) {
+            upkeep.performUpkeep("");
+            vm.warp(vm.getBlockTimestamp() + 1 minutes);
+        }
+        assertTrue(_q().epochClaim(e, c).claimed);
+    }
+
+    function test_v3_passCompletesFromMiddleAcrossWrapAndExactBudget() public {
+        (uint256 e, uint256 c) = _historyWithOneRemainingClaim();
+        upkeep.excludeClaim(e, c, true);
+        upkeep.setBatchSizes(1, 116);
+        upkeep.setCursor(e, 100);
+        assertEq(_finishNoWorkPass(), 2, "232 probes cover claims and epoch boundaries");
+        assertTrue(upkeep.scanIdle());
+        upkeep.setCursor(e, c);
+        assertFalse(upkeep.scanIdle(), "manual cursor changes invalidate old pass");
+        upkeep.setBatchSizes(20, 200);
+        _finishNoWorkPass();
+        assertTrue(upkeep.scanIdle());
+    }
+
+    function test_v3_earliestRetryAcrossPagesWakesScan() public {
+        uint256 a = _deposit(alice, 50e6);
+        uint256 b = _deposit(bob, 50e6);
+        (uint256 e, uint256 ca) = _request(alice, a);
+        (, uint256 cb) = _request(bob, b);
+        _close();
+        _q().fundEpoch(e);
+        upkeep.setBatchSizes(1, 1);
+        vm.mockCallRevert(
+            USDC, abi.encodeWithSelector(IERC20.transfer.selector, alice, 50e6), "blocked"
+        );
+        vm.mockCallRevert(
+            USDC, abi.encodeWithSelector(IERC20.transfer.selector, bob, 50e6), "blocked"
+        );
+        upkeep.performUpkeep("");
+        uint256 firstRetry = upkeep.retryAfter(e, ca);
+        vm.warp(vm.getBlockTimestamp() + 30 minutes);
+        upkeep.performUpkeep("");
+        assertGt(upkeep.retryAfter(e, cb), firstRetry);
+        assertEq(_finishNoWorkPass(), 4);
+        assertTrue(upkeep.scanIdle());
+        vm.warp(firstRetry - 1);
+        (bool early,) = upkeep.checkUpkeep("");
+        assertFalse(early);
+        vm.clearMockedCalls();
+        vm.warp(firstRetry);
+        (bool due,) = upkeep.checkUpkeep("");
+        assertTrue(due, "wake at earliest retry, not the last one seen");
+        for (uint256 i; i < 4 && !_q().epochClaim(e, ca).claimed; ++i) {
+            upkeep.performUpkeep("");
+            vm.warp(vm.getBlockTimestamp() + 1 minutes);
+        }
+        assertTrue(_q().epochClaim(e, ca).claimed);
+        assertFalse(_q().epochClaim(e, cb).claimed, "later retry remains in backoff");
+    }
+
 }

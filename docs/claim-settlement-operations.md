@@ -16,9 +16,18 @@ not generate periodic maintenance transactions.
 A funded backlog can require bounded cursor-maintenance transactions. The scan wraps and
 revisits epochs funded out of order. A failed batch retries claims individually. Failed
 recipients get a one-hour retry delay; unsuccessful/maintenance runs have a one-minute
-cooldown. Excluded or delayed claims remain outstanding, so funded-work gating alone is
-not a promise of zero maintenance cost while such claims exist. Monitor and investigate
-persistent failures rather than treating retry as a payment guarantee.
+cooldown. A no-work pass retains its starting position across bounded executions. Once
+that full pass completes, maintenance sleeps even if excluded or delayed funded claims
+remain outstanding. It wakes when the funded outstanding count changes or the earliest
+non-excluded `retryAfter` observed in the pass expires. Changing exclusions, batch/scan
+limits or the owner-controlled cursor resets the pass. New unfunded claims alone do not
+wake it. Each fresh pass can cost bounded maintenance executions; a stable excluded-only
+backlog does not trigger another pass every minute.
+
+The pass also resets when its observed funded count changes or a retry becomes due during
+scanning, so a previously visited claim becoming eligible is revisited. Failed settlement
+attempts start a fresh pass. Monitor `scanIdle`, `scanPass`, persistent failures and retry
+timestamps rather than treating retry as a payment guarantee.
 
 The counter requires the matching queue module and public selector registration. A new
 vault populates it through funding/settlement. A live module upgrade with existing funded
@@ -60,6 +69,7 @@ Before real TVL, measure receipts or fork simulations through the intended regis
 | Batch failure followed by 20 individual attempts | Failure-path gas ceiling |
 | Zero recovery / manual settlement race | Accounting-only and stale check paths |
 | Fully settled history and unfunded-only history | Must produce no scheduled upkeep |
+| Excluded-only or retry-delayed funded history | One no-work pass, then no scheduled maintenance until an eligibility change |
 
 Use the registry's payment formula with measured execution gas, chain gas-price scenarios,
 LINK/native conversion, premium, overhead and any chain-specific data fees. Model monthly
@@ -73,7 +83,7 @@ Local reproducible contract-level measurement:
 forge test --match-path test/unit/automation/ClaimSettlementUpkeep.t.sol --gas-report
 ```
 
-The local 20-test automation run observed `performUpkeep` at 40,718–543,471 gas
+The pre-idle-pass 20-test automation baseline observed `performUpkeep` at 40,718–543,471 gas
 across 78 calls (including deliberately invoked no-ops), and `checkUpkeep` at
 17,427–200,997 gas across 83 calls. These are observations of that test workload, not
 upper bounds: it does not exercise a full 20-recipient failure batch.

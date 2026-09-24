@@ -65,101 +65,129 @@ contract ClaimSettlementUpkeep is AutomationCompatibleInterface, Ownable, Reentr
     mapping(uint256 => mapping(uint256 => uint256)) public retryAfter;
     event ClaimSettlementFailed(uint256 indexed epochId, uint256 indexed claimId, uint256 retryAt);
 
+    struct ScanPass {
+        bool active;
+        bool wrapped;
+        uint256 fundedCount;
+        uint256 startEpoch;
+        uint256 startClaim;
+        uint256 lastEpoch;
+        uint256 retryAt;
+    }
+
+    struct ScanResult {
+        uint256 epochId;
+        uint256[] ids;
+        uint256 nextEpoch;
+        uint256 nextClaim;
+        bool complete;
+        ScanPass pass;
+    }
+
+    ScanPass public scanPass;
+    bool public scanIdle;
+
+    function _canScan(uint256 fundedCount) internal view returns (bool) {
+        if (
+            target.outstandingClaimCount() == 0 || fundedCount == 0 || target.pausedFundedClaim()
+                || block.timestamp < nextAttemptAt
+        ) return false;
+        return !scanIdle || scanPass.fundedCount != fundedCount
+            || (scanPass.retryAt != 0 && block.timestamp >= scanPass.retryAt);
+    }
+
     function checkUpkeep(bytes calldata)
         external
         view
         override
         returns (bool upkeepNeeded, bytes memory performData)
     {
-        if (
-            target.outstandingClaimCount() == 0 || target.fundedOutstandingClaimCount() == 0
-                || target.pausedFundedClaim() || block.timestamp < nextAttemptAt
-        ) {
-            return (false, bytes(""));
-        }
-        (
-            uint256 epochId,
-            uint256[] memory ids,
-            uint256 nextEpoch,
-            uint256 nextClaim,
-            bool maintenance
-        ) = _scan();
-        return (ids.length != 0 || maintenance, abi.encode(epochId, ids, nextEpoch, nextClaim));
+        uint256 fundedCount = target.fundedOutstandingClaimCount();
+        if (!_canScan(fundedCount)) return (false, bytes(""));
+        ScanResult memory r = _scan(fundedCount);
+        // A partial pass needs one final execution to persist its completed idle state.
+        bool maintenance = !r.complete || r.pass.active;
+        return
+            (
+                r.ids.length != 0 || maintenance,
+                abi.encode(r.epochId, r.ids, r.nextEpoch, r.nextClaim)
+            );
     }
 
     function performUpkeep(bytes calldata) external override nonReentrant {
-        if (
-            target.outstandingClaimCount() == 0 || target.fundedOutstandingClaimCount() == 0
-                || target.pausedFundedClaim() || block.timestamp < nextAttemptAt
-        ) return;
-        (
-            uint256 epochId,
-            uint256[] memory ids,
-            uint256 nextEpoch,
-            uint256 nextClaim,
-            bool maintenance
-        ) = _scan();
-        if (ids.length == 0 && !maintenance) return;
+        uint256 fundedCount = target.fundedOutstandingClaimCount();
+        if (!_canScan(fundedCount)) return;
+        ScanResult memory r = _scan(fundedCount);
+        if (r.ids.length == 0 && r.complete && !r.pass.active) return;
         uint256 totalSettled;
         bool success;
-        if (ids.length != 0) {
-            try target.keeperSettleClaims(epochId, ids) returns (uint256 amount) {
+        if (r.ids.length != 0) {
+            try target.keeperSettleClaims(r.epochId, r.ids) returns (uint256 amount) {
                 totalSettled = amount;
                 success = true;
             } catch {
                 uint256[] memory single = new uint256[](1);
-                for (uint256 i; i < ids.length; ++i) {
-                    single[0] = ids[i];
-                    try target.keeperSettleClaims(epochId, single) returns (uint256 amount) {
+                for (uint256 i; i < r.ids.length; ++i) {
+                    single[0] = r.ids[i];
+                    try target.keeperSettleClaims(r.epochId, single) returns (uint256 amount) {
                         totalSettled += amount;
                         success = true;
                     } catch {
-                        retryAfter[epochId][ids[i]] = block.timestamp + RETRY_DELAY;
-                        emit ClaimSettlementFailed(epochId, ids[i], block.timestamp + RETRY_DELAY);
+                        retryAfter[r.epochId][r.ids[i]] = block.timestamp + RETRY_DELAY;
+                        emit ClaimSettlementFailed(
+                            r.epochId, r.ids[i], block.timestamp + RETRY_DELAY
+                        );
                     }
                 }
             }
+            // Work (including failed attempts) starts a new no-work pass at the next cursor.
+            delete scanPass;
+            scanIdle = false;
+        } else {
+            r.pass.active = !r.complete;
+            scanPass = r.pass;
+            scanIdle = r.complete;
         }
-        cursorEpochId = nextEpoch;
-        cursorClaimId = nextClaim;
+        cursorEpochId = r.nextEpoch;
+        cursorClaimId = r.nextClaim;
         if (!success) nextAttemptAt = block.timestamp + 1 minutes;
-        emit UpkeepPerformed(epochId, ids.length, totalSettled, success);
+        emit UpkeepPerformed(r.epochId, r.ids.length, totalSettled, success);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
     // Scan
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    /// @dev Counts both epoch and claim probes against the scan budget. Wraps to revisit
-    ///      unfunded epochs and failed claims without rescanning an unbounded history.
-    function _scan()
-        internal
-        view
-        returns (
-            uint256 epochId,
-            uint256[] memory claimIds,
-            uint256 nextEpochId,
-            uint256 nextClaimId,
-            bool maintenance
-        )
-    {
+    /// @dev A no-work pass spans bounded calls, retaining its original boundary and
+    ///      earliest non-excluded retry. New funding or a due retry invalidates the pass.
+    function _scan(uint256 fundedCount) internal view returns (ScanResult memory r) {
         uint256 openEpoch = target.currentEpochId();
-        uint256 startEpoch = cursorEpochId <= openEpoch ? cursorEpochId : 0;
-        uint256 startClaim = cursorEpochId <= openEpoch ? cursorClaimId : 1;
-        uint256 e = startEpoch;
-        uint256 c = startClaim;
+        uint256 e = cursorEpochId <= openEpoch ? cursorEpochId : 0;
+        uint256 c = cursorEpochId <= openEpoch ? cursorClaimId : 1;
+        r.pass = scanPass;
+        if (
+            !r.pass.active || r.pass.fundedCount != fundedCount
+                || (r.pass.retryAt != 0 && block.timestamp >= r.pass.retryAt)
+        ) {
+            r.pass = ScanPass(false, false, fundedCount, e, c, openEpoch, 0);
+        }
         uint256 scanned;
         uint256 found;
-        bool wrapped;
         uint256[] memory buf = new uint256[](maxClaimsPerUpkeep);
         while (scanned < maxScanPerUpkeep && found < maxClaimsPerUpkeep) {
-            if (e > openEpoch) {
+            if (e > r.pass.lastEpoch) {
                 if (found != 0) break;
                 e = 0;
                 c = 1;
-                wrapped = true;
+                r.pass.wrapped = true;
             }
-            if (wrapped && (e > startEpoch || (e == startEpoch && c >= startClaim))) break;
+            if (
+                r.pass.wrapped
+                    && (e > r.pass.startEpoch || (e == r.pass.startEpoch && c >= r.pass.startClaim))
+            ) {
+                r.complete = true;
+                break;
+            }
             ++scanned;
             EpochQueueStorage.EpochData memory epoch = target.epochData(e);
             uint256 last = target.nextClaimIdForEpoch(e);
@@ -168,29 +196,48 @@ contract ClaimSettlementUpkeep is AutomationCompatibleInterface, Ownable, Reentr
                     || epoch.claimedAssets == epoch.totalAssetsOwed || c > last
             ) {
                 if (found != 0) break;
-                if (wrapped && e == startEpoch) break;
+                if (r.pass.wrapped && e == r.pass.startEpoch) {
+                    r.complete = true;
+                    break;
+                }
                 ++e;
                 c = 1;
                 continue;
             }
             EpochQueueStorage.EpochClaim memory claim = target.epochClaim(e, c);
-            if (
-                !claim.claimed && claim.user != address(0) && !excluded[e][c]
-                    && block.timestamp >= retryAfter[e][c]
-            ) {
-                epochId = e;
-                buf[found++] = c;
+            if (!claim.claimed && claim.user != address(0) && !excluded[e][c]) {
+                uint256 retryAt = retryAfter[e][c];
+                if (block.timestamp >= retryAt) {
+                    r.epochId = e;
+                    buf[found++] = c;
+                } else if (r.pass.retryAt == 0 || retryAt < r.pass.retryAt) {
+                    r.pass.retryAt = retryAt;
+                }
             }
             ++c;
         }
-        nextEpochId = e > openEpoch ? 0 : e;
-        nextClaimId = e > openEpoch ? 1 : c;
-        maintenance = found == 0 && scanned == maxScanPerUpkeep
-            && (nextEpochId != cursorEpochId || nextClaimId != cursorClaimId);
-        claimIds = new uint256[](found);
-        for (uint256 i; i < found; ++i) {
-            claimIds[i] = buf[i];
+        // Retain the wrap even when the scan budget ends exactly at the last epoch.
+        if (e > r.pass.lastEpoch) {
+            e = 0;
+            c = 1;
+            r.pass.wrapped = true;
         }
+        if (
+            found == 0 && r.pass.wrapped
+                && (e > r.pass.startEpoch || (e == r.pass.startEpoch && c >= r.pass.startClaim))
+        ) r.complete = true;
+        r.nextEpoch = e;
+        r.nextClaim = c;
+        r.ids = new uint256[](found);
+        for (uint256 i; i < found; ++i) {
+            r.ids[i] = buf[i];
+        }
+    }
+
+    function _resetScan() internal {
+        delete scanPass;
+        scanIdle = false;
+        nextAttemptAt = 0;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -209,11 +256,13 @@ contract ClaimSettlementUpkeep is AutomationCompatibleInterface, Ownable, Reentr
         }
         maxClaimsPerUpkeep = maxClaimsPerUpkeep_;
         maxScanPerUpkeep = maxScanPerUpkeep_;
+        _resetScan();
         emit BatchSizeConfigured(maxClaimsPerUpkeep_, maxScanPerUpkeep_);
     }
 
     function excludeClaim(uint256 epochId, uint256 claimId, bool excludedNow) external onlyOwner {
         excluded[epochId][claimId] = excludedNow;
+        _resetScan();
         emit ClaimExcluded(epochId, claimId, excludedNow);
     }
 
@@ -223,6 +272,7 @@ contract ClaimSettlementUpkeep is AutomationCompatibleInterface, Ownable, Reentr
         require(claimId > 0, "claimId=0");
         cursorEpochId = epochId;
         cursorClaimId = claimId;
+        _resetScan();
         emit CursorSet(epochId, claimId);
     }
 }
