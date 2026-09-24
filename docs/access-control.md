@@ -187,6 +187,7 @@ Key permissionless functions:
 | `keeperSettleClaims` | EpochedQueueModule | Permissionless batch payment to recorded claim owners; subject to the funded-claim breaker. Automatic settlement supplements owner self-claim. |
 | `rollCapEpochIfNeeded` | EpochedQueueModule | Permissionless cap rollover; state-changing entrypoints also roll before asset/supply mutations. |
 | `fundedOutstandingClaimCount` | EpochedQueueModule | Public view for outstanding claims in Funded epochs, including zero recovery. |
+| `fundedEpochCount` | EpochedQueueModule | Public view for the number of Closed-to-Funded transitions; only increases. |
 | `syncOldestUnfundedEpoch` | EpochedQueueModule | Cursor maintenance; subject to `FLAG_EPOCH_CLOSE_FUND_PAUSED` |
 | `acceptOwnership` | AdminModule | Must be `pendingOwner` (checked internally) |
 | `markMatured` | FixedMaturityModule | Any address, once maturityTs reached |

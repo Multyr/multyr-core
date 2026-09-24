@@ -446,6 +446,7 @@ contract ClaimSettlementUpkeep_Test is Test {
         _q().fundEpoch(e);
         assertEq(_q().epochData(e).recoveryIndex, 0);
         assertEq(_q().fundedOutstandingClaimCount(), 2);
+        assertEq(_q().fundedEpochCount(), 1, "repeated funding of one epoch counts once");
         vm.prank(alice);
         _q().claimEpochAssets(e, ca);
         assertEq(_q().fundedOutstandingClaimCount(), 1);
@@ -554,6 +555,29 @@ contract ClaimSettlementUpkeep_Test is Test {
         }
         assertTrue(_q().epochClaim(nextEpoch, nextClaim).claimed);
         assertFalse(_q().epochClaim(e, c).claimed);
+    }
+
+    function test_v3_sameBlockFundingAndSettlementWakesIdleScan() public {
+        (uint256 e, uint256 c) = _historyWithOneRemainingClaim();
+        upkeep.excludeClaim(e, c, true);
+        _finishNoWorkPass();
+        assertTrue(upkeep.scanIdle());
+        uint256 b = _deposit(bob, 100e6);
+        (uint256 nextEpoch, uint256 nextClaim) = _request(bob, b);
+        _close();
+        uint256 fundedEpochsBefore = _q().fundedEpochCount();
+        _q().fundEpoch(nextEpoch);
+        vm.prank(alice);
+        _q().claimEpochAssets(e, c);
+        assertEq(_q().fundedOutstandingClaimCount(), 1, "claim count back at its idle value");
+        assertEq(_q().fundedEpochCount(), fundedEpochsBefore + 1);
+        (bool needed,) = upkeep.checkUpkeep("");
+        assertTrue(needed, "new funding wakes the scan when the claim count is unchanged");
+        for (uint256 i; i < 3 && !_q().epochClaim(nextEpoch, nextClaim).claimed; ++i) {
+            upkeep.performUpkeep("");
+            vm.warp(vm.getBlockTimestamp() + 1 minutes);
+        }
+        assertTrue(_q().epochClaim(nextEpoch, nextClaim).claimed);
     }
 
     function test_v3_removingExclusionWakesIdleScan() public {

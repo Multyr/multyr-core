@@ -18,13 +18,15 @@ revisits epochs funded out of order. A failed batch retries claims individually.
 recipients get a one-hour retry delay; unsuccessful/maintenance runs have a one-minute
 cooldown. A no-work pass retains its starting position across bounded executions. Once
 that full pass completes, maintenance sleeps even if excluded or delayed funded claims
-remain outstanding. It wakes when the funded outstanding count changes or the earliest
-non-excluded `retryAfter` observed in the pass expires. Changing exclusions, batch/scan
+remain outstanding. It wakes when `fundedOutstandingClaimCount()` or `fundedEpochCount()`
+changes, or the earliest non-excluded `retryAfter` observed in the pass expires.
+`fundedEpochCount()` only increases, so a funding that coincides with a settlement in the
+same block still wakes the scan when the outstanding count ends where it was. Changing exclusions, batch/scan
 limits or the owner-controlled cursor resets the pass. New unfunded claims alone do not
 wake it. Each fresh pass can cost bounded maintenance executions; a stable excluded-only
 backlog does not trigger another pass every minute.
 
-The pass also resets when its observed funded count changes or a retry becomes due during
+The pass also resets when either observed funding counter changes or a retry becomes due during
 scanning, so a previously visited claim becoming eligible is revisited. Failed settlement
 attempts start a fresh pass. Monitor `scanIdle`, `scanPass`, persistent failures and retry
 timestamps rather than treating retry as a payment guarantee.

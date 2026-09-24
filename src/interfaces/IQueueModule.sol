@@ -87,6 +87,9 @@ interface IQueueModule {
     /// @notice Unclaimed claims in Funded epochs, including zero-recovery claims.
     function fundedOutstandingClaimCount() external view returns (uint256);
 
+    /// @notice Number of epochs that have transitioned to Funded. Monotonically increasing.
+    function fundedEpochCount() external view returns (uint256);
+
     /// @notice Oldest epoch that is CLOSED but not yet FUNDED
     function oldestUnfundedEpochId() external view returns (uint256);
 

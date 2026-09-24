@@ -26,6 +26,7 @@ closing an epoch does not price or burn its claims.
 | `reservedForClaims` | Cash earmarked for funded claims; already included in liabilities |
 | `outstandingClaimCount` | All unsettled claims, including Open and Closed epochs |
 | `fundedOutstandingClaimCount` | Unsettled claims in Funded epochs, including zero recovery |
+| `fundedEpochCount` | Closed-to-Funded transitions; only increases |
 | `oldestUnfundedEpochId` | Bounded-maintenance cursor for funding |
 
 Shareholder NAV is `max(0, grossAssets - totalOwed)`. Every consumer of hot cash uses

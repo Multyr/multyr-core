@@ -116,6 +116,10 @@ library EpochQueueStorage {
         bool insolvencyLatched;
         // Count of unclaimed claims in Funded epochs, including zero-recovery claims.
         uint256 fundedOutstandingClaimCount;
+        // Number of Closed -> Funded transitions. Only ever increases, so a keeper can detect a
+        // new funding even when claims settled in the same block leave
+        // fundedOutstandingClaimCount unchanged.
+        uint256 fundedEpochCount;
     }
 
     function layout() internal pure returns (Layout storage l) {
@@ -637,6 +641,7 @@ contract EpochedQueueModule {
 
             epoch.state = EpochQueueStorage.EpochState.Funded;
             eq.fundedOutstandingClaimCount += epoch.claimCount;
+            eq.fundedEpochCount += 1;
             epoch.fundedAt = uint64(block.timestamp);
 
             // --- Option A: crystallize this cohort's recovery ratio, exactly once ------
@@ -1226,6 +1231,11 @@ contract EpochedQueueModule {
     /// @notice Unclaimed claims in Funded epochs, including claims with zero recovery.
     function fundedOutstandingClaimCount() external view returns (uint256) {
         return EpochQueueStorage.layout().fundedOutstandingClaimCount;
+    }
+
+    /// @notice Number of epochs that have transitioned to Funded. Monotonically increasing.
+    function fundedEpochCount() external view returns (uint256) {
+        return EpochQueueStorage.layout().fundedEpochCount;
     }
 
     /// @notice Oldest epoch that is CLOSED but not yet FUNDED — what a keeper

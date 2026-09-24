@@ -10,6 +10,7 @@ import {EpochQueueStorage} from "../core/modules/EpochedQueueModule.sol";
 interface IClaimSettlementTarget {
     function outstandingClaimCount() external view returns (uint256);
     function fundedOutstandingClaimCount() external view returns (uint256);
+    function fundedEpochCount() external view returns (uint256);
     function pausedFundedClaim() external view returns (bool);
     function currentEpochId() external view returns (uint256);
     function nextClaimIdForEpoch(uint256 epochId) external view returns (uint256);
@@ -69,6 +70,7 @@ contract ClaimSettlementUpkeep is AutomationCompatibleInterface, Ownable, Reentr
         bool active;
         bool wrapped;
         uint256 fundedCount;
+        uint256 fundedEpochs;
         uint256 startEpoch;
         uint256 startClaim;
         uint256 lastEpoch;
@@ -87,12 +89,16 @@ contract ClaimSettlementUpkeep is AutomationCompatibleInterface, Ownable, Reentr
     ScanPass public scanPass;
     bool public scanIdle;
 
-    function _canScan(uint256 fundedCount) internal view returns (bool) {
+    /// @dev An idle scan wakes when either funding counter differs from the values it recorded.
+    ///      A funding and a settlement in the same block can leave the funded-claim count
+    ///      unchanged; the funded-epoch count still advances.
+    function _canScan(uint256 fundedCount, uint256 fundedEpochs) internal view returns (bool) {
         if (
             target.outstandingClaimCount() == 0 || fundedCount == 0 || target.pausedFundedClaim()
                 || block.timestamp < nextAttemptAt
         ) return false;
         return !scanIdle || scanPass.fundedCount != fundedCount
+            || scanPass.fundedEpochs != fundedEpochs
             || (scanPass.retryAt != 0 && block.timestamp >= scanPass.retryAt);
     }
 
@@ -103,8 +109,9 @@ contract ClaimSettlementUpkeep is AutomationCompatibleInterface, Ownable, Reentr
         returns (bool upkeepNeeded, bytes memory performData)
     {
         uint256 fundedCount = target.fundedOutstandingClaimCount();
-        if (!_canScan(fundedCount)) return (false, bytes(""));
-        ScanResult memory r = _scan(fundedCount);
+        uint256 fundedEpochs = target.fundedEpochCount();
+        if (!_canScan(fundedCount, fundedEpochs)) return (false, bytes(""));
+        ScanResult memory r = _scan(fundedCount, fundedEpochs);
         // A partial pass needs one final execution to persist its completed idle state.
         bool maintenance = !r.complete || r.pass.active;
         return
@@ -116,8 +123,9 @@ contract ClaimSettlementUpkeep is AutomationCompatibleInterface, Ownable, Reentr
 
     function performUpkeep(bytes calldata) external override nonReentrant {
         uint256 fundedCount = target.fundedOutstandingClaimCount();
-        if (!_canScan(fundedCount)) return;
-        ScanResult memory r = _scan(fundedCount);
+        uint256 fundedEpochs = target.fundedEpochCount();
+        if (!_canScan(fundedCount, fundedEpochs)) return;
+        ScanResult memory r = _scan(fundedCount, fundedEpochs);
         if (r.ids.length == 0 && r.complete && !r.pass.active) return;
         uint256 totalSettled;
         bool success;
@@ -160,16 +168,21 @@ contract ClaimSettlementUpkeep is AutomationCompatibleInterface, Ownable, Reentr
 
     /// @dev A no-work pass spans bounded calls, retaining its original boundary and
     ///      earliest non-excluded retry. New funding or a due retry invalidates the pass.
-    function _scan(uint256 fundedCount) internal view returns (ScanResult memory r) {
+    function _scan(uint256 fundedCount, uint256 fundedEpochs)
+        internal
+        view
+        returns (ScanResult memory r)
+    {
         uint256 openEpoch = target.currentEpochId();
         uint256 e = cursorEpochId <= openEpoch ? cursorEpochId : 0;
         uint256 c = cursorEpochId <= openEpoch ? cursorClaimId : 1;
         r.pass = scanPass;
         if (
             !r.pass.active || r.pass.fundedCount != fundedCount
+                || r.pass.fundedEpochs != fundedEpochs
                 || (r.pass.retryAt != 0 && block.timestamp >= r.pass.retryAt)
         ) {
-            r.pass = ScanPass(false, false, fundedCount, e, c, openEpoch, 0);
+            r.pass = ScanPass(false, false, fundedCount, fundedEpochs, e, c, openEpoch, 0);
         }
         uint256 scanned;
         uint256 found;

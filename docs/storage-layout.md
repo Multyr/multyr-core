@@ -384,13 +384,14 @@ Keys are `(epochId, claimId)`; IDs begin at one per epoch. In declaration order:
 | `totalOwed` | `uint256` | Unfunded nominal liabilities plus funded reserves |
 | `insolvencyLatched` | `bool` | Event de-duplication only |
 | `fundedOutstandingClaimCount` | `uint256` | Appended counter: unclaimed claims in Funded epochs |
+| `fundedEpochCount` | `uint256` | Appended counter: Closed-to-Funded transitions, only increases |
 
-Funding adds `epoch.claimCount` to the funded counter once. Every successful manual,
+Funding adds `epoch.claimCount` to the funded counter once and increments `fundedEpochCount`. Every successful manual,
 batch or keeper claim decrements both outstanding counters. Reverts roll all accounting
 back. Zero-recovery claims count even when `reservedForClaims == 0`.
 
-The funded counter is initialized by the full lifecycle on a new deployment. Merely
-appending this field to a deployed vault with funded claims does not backfill it: such an
+The funded counters are initialized by the full lifecycle on a new deployment. Merely
+appending these fields to a deployed vault with funded claims does not backfill them: such an
 upgrade requires a separately reviewed initialization/migration before enabling claims or
 automation. The economic-exit deployment plan uses a new CoreVault.
 

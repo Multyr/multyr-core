@@ -367,7 +367,8 @@ not select a queued fallback.
 Automatic settlement is a required deployment service. `ClaimSettlementUpkeep` uses a
 bounded circular scan and batch-to-individual fallback. Idle or unfunded-only queues do
 not request upkeep. `fundedOutstandingClaimCount()` provides this constant-time check
-without scanning the vault's history. A zero-recovery claim still needs settlement.
+without scanning the vault's history; `fundedEpochCount()` wakes an idle scan on every new
+funding. A zero-recovery claim still needs settlement.
 Manual claims remain available if automation is unfunded, delayed or excludes a claim.
 Recipient transfer failures cannot be bypassed by either caller; claims remain retryable.
 
