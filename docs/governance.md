@@ -218,7 +218,7 @@ Best practice: set `paramMinDelay >= 2 days` before sealing (`sealBySealer()`). 
 - Sets: `bufferManager`, `router`, `guardian`, `healthRegistry`, `incentives`, `feeCollector` (if non-zero in config)
 - Emits individual events for each component set
 
-This function is subject to the same access control as individual component setters (OWNER). `setEcosystem` now explicitly reverts with `ComponentsTimelocked()` if called after `enableComponentsTimelock()` — previously it had no such check and could set `bufferManager`/`router` directly, bypassing the submit/accept timelock gate that `setBufferManager`/`setRouter` enforce (G8). Deployment scripts must still call `setEcosystem` before enabling the components timelock; after that point, `bufferManager`/`router` changes must go through `submitBufferManager`/`acceptBufferManager` or `submitRouter`/`acceptRouter`.
+This function is subject to the same access control as individual component setters (OWNER). `setEcosystem` reverts with `ComponentsTimelocked()` if called after `enableComponentsTimelock()`. Deployment scripts must still call `setEcosystem` before enabling the components timelock; after that point, `bufferManager`/`router` changes must go through `submitBufferManager`/`acceptBufferManager` or `submitRouter`/`acceptRouter`.
 
 **Source**: `src/core/modules/AdminModule.sol:73`.
 

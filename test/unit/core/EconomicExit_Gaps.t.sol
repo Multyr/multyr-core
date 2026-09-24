@@ -3,17 +3,22 @@ pragma solidity ^0.8.28;
 
 // Coverage gaps found after the main suites: things that only matter when something goes wrong.
 
-import { Test } from "lib/forge-std/src/Test.sol";
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {Test} from "lib/forge-std/src/Test.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
-import { CoreHarness } from "../../helpers/CoreHarness.sol";
-import { MockUSDC } from "../../helpers/MockUSDC.sol";
-import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTests.sol";
-import { ERC4626Module } from "../../../src/core/modules/ERC4626Module.sol";
-import { EpochedQueueModule, EpochQueueStorage } from "../../../src/core/modules/EpochedQueueModule.sol";
-import { MockQueueEpochParamsProvider } from "../../sprint-test/QueueEpochModule_WithdrawFlow_POC.t.sol";
-import { MockNavRouter } from "./EconomicExit_Spec.t.sol";
+import {CoreHarness} from "../../helpers/CoreHarness.sol";
+import {MockUSDC} from "../../helpers/MockUSDC.sol";
+import {MockBufferManagerForTests} from "../../helpers/MockBufferManagerForTests.sol";
+import {ERC4626Module} from "../../../src/core/modules/ERC4626Module.sol";
+import {
+    EpochedQueueModule,
+    EpochQueueStorage
+} from "../../../src/core/modules/EpochedQueueModule.sol";
+import {
+    MockQueueEpochParamsProvider
+} from "../../sprint-test/QueueEpochModule_WithdrawFlow_POC.t.sol";
+import {MockNavRouter} from "./EconomicExit_Spec.t.sol";
 
 contract EconomicExit_Gaps_Test is Test {
     address constant USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
@@ -32,7 +37,12 @@ contract EconomicExit_Gaps_Test is Test {
         vm.etch(USDC, address(new MockUSDC()).code);
         MockQueueEpochParamsProvider params = new MockQueueEpochParamsProvider();
         core = new CoreHarness(
-            IERC20Metadata(USDC), "USDC Agg", "agUSDC", address(this), address(this), address(params)
+            IERC20Metadata(USDC),
+            "USDC Agg",
+            "agUSDC",
+            address(this),
+            address(this),
+            address(params)
         );
         core.setEpochDurationUnsafe(7 days);
         bm = MockBufferManagerForTests(address(core.bufferManager()));
@@ -107,7 +117,9 @@ contract EconomicExit_Gaps_Test is Test {
         core.setStrategyRouterUnsafe(address(new MockNavRouter(0, 5))); // a strategy is DEGRADED
 
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(EpochedQueueModule.NavInputInvalid.selector, uint8(5)));
+        vm.expectRevert(
+            abi.encodeWithSelector(EpochedQueueModule.NavInputInvalid.selector, uint8(5))
+        );
         _q().requestEpochWithdrawal(sa);
 
         uint256 before = IERC20(USDC).balanceOf(alice);
@@ -150,7 +162,8 @@ contract EconomicExit_Gaps_Test is Test {
 
         _q().fundEpoch(e);
         assertTrue(
-            _q().epochData(e).state == EpochQueueStorage.EpochState.Funded, "an epoch that has the cash is never blocked"
+            _q().epochData(e).state == EpochQueueStorage.EpochState.Funded,
+            "an epoch that has the cash is never blocked"
         );
 
         uint256 paidA;
@@ -170,7 +183,9 @@ contract EconomicExit_Gaps_Test is Test {
         } else {
             uint256 idx = gross * WAD / owed;
             assertApproxEqRel(paidA, owedA * idx / WAD, 1e15, "alice at the index");
-            assertApproxEqRel(paidC, owedC * idx / WAD, 1e15, "carol at the SAME index, whoever went first");
+            assertApproxEqRel(
+                paidC, owedC * idx / WAD, 1e15, "carol at the SAME index, whoever went first"
+            );
         }
         assertEq(core.totalOwed(), 0);
         assertEq(_q().reservedForClaims(), 0, "earmark fully released");
@@ -178,8 +193,7 @@ contract EconomicExit_Gaps_Test is Test {
 
     // ═════ 3. crystallization is final: recovery after funding is not owed to the cohort ═════
 
-    /// @notice Option A (review: Multyr, PR #19 second round -- "creditor parity after
-    ///         recovery"). fundEpoch() crystallizes ONE recoveryIndex for the cohort, exactly
+    /// @notice Option A. fundEpoch() crystallizes ONE recoveryIndex for the cohort, exactly
     ///         once, and writes the haircut straight out of totalOwed -- there is no top-up
     ///         any more: a later recovery in gross assets is not owed to an already-funded
     ///         cohort at all. It simply raises totalAssets() for remaining shareholders (dave)
@@ -205,9 +219,14 @@ contract EconomicExit_Gaps_Test is Test {
         _gain(1_000e6); // a later recovery -- NOT owed to alice's already-crystallized cohort
 
         assertEq(_q().epochData(e).recoveryIndex, recoveryIndex, "immutable: never re-crystallized");
-        assertEq(_claim(alice, e, c), 300e6, "paid exactly the crystallized share, not topped up to nominal");
+        assertEq(
+            _claim(alice, e, c),
+            300e6,
+            "paid exactly the crystallized share, not topped up to nominal"
+        );
         assertGt(
-            core.convertToAssets(core.balanceOf(dave)), daveValueBefore,
+            core.convertToAssets(core.balanceOf(dave)),
+            daveValueBefore,
             "the recovery instead raised the remaining shareholder's value"
         );
     }
@@ -225,7 +244,11 @@ contract EconomicExit_Gaps_Test is Test {
 
         _q().endEpochCrystallize(); // price is 0: must be a clean no-op
 
-        assertEq(core.balanceOf(address(this)), feeBefore, "no performance fee on a worthless share price");
+        assertEq(
+            core.balanceOf(address(this)),
+            feeBefore,
+            "no performance fee on a worthless share price"
+        );
     }
 
     function test_depositsWorkAgainAfterRecovery_atASanePrice() public {
@@ -244,7 +267,9 @@ contract EconomicExit_Gaps_Test is Test {
         assertApproxEqRel(bobValue, 1_500e6, 0.001e18);
 
         uint256 shares = _deposit(carol, 750e6);
-        assertApproxEqRel(core.convertToAssets(shares), 750e6, 0.001e18, "carol buys at the recovered price");
+        assertApproxEqRel(
+            core.convertToAssets(shares), 750e6, 0.001e18, "carol buys at the recovered price"
+        );
         assertApproxEqRel(core.convertToAssets(sb), bobValue, 1e12, "and bob is not diluted");
     }
 
@@ -278,8 +303,11 @@ contract EconomicExit_Gaps_Test is Test {
         assertEq(core.totalOwed(), 0, "every wei of liability discharged");
         assertEq(_q().reservedForClaims(), 0, "every wei of earmark released");
         assertEq(_q().outstandingClaimCount(), 0);
-        assertLe(paidTotal, IERC20(USDC).balanceOf(address(core)) + paidTotal, "paid out of real cash");
+        assertLe(
+            paidTotal, IERC20(USDC).balanceOf(address(core)) + paidTotal, "paid out of real cash"
+        );
     }
+
     // ═════ 6. several hacks, several epochs, mixed claim order ═════
 
     /// @notice e0 funded while solvent, e1 closed but unfunded, then a catastrophic loss, alice
@@ -315,7 +343,9 @@ contract EconomicExit_Gaps_Test is Test {
         _q().fundEpoch(e1); // crystallizes bob's cohort at whatever is left
         assertTrue(_q().epochData(e1).state == EpochQueueStorage.EpochState.Funded);
         uint256 bobRecoveryIndex = _q().epochData(e1).recoveryIndex;
-        assertApproxEqRel(bobRecoveryIndex, 70e6 * WAD / 300e6, 1e12, "bob absorbs both hacks alone");
+        assertApproxEqRel(
+            bobRecoveryIndex, 70e6 * WAD / 300e6, 1e12, "bob absorbs both hacks alone"
+        );
 
         uint256 paidB = _claim(bob, e1, cb);
         assertApproxEqRel(paidB, 300e6 * bobRecoveryIndex / WAD, 1e12);
@@ -326,9 +356,16 @@ contract EconomicExit_Gaps_Test is Test {
         // over the same ratio can leave a wei or two of dust in the vault, which becomes
         // shareholder equity rather than being paid to anyone -- never more than what was left.
         assertApproxEqAbs(
-            paidA + paidB, 3_000e6 - 2_500e6 - 30e6, 10, "essentially every wei of what was left after both hacks"
+            paidA + paidB,
+            3_000e6 - 2_500e6 - 30e6,
+            10,
+            "essentially every wei of what was left after both hacks"
         );
-        assertLe(paidA + paidB, 3_000e6 - 2_500e6 - 30e6, "never more than the assets that were actually left");
+        assertLe(
+            paidA + paidB,
+            3_000e6 - 2_500e6 - 30e6,
+            "never more than the assets that were actually left"
+        );
     }
 
     // ═════ 7. adversarial ═════
@@ -346,8 +383,12 @@ contract EconomicExit_Gaps_Test is Test {
         _q().fundEpoch(e);
         uint256 got = _claim(alice, e, c);
 
-        assertLt(got, 100e6 + 1_000e6, "she gets back her deposit plus only her half of the donation");
-        assertLt(IERC20(USDC).balanceOf(alice) + 0, aliceStart + 1_000e6, "and is net-negative overall");
+        assertLt(
+            got, 100e6 + 1_000e6, "she gets back her deposit plus only her half of the donation"
+        );
+        assertLt(
+            IERC20(USDC).balanceOf(alice) + 0, aliceStart + 1_000e6, "and is net-negative overall"
+        );
         assertApproxEqAbs(got, 1_050e6, 2e6);
     }
 
@@ -366,7 +407,9 @@ contract EconomicExit_Gaps_Test is Test {
         _close();
         _q().fundEpoch(e);
         assertEq(_claim(alice, e, c), owed, "she escaped it");
-        assertLt(core.convertToAssets(sb), 1_000e6 - 500e6, "the remaining holder carries all of it");
+        assertLt(
+            core.convertToAssets(sb), 1_000e6 - 500e6, "the remaining holder carries all of it"
+        );
     }
 
     /// @notice Spamming one-wei requests (there is no minimum any more) must not block close or funding.
@@ -389,7 +432,9 @@ contract EconomicExit_Gaps_Test is Test {
     ///         (or free-cash availability) to race over -- every claimant in the cohort gets
     ///         exactly its crystallized share, no more, regardless of order, and never reverts
     ///         for lack of liquidity to top up (there is nothing to top up).
-    function test_adversarial_recoveryAfterFunding_bothClaimantsPaidTheCrystallizedShare_noRace() public {
+    function test_adversarial_recoveryAfterFunding_bothClaimantsPaidTheCrystallizedShare_noRace()
+        public
+    {
         uint256 sa = _deposit(alice, 300e6);
         uint256 sc = _deposit(carol, 300e6);
         _deposit(dave, 1_400e6);
@@ -407,6 +452,103 @@ contract EconomicExit_Gaps_Test is Test {
         assertEq(first, 150e6, "paid the crystallized share, not topped up to nominal");
 
         uint256 second = _claim(carol, e, cc);
-        assertEq(second, 150e6, "same crystallized share regardless of claim order -- no race to lose");
+        assertEq(
+            second, 150e6, "same crystallized share regardless of claim order -- no race to lose"
+        );
+    }
+
+    function test_twoCohortsFundBeforeEitherClaims() public {
+        uint256 a = _deposit(alice, 50e6);
+        uint256 b = _deposit(bob, 50e6);
+        (uint256 e0, uint256 c0) = _request(alice, a);
+        _close();
+        (uint256 e1, uint256 c1) = _request(bob, b);
+        _close();
+        _lose(40e6);
+        _q().fundEpoch(e0);
+        _q().fundEpoch(e1);
+        assertEq(uint256(_q().epochData(e1).state), uint256(EpochQueueStorage.EpochState.Funded));
+        assertApproxEqAbs(_claim(bob, e1, c1), 30e6, 2);
+        assertApproxEqAbs(_claim(alice, e0, c0), 30e6, 2);
+    }
+
+    function test_invalidNavCannotCrystallizeHaircut() public {
+        uint256 a = _deposit(alice, 50e6);
+        _deposit(bob, 50e6);
+        (uint256 e, uint256 c) = _request(alice, a);
+        _close();
+        _moveHotToWarm(70e6);
+        bm.setWarmNav(0, uint40(block.timestamp), false);
+        _q().fundEpoch(e);
+        assertEq(uint256(_q().epochData(e).state), uint256(EpochQueueStorage.EpochState.Closed));
+        assertEq(core.totalOwed(), 50e6);
+        bm.setWarmNav(70e6, uint40(block.timestamp), true);
+        _moveWarmToHot(70e6);
+        _q().fundEpoch(e);
+        assertEq(_claim(alice, e, c), 50e6);
+    }
+
+    function test_invalidStrategyCannotCrystallizeHaircut() public {
+        uint256 a = _deposit(alice, 50e6);
+        _deposit(bob, 50e6);
+        (uint256 e,) = _request(alice, a);
+        _close();
+        _lose(70e6);
+        core.setStrategyRouterUnsafe(address(new MockNavRouter(0, 4)));
+        _q().fundEpoch(e);
+        assertEq(uint256(_q().epochData(e).state), uint256(EpochQueueStorage.EpochState.Closed));
+        core.setStrategyRouterUnsafe(address(new MockNavRouter(0, 0)));
+        _q().fundEpoch(e);
+        assertEq(_q().epochData(e).recoveryIndex, 0.6e18);
+    }
+
+    function test_standardRequestSnapshotsBeforeBurnAfterRollover() public {
+        uint256 a = _deposit(alice, 50e6);
+        _deposit(bob, 50e6);
+        t += 8 days;
+        vm.warp(t);
+        _request(alice, a);
+        assertEq(core.capBaseSnapshot(), 100e6);
+    }
+
+    function test_depositAndMintSnapshotBeforeChangingAssets() public {
+        _deposit(alice, 100e6);
+        t += 8 days;
+        vm.warp(t);
+        _deposit(bob, 50e6);
+        assertEq(core.capBaseSnapshot(), 100e6);
+        t += 8 days;
+        vm.warp(t);
+        vm.prank(carol);
+        ERC4626Module(address(core)).mint(50e6, carol);
+        assertEq(core.capBaseSnapshot(), 150e6);
+    }
+
+    function test_zeroCapEpochDurationAllowsDeposits() public {
+        core.setEpochDurationUnsafe(0);
+        assertEq(_deposit(alice, 100e6), 100e6);
+    }
+
+    function test_dynamicCapCannotOverrideStaticCap() public {
+        MockQueueEpochParamsProvider p = MockQueueEpochParamsProvider(address(core.params()));
+        p.setCapPerEpochBps(1000);
+        p.setDynamicCap(true, 100, 2000, 1);
+        uint256 a = _deposit(alice, 100e6);
+        vm.prank(alice);
+        (bool immediate,,) = _q().requestInstantWithdrawal(a * 15 / 100);
+        assertFalse(immediate);
+    }
+
+    function test_instantRefreshPrecedesCapValidation() public {
+        MockQueueEpochParamsProvider(address(core.params())).setCapPerEpochBps(1000);
+        uint256 a = _deposit(alice, 100e6);
+        _q().rollCapEpochIfNeeded();
+        t += 16 minutes;
+        vm.warp(t);
+        bm.setWarmNav(0, uint40(t - 16 minutes), true);
+        bm.setRefreshResult(100e6, uint40(t), true);
+        vm.prank(alice);
+        (bool immediate,,) = _q().requestInstantWithdrawal(a * 8 / 100);
+        assertFalse(immediate, "refreshed 16 exceeds the cap of 10");
     }
 }

@@ -1,10 +1,5 @@
 # audit-scope.md — Multyr Core: Audit Scope & Security Profile
 
-> **Superseded in part — see [economic-exit.md](economic-exit.md).** This document describes the
-> escrow / `ppsAtClose` withdrawal model. Requests are now priced and their shares burned **at
-> request**; epochs are settlement buckets only; `cancelEpochWithdrawal`, `ppsAtClose`,
-> `escrowedShares` and `closedPendingAssets` are gone; `totalAssets()` is net of `totalOwed`.
-> Everything below about those topics is historical until this file is rewritten.
 
 
 **Version**: 1.0.0 | **Branch**: reorg/runbook-docs-consolidate-01a.4 | **Commit**: see footer
@@ -67,7 +62,7 @@ graph TD
 | `ExitFeeLib` | `src/core/libraries/ExitFeeLib.sol:29` | Fee computation for all 3 exit modes |
 | `CoreStorage` | `src/core/storage/CoreStorage.sol:38` | EIP-7201 namespaced core storage |
 | `FeeStorage` | `src/core/storage/FeeStorage.sol:55` | Fee params + perf fee storage |
-| `EpochQueueStorage` | `src/core/modules/EpochedQueueModule.sol:29` | Epoch/claim state, escrowedShares, outstandingClaimCount (retired `QueueStorage.sol` kept only as a reserved EIP-7201 slot, no longer in scope for live logic) |
+| `EpochQueueStorage` | `src/core/modules/EpochedQueueModule.sol:29` | Epoch/claim state, totalOwed, reservedForClaims, recoveryIndex, outstandingClaimCount (retired `QueueStorage.sol` kept only as a reserved EIP-7201 slot, no longer in scope for live logic) |
 | `BatchGuardrails` | `src/core/modules/BatchGuardrails.sol:20` | Batch call validation (peripheral) |
 
 ### 2.2 Core Protocol — FixedMaturity Extension
@@ -178,7 +173,7 @@ Total: 51 `.sol` files in `src/core/`.
 |---|------|----------------|-------|
 | L1 | **Owner key is single point of control** | Design choice | No on-chain DAO. Mitigated by vetoer + timelock. Deployment to multi-sig (Safe) is recommended. |
 | L2 | **`FLAG_SYSTEM_SEALED` does not freeze `roleOf[selector]`** | Known gap (AC8) | Owner can change per-function roles post-seal. Timelock provides recourse window. |
-| L3 | **`forceWithdrawAll` is best-effort (F-03: resolved)** | Design choice, mitigated | Delivers `min(hot, targetAssets)` — still no guarantee of full liquidity. Previously this could silently deliver an arbitrarily small fill (up to ~90%+ of value if strategies were frozen/illiquid); now a mandatory `minAssetsOut` parameter reverts the whole call (`SlippageExceeded`, no state change) if the fill falls short. See `test/sprint-test/ForceWithdrawAll_SlippagePOC.t.sol`. |
+| L3 | **`forceWithdrawAll` is best-effort (F-03: resolved)** | Design choice, mitigated | Delivers `min(hot, targetAssets)` — still no guarantee of full liquidity. A mandatory `minAssetsOut` parameter reverts the whole call (`SlippageExceeded`, no state change) if the fill falls short. See `test/sprint-test/ForceWithdrawAll_SlippagePOC.t.sol`. |
 | L4 | **Settlement is epoch-wide, pull-based** | Design choice (superseded L4) | `EpochedQueueModule` replaced the retired per-claim FIFO settle loop (gas-bounded `_settleLoop`) with `closeCurrentEpoch()`/`fundEpoch()` (epoch-wide, O(1) in claim count) and `claimEpochAssets()` (pull-based, per user). No gas-safety partial-exit is needed since no single call iterates over claims. |
 | L5 | **INSTANT fallback always becomes a standard epoch claim** | Design choice | `requestInstantWithdrawal` requests that fail `_canInstant()` fall back to the exact same code path as `requestEpochWithdrawal` — there is no `immediate` flag on `EpochClaim` to mis-set (the BUG 6 class in the retired `QueueModule` is eliminated by construction, not by a fix). |
 | L6 | **`preMaturityForceExitPenaltyBps` max 50%** | Design constraint | Hard cap at 5000 bps validated in `configureFixedMaturity`. |
@@ -306,10 +301,10 @@ Priority ranking based on value at risk and complexity:
 The following specific checks are recommended based on the internal shadow report and architecture review:
 
 **Settlement: close / fund / claim** (`src/core/modules/EpochedQueueModule.sol:327-513`):
-- [ ] Verify `ppsAtClose` is computed BEFORE any shares are burned, and never recomputed after (BUG 4-equivalent regression, new code path)
+- [ ] Verify assets owed are priced before the request burns shares.
 - [ ] Verify every `EpochClaim` is treated identically regardless of how it was created (`requestEpochWithdrawal` vs. `requestInstantWithdrawal` fallback) — there is no `immediate` flag to mis-set (BUG 6 class eliminated by construction, verify no reintroduction)
 - [ ] Verify `feeShares` rounded UP (rounding in favour of protocol)
-- [ ] Verify `ppsAtClose` is locked once per epoch at `closeCurrentEpoch()` and used identically by every claim in that epoch regardless of claim order (deterministic PPS)
+- [ ] Verify the recovery index is fixed at funding using valid NAV and free assets, independent of claim order.
 - [ ] Verify `fundEpoch()` only transitions to `Funded` when `hot >= totalNetAssets` — no partial-funding state can be marked `Funded`
 - [ ] Verify `outstandingClaimCount` persists across `closeCurrentEpoch()` (does not reset like per-epoch `claimCount`) — dynamic-cap bypass class, already fixed pre-cutover, verify no regression
 - [ ] Verify INSTANT cap consumption: only for the settled-immediately path in `requestInstantWithdrawal`, never for STANDARD claims at any point in their lifecycle

@@ -178,7 +178,7 @@ contract Withdrawal_PauseMatrix_Invariants is Test {
         // requestInstantWithdrawal()'s queue-fallback must not be a bypass for
         // pauseQueuedRequestOnly() — same underlying risk (accepting a new
         // queued request during an active incident), same breaker. Deposit lock
-        // is now a hard revert on BOTH exit paths (review: Pier), so it can no
+        // is now a hard revert on BOTH exit paths, so it can no
         // longer be used to force the fallback branch -- drain hot liquidity into
         // the (mock) warm bucket instead, deterministically failing the instant
         // liquidity check without touching lock semantics or solvency.

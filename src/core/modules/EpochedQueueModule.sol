@@ -1,26 +1,27 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { IERC20 }    from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import { IERC4626 }  from "@openzeppelin/contracts/interfaces/IERC4626.sol";
-import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-import { CoreStorage }  from "../storage/CoreStorage.sol";
-import { FeeStorage }   from "../storage/FeeStorage.sol";
-import { Events }       from "../libraries/Events.sol";
-import { ExitEngineLib } from "../libraries/ExitEngineLib.sol";
-import { WithdrawalCapLib } from "../libraries/WithdrawalCapLib.sol";
-import { Percentage }   from "../../libs/Percentage.sol";
-import { FixedPoint }   from "../../libs/FixedPoint.sol";
-import { IParamsProvider }        from "../../interfaces/IParamsProvider.sol";
-import { IBufferManager }         from "../../interfaces/IBufferManager.sol";
-import { IStrategyRouter }        from "../../interfaces/IStrategyRouter.sol";
-import { IIncentivesEngine }      from "../../interfaces/IIncentivesEngine.sol";
-import { ICoreVault }             from "../../interfaces/ICoreVault.sol";
+import {CoreStorage} from "../storage/CoreStorage.sol";
+import {FeeStorage} from "../storage/FeeStorage.sol";
+import {Events} from "../libraries/Events.sol";
+import {ExitEngineLib} from "../libraries/ExitEngineLib.sol";
+import {WithdrawalCapLib} from "../libraries/WithdrawalCapLib.sol";
+import {Percentage} from "../../libs/Percentage.sol";
+import {FixedPoint} from "../../libs/FixedPoint.sol";
+import {IParamsProvider} from "../../interfaces/IParamsProvider.sol";
+import {IBufferManager} from "../../interfaces/IBufferManager.sol";
+import {IStrategyRouter} from "../../interfaces/IStrategyRouter.sol";
+import {IIncentivesEngine} from "../../interfaces/IIncentivesEngine.sol";
+import {ICoreVault} from "../../interfaces/ICoreVault.sol";
 import {
     FixedMaturityStorage,
-    _checkStandardExitAllowed, _checkSettlementAllowed
+    _checkStandardExitAllowed,
+    _checkSettlementAllowed
 } from "../storage/FixedMaturityStorage.sol";
 
 // =============================================================================
@@ -32,7 +33,11 @@ library EpochQueueStorage {
     bytes32 internal constant SLOT =
         0xd8f6996c75206120e7e007afb307a0ab5673f8e6af6fff1bc619c574ef0f3000;
 
-    enum EpochState { Open, Closed, Funded }
+    enum EpochState {
+        Open,
+        Closed,
+        Funded
+    }
 
     // Per-epoch aggregate data. Stored once per epoch.
     //
@@ -42,35 +47,34 @@ library EpochQueueStorage {
     // in one batch.
     struct EpochData {
         EpochState state;
-        uint64     openedAt;          // block.timestamp when this epoch opened
-        uint64     closedAt;          // block.timestamp when closeCurrentEpoch() ran
-        uint64     fundedAt;          // block.timestamp when fundEpoch() succeeded
-        uint256    totalGrossShares;  // running sum of all submitted shares (informational)
-        uint256    totalNetShares;    // running sum after fee deduction (informational)
-        uint256    totalFeeShares;    // running sum of fee portions (informational)
-        uint256    totalAssetsOwed;   // running sum of NOMINAL assetsOwed of every claim in the epoch
-        uint256    claimedAssets;     // running sum of NOMINAL assetsOwed of claims already claimed
-        uint256    claimCount;        // number of claims submitted
-        uint256    reservedRemaining; // liquidity still earmarked for THIS epoch's unclaimed claims
+        uint64 openedAt; // block.timestamp when this epoch opened
+        uint64 closedAt; // block.timestamp when closeCurrentEpoch() ran
+        uint64 fundedAt; // block.timestamp when fundEpoch() succeeded
+        uint256 totalGrossShares; // running sum of all submitted shares (informational)
+        uint256 totalNetShares; // running sum after fee deduction (informational)
+        uint256 totalFeeShares; // running sum of fee portions (informational)
+        uint256 totalAssetsOwed; // running sum of NOMINAL assetsOwed of every claim in the epoch
+        uint256 claimedAssets; // running sum of NOMINAL assetsOwed of claims already claimed
+        uint256 claimCount; // number of claims submitted
+        uint256 reservedRemaining; // liquidity still earmarked for THIS epoch's unclaimed claims
         // Option A -- crystallized recovery ratio for this cohort (WAD, <= 1e18), set EXACTLY
         // ONCE, at the moment fundEpoch() first transitions this epoch Closed -> Funded (after
         // its realize waterfall has run). 1e18 while solvent (identity payout). Immutable from
         // then on: claim timing inside the cohort cannot change it, and a later recovery in
         // gross assets does not reopen it -- it simply raises totalAssets() for remaining
         // shareholders. Every claim in this epoch pays assetsOwed * recoveryIndex / 1e18,
-        // never the live, cross-epoch liabilityIndex() (review: Multyr, PR #19 second round --
-        // "creditor parity after recovery", Option A).
-        uint256    recoveryIndex;
+        // never the live, cross-epoch liabilityIndex().
+        uint256 recoveryIndex;
     }
 
     // Per-claim entry. Stored under (epochId => claimId). Immutable after
     // creation apart from the `claimed` flag: assetsOwed is fixed at request.
     struct EpochClaim {
         address user;
-        uint64  requestedAt;  // block.timestamp of the request
-        bool    claimed;      // user has received assets
-        uint256 assetsOwed;   // NOMINAL fixed liability, priced at request (rounded down)
-        uint256 grossShares;  // shares the user submitted (net burned + fee transferred at request)
+        uint64 requestedAt; // block.timestamp of the request
+        bool claimed; // user has received assets
+        uint256 assetsOwed; // NOMINAL fixed liability, priced at request (rounded down)
+        uint256 grossShares; // shares the user submitted (net burned + fee transferred at request)
     }
 
     struct Layout {
@@ -82,9 +86,7 @@ library EpochQueueStorage {
         // epochId => next claimId counter (starts at 1)
         mapping(uint256 => uint256) nextClaimId;
         // Total unclaimed claims across ALL epochs (open + closed-unfunded +
-        // funded-unclaimed). No longer read by the instant-cap calculation (review: Multyr --
-        // standard queue depth must have zero effect on the instant bucket, see
-        // _epochCapRemaining()). Still the FixedMaturityModule Matured->Closed gate
+        // funded-unclaimed). No longer read by the instant-cap calculation). Still the FixedMaturityModule Matured->Closed gate
         // (== 0 required) and a general unclaimed-claims counter.
         uint256 outstandingClaimCount;
         // Oldest epoch that is CLOSED but not yet FUNDED. Lets a keeper find
@@ -171,7 +173,7 @@ contract EpochedQueueModule {
     error EpochNotOpen();
     error EpochNotClosed();
     error EpochNotFunded();
-    error EpochTooYoung();        // closeCurrentEpoch() called before epochDuration
+    error EpochTooYoung(); // closeCurrentEpoch() called before epochDuration
     error ClaimAlreadySettled();
     error NotClaimOwner();
     error ReentrancyGuardLocked();
@@ -189,7 +191,7 @@ contract EpochedQueueModule {
     ///         failed validation (reason: 4 strategy valuation, 5 strategy unhealthy, 6 oracle).
     error NavInputInvalid(uint8 reason);
     /// @notice Standard and instant requests are both blocked during the post-deposit lock
-    ///         period. Force exit remains the intended bypass (review: Pier).
+    ///         period. Force exit remains the intended bypass.
     error DepositLockActive();
     // Granular withdrawal circuit breakers (review §20/§21). FLAG_PAUSED_WITHDRAWALS
     // is honored, in addition to the specific flag, only by instant settlement and
@@ -225,10 +227,7 @@ contract EpochedQueueModule {
         uint256 totalFeeShares
     );
     event EpochFundAttempt(
-        uint256 indexed epochId,
-        uint256 needed,
-        uint256 hotBefore,
-        uint256 hotAfter
+        uint256 indexed epochId, uint256 needed, uint256 hotBefore, uint256 hotAfter
     );
     event EpochFunded(uint256 indexed epochId, uint256 totalAssetsOwed);
     /// @notice A cohort's recovery ratio was crystallized (Option A): emitted exactly once,
@@ -252,11 +251,7 @@ contract EpochedQueueModule {
     ///      this event means the cursor was stale (cursorAfter > cursorBefore,
     ///      now repaired) or the caller picked the wrong epoch (cursor
     ///      unchanged).
-    event EpochFundSkipped(
-        uint256 indexed epochId,
-        uint256 cursorBefore,
-        uint256 cursorAfter
-    );
+    event EpochFundSkipped(uint256 indexed epochId, uint256 cursorBefore, uint256 cursorAfter);
 
     /// @notice A fundEpoch() attempt left the epoch CLOSED. Emitted on every
     ///         failed or partial attempt so a stalled epoch is visible to
@@ -266,10 +261,7 @@ contract EpochedQueueModule {
     /// @param freeLiquidity hot balance net of other funded epochs' reservations
     /// @param shortfall     how much more is required before it can be funded
     event EpochFundingShortfall(
-        uint256 indexed epochId,
-        uint256 needed,
-        uint256 freeLiquidity,
-        uint256 shortfall
+        uint256 indexed epochId, uint256 needed, uint256 freeLiquidity, uint256 shortfall
     );
     /// @param assets      what was actually paid: assetsOwed * liabilityIndex / 1e18
     /// @param assetsOwed  the claim's nominal, fixed liability
@@ -290,7 +282,7 @@ contract EpochedQueueModule {
     // =========================================================================
     /// @notice Maximum age of the warm NAV cache for a request to be accepted.
     /// @dev Kept as a public constant for ABI compatibility; sourced from CoreStorage so
-    ///      there is exactly one literal value across the vault (review: Stefano).
+    ///      there is exactly one literal value across the vault.
     uint256 public constant MAX_WARM_NAV_AGE = CoreStorage.MAX_WARM_NAV_AGE;
 
     /// @notice Upper bound on how far one call may advance the
@@ -299,24 +291,15 @@ contract EpochedQueueModule {
     ///         never stuck: see syncOldestUnfundedEpoch().
     uint256 public constant MAX_CURSOR_SCAN = 50;
 
-    /// @notice In insolvency mode the whole remaining portfolio is owed to creditors, so funding
-    ///         needs EVERY last unit of it to be liquid. Real lending adapters cannot return the
-    ///         final wei of a position (share rounding, withdrawal slippage): on an Arbitrum fork a
-    ///         1,218,285-unit realise returned 1,213,315 and left 4,975 units stuck, which made the
-    ///         epoch unfundable by 0.0005%. A shortfall up to this many basis points of the epoch's
-    ///         need is therefore treated as fully funded, in insolvency only; while solvent the
-    ///         requirement stays exact.
-    uint256 public constant INSOLVENCY_FUNDING_DUST_BPS = 10;
+    /// @notice Maximum funding shortfall in underlying base units.
+    uint256 public constant INSOLVENCY_FUNDING_ROUNDING = 1;
+    event EpochFundingNavInvalid(uint256 indexed epochId, uint8 reason);
 
     /// @notice fundEpoch() asks strategies for the deficit plus this many basis points (and 1 unit) to absorb
     ///         withdrawal slippage; 50 bps equals StrategyRouter's default loss cap.
     uint256 public constant STRATEGY_REDEEM_BUFFER_BPS = 50;
 
-    /// @dev Smallest amount fundEpoch() asks a strategy for, so a unit of rounding cannot look
-    ///      like a loss-cap breach (see fundEpoch()). 0.01 units of the underlying asset,
-    ///      whatever its decimals -- previously hardcoded to 10_000 assuming 6-decimal USDC
-    ///      (review: "to complete"). Derived from decimals() each time rather than cached, so
-    ///      it is correct for whatever asset the vault is actually deployed with.
+    /// @dev Minimum strategy pull: 0.01 underlying units, derived from asset decimals.
     function _minStrategyRedeem() internal view returns (uint256) {
         uint8 dec = IERC20Metadata(_asset()).decimals();
         return dec >= 2 ? 10 ** (dec - 2) : 1;
@@ -340,16 +323,14 @@ contract EpochedQueueModule {
     {
         _notPausedQueuedRequest();
         _enterNonReentrant();
+        _rollCapEpochIfNeeded(CoreStorage.layout());
         _checkStandardExitAllowed(FixedMaturityStorage.layout(), false);
         if (shares == 0) revert ZeroAmount();
 
-        // Deposit lock applies to BOTH ordinary exit paths, checked before anything is
-        // crystallized -- previously only the INSTANT path consulted it (as a soft "fall
-        // back to the queue" signal), so a locked user could go straight through the
-        // standard entry point and lock in an exit during the lock window regardless. Force
-        // exit is the deliberate, unchanged bypass (review: Pier).
+        // Both ordinary exit paths enforce the deposit lock.
         _requireNotLocked(CoreStorage.layout().params.getWithdrawalParams(address(this)));
 
+        _trySoftRefreshWarmNav();
         _openEpochIfNeeded();
         (uint256 netShares, uint256 feeShares, uint256 assetsOwed) =
             _crystallizeExit(msg.sender, shares, ExitEngineLib.ExitMode.STANDARD);
@@ -366,11 +347,8 @@ contract EpochedQueueModule {
     ///      before the burn (step 6) -- burning first changes the price and hands
     ///      the exiting user a wrong amount.
     ///
-    ///      `mode` selects the fee tier (STANDARD = withdraw fee, INSTANT = withdraw
-    ///      fee + immediate-exit penalty) and is the only input beyond the spec
-    ///      signature. It is fixed by the entry point the user chose, before any
-    ///      branch, so an instant request that later falls back into the queue
-    ///      carries the same fee and the same assetsOwed.
+    ///      `mode` selects the fee tier after eligibility is checked: immediate settlement
+    ///      uses the instant tier; standard requests and queued fallbacks use the standard tier.
     function _crystallizeExit(address user, uint256 grossShares, ExitEngineLib.ExitMode mode)
         internal
         returns (uint256 netShares, uint256 feeShares, uint256 assetsOwed)
@@ -383,15 +361,7 @@ contract EpochedQueueModule {
             if (gross <= owed) revert VaultInsolvent();
         }
 
-        // 2. fresh NAV. Try a best-effort refresh first -- same pattern
-        //    ERC4626Module already uses ahead of deposit/mint -- so a request
-        //    doesn't spuriously revert just because nobody happened to poke the
-        //    cache in the last MAX_WARM_NAV_AGE; it only reverts if the refresh
-        //    itself fails or returns something still invalid/stale (a dead
-        //    keeper, a broken adapter). The flag alone is not sufficient: age is
-        //    tested explicitly regardless (I-10 -- warmNavValid stayed true
-        //    while the cache was days old).
-        _trySoftRefreshWarmNav();
+        // Entrypoints refresh before pricing; all NAV inputs must be valid.
         _requireFreshNav();
 
         CoreStorage.Layout storage core = CoreStorage.layout();
@@ -407,7 +377,7 @@ contract EpochedQueueModule {
         // worth NOTHING enter the books at all -- it still counts against
         // outstandingClaimCount for free, which would otherwise let a spam of zero-value
         // claims block FixedMaturityModule's Matured->Closed gate (requires
-        // outstandingClaimCount == 0) indefinitely (review: Stefano).
+        // outstandingClaimCount == 0) indefinitely.
         if (assetsOwed == 0) revert ZeroAmount();
 
         // 5. fee shares go to the FeeCollector
@@ -433,28 +403,25 @@ contract EpochedQueueModule {
         uint256 netShares,
         uint256 feeShares,
         uint256 assetsOwed
-    )
-        internal
-        returns (uint256 epochId, uint256 claimId)
-    {
+    ) internal returns (uint256 epochId, uint256 claimId) {
         EpochQueueStorage.Layout storage eq = EpochQueueStorage.layout();
         epochId = eq.currentEpochId;
         EpochQueueStorage.EpochData storage epoch = eq.epochs[epochId];
 
         claimId = ++eq.nextClaimId[epochId];
         eq.claims[epochId][claimId] = EpochQueueStorage.EpochClaim({
-            user:        user,
+            user: user,
             requestedAt: uint64(block.timestamp),
-            claimed:     false,
-            assetsOwed:  assetsOwed,
+            claimed: false,
+            assetsOwed: assetsOwed,
             grossShares: grossShares
         });
 
         epoch.totalAssetsOwed += assetsOwed;
         epoch.totalGrossShares += grossShares;
-        epoch.totalNetShares   += netShares;
-        epoch.totalFeeShares   += feeShares;
-        epoch.claimCount       += 1;
+        epoch.totalNetShares += netShares;
+        epoch.totalFeeShares += feeShares;
+        epoch.claimCount += 1;
         eq.outstandingClaimCount += 1;
 
         emit EpochWithdrawalRequested(
@@ -469,7 +436,7 @@ contract EpochedQueueModule {
         EpochQueueStorage.EpochData storage epoch = eq.epochs[eq.currentEpochId];
         if (epoch.openedAt == 0) {
             epoch.openedAt = uint64(block.timestamp);
-            epoch.state    = EpochQueueStorage.EpochState.Open;
+            epoch.state = EpochQueueStorage.EpochState.Open;
             emit EpochOpened(eq.currentEpochId, uint64(block.timestamp));
         }
         if (epoch.state != EpochQueueStorage.EpochState.Open) revert EpochNotOpen();
@@ -487,6 +454,7 @@ contract EpochedQueueModule {
     function closeCurrentEpoch() external {
         _notPausedEpochCloseFund();
         _enterNonReentrant();
+        _rollCapEpochIfNeeded(CoreStorage.layout());
         _checkSettlementAllowed(FixedMaturityStorage.layout());
 
         EpochQueueStorage.Layout storage eq = EpochQueueStorage.layout();
@@ -500,20 +468,15 @@ contract EpochedQueueModule {
         if (block.timestamp < epoch.openedAt + _minEpochDuration(core)) revert EpochTooYoung();
 
         epoch.closedAt = uint64(block.timestamp);
-        epoch.state    = EpochQueueStorage.EpochState.Closed;
+        epoch.state = EpochQueueStorage.EpochState.Closed;
 
-        emit EpochClosed(
-            epochId,
-            epoch.totalNetShares,
-            epoch.totalAssetsOwed,
-            epoch.totalFeeShares
-        );
+        emit EpochClosed(epochId, epoch.totalNetShares, epoch.totalAssetsOwed, epoch.totalFeeShares);
 
         // --- Open the next epoch so new submissions are never blocked ---------
         uint256 nextId = epochId + 1;
-        eq.currentEpochId                  = nextId;
-        eq.epochs[nextId].openedAt         = uint64(block.timestamp);
-        eq.epochs[nextId].state            = EpochQueueStorage.EpochState.Open;
+        eq.currentEpochId = nextId;
+        eq.epochs[nextId].openedAt = uint64(block.timestamp);
+        eq.epochs[nextId].state = EpochQueueStorage.EpochState.Open;
         emit EpochOpened(nextId, uint64(block.timestamp));
 
         (uint256 gross, uint256 owed, uint256 index) = _navState();
@@ -529,15 +492,14 @@ contract EpochedQueueModule {
     /// @notice Prepare liquidity for a CLOSED epoch and, once it is fully reconciled,
     ///         crystallize its cohort recovery ratio. Permissionless -- anyone (keeper,
     ///         automation, user) can call. The epoch's TARGET reserve is the sum of the
-    ///         NOMINAL assetsOwed of its unclaimed claims, scaled by the current
-    ///         liabilityIndex (identity while solvent). Tries hot balance first, then warm
+    ///         NOMINAL assetsOwed of its unclaimed claims, scaled by the free-asset recovery
+    ///         ratio, excluding funded reserves from both assets and liabilities. Tries hot balance first, then warm
     ///         refill, then strategy realise, and earmarks whatever it can raise. A partial
     ///         fund emits EpochFundingShortfall and leaves the epoch CLOSED for a retry once
     ///         more liquidity is available -- nothing is crystallized until the epoch is
-    ///         fully covered (dust tolerance aside, see INSOLVENCY_FUNDING_DUST_BPS).
+    ///         fully covered (dust tolerance aside, see INSOLVENCY_FUNDING_ROUNDING).
     ///
-    ///         Option A (review: Multyr, PR #19 second round -- "creditor parity after
-    ///         recovery"). The moment this call fully reconciles a CLOSED epoch it
+    ///         Option A. The moment this call fully reconciles a CLOSED epoch it
     ///         transitions to FUNDED and crystallizes ONE recoveryIndex for the whole
     ///         cohort, derived from what was actually reserved (`reservedRemaining /
     ///         unclaimed`), and writes the haircut portion (if any) out of `totalOwed`
@@ -555,6 +517,7 @@ contract EpochedQueueModule {
         // earmark, so a reentrant call landing between the pull and that read
         // is exactly the shape worth excluding.
         _enterNonReentrant();
+        _rollCapEpochIfNeeded(CoreStorage.layout());
         EpochQueueStorage.Layout storage eq = EpochQueueStorage.layout();
         EpochQueueStorage.EpochData storage epoch = eq.epochs[epochId];
 
@@ -582,6 +545,14 @@ contract EpochedQueueModule {
         // epoch never carries a partial earmark across retries).
         uint256 unclaimed = epoch.totalAssetsOwed - epoch.claimedAssets;
         uint256 gapNeeded = _scaledByIndex(unclaimed);
+        if (gapNeeded < unclaimed) {
+            (bool valid, uint8 reason) = ICoreVault(address(this)).navStatus();
+            if (!valid) {
+                emit EpochFundingNavInvalid(epochId, reason);
+                _exitNonReentrant();
+                return;
+            }
+        }
         // Everyone else's earmark -- hot must cover both this epoch's target AND that,
         // otherwise filling it would just be spending cash another epoch's claimants
         // already own.
@@ -589,8 +560,8 @@ contract EpochedQueueModule {
         uint256 neededHot = gapNeeded + otherReserved;
 
         address assetAddr = _asset();
-        uint256 hot        = IERC20(assetAddr).balanceOf(address(this));
-        uint256 hotBefore  = hot;
+        uint256 hot = IERC20(assetAddr).balanceOf(address(this));
+        uint256 hotBefore = hot;
 
         if (hot < neededHot) {
             uint256 deficit = neededHot - hot;
@@ -606,7 +577,7 @@ contract EpochedQueueModule {
                     catch (bytes memory reason) {
                         emit Events.QueueWarmRefillFailed(epochId, pullWarm, reason);
                     }
-                    hot    = IERC20(assetAddr).balanceOf(address(this));
+                    hot = IERC20(assetAddr).balanceOf(address(this));
                     deficit = hot < neededHot ? neededHot - hot : 0;
                 }
             }
@@ -637,22 +608,34 @@ contract EpochedQueueModule {
             }
         }
 
+        // Reconcile funding requirements with NAV after liquidity operations.
+        gapNeeded = _scaledByIndex(unclaimed);
+        neededHot = gapNeeded + otherReserved;
+        if (gapNeeded < unclaimed || hot < neededHot) {
+            (bool valid, uint8 reason) = ICoreVault(address(this)).navStatus();
+            if (!valid) {
+                emit EpochFundingNavInvalid(epochId, reason);
+                _exitNonReentrant();
+                return;
+            }
+        }
+
         // One event per call, with both balances populated.
         emit EpochFundAttempt(epochId, gapNeeded, hotBefore, hot);
 
         // Fill the gap only up to what is actually covered (this call's gap AND
         // everything already reserved for other funded epochs).
-        // Insolvency tolerance: see INSOLVENCY_FUNDING_DUST_BPS. The earmark is capped at what is
+        // Insolvency tolerance: see INSOLVENCY_FUNDING_ROUNDING. The earmark is capped at what is
         // actually on hand so it can never promise cash that is not there.
         uint256 shortfall = hot >= neededHot ? 0 : neededHot - hot;
-        bool insolventNow = shortfall != 0 && shortfall <= gapNeeded * INSOLVENCY_FUNDING_DUST_BPS / 10_000
-            && _isInsolvent();
+        bool insolventNow = shortfall != 0 && shortfall <= INSOLVENCY_FUNDING_ROUNDING
+            && shortfall <= gapNeeded && _isInsolvent();
         if (shortfall == 0 || insolventNow) {
             uint256 filled = gapNeeded - shortfall;
             eq.reservedForClaims += filled;
             epoch.reservedRemaining = filled; // currentReserve is always 0 here
 
-            epoch.state    = EpochQueueStorage.EpochState.Funded;
+            epoch.state = EpochQueueStorage.EpochState.Funded;
             epoch.fundedAt = uint64(block.timestamp);
 
             // --- Option A: crystallize this cohort's recovery ratio, exactly once ------
@@ -667,11 +650,13 @@ contract EpochedQueueModule {
             // liability is reservedRemaining, not nominal, from this instant on. Nothing
             // is left dangling on the books waiting for a recovery that would never be
             // owed to it anyway -- a later recovery raises totalAssets() for remaining
-            // shareholders instead (review: Multyr).
+            // shareholders instead.
             uint256 writeOff = unclaimed - epoch.reservedRemaining; // >= 0: reservedRemaining <= unclaimed always
             if (writeOff > 0) eq.totalOwed -= writeOff;
 
-            emit EpochRecoveryCrystallized(epochId, epoch.recoveryIndex, unclaimed, epoch.reservedRemaining, writeOff);
+            emit EpochRecoveryCrystallized(
+                epochId, epoch.recoveryIndex, unclaimed, epoch.reservedRemaining, writeOff
+            );
             emit EpochFunded(epochId, epoch.reservedRemaining);
 
             // Advance the oldest-unfunded cursor past any now-consecutively-
@@ -688,10 +673,7 @@ contract EpochedQueueModule {
             // actually governs whether the gap can ever be filled.
             uint256 reserved = eq.reservedForClaims;
             emit EpochFundingShortfall(
-                epochId,
-                gapNeeded,
-                hot > reserved ? hot - reserved : 0,
-                neededHot - hot
+                epochId, gapNeeded, hot > reserved ? hot - reserved : 0, neededHot - hot
             );
         }
 
@@ -718,11 +700,13 @@ contract EpochedQueueModule {
         uint256 next = eq.oldestUnfundedEpochId;
         uint256 scanned = 0;
         while (
-            next < eq.currentEpochId &&
-            eq.epochs[next].state == EpochQueueStorage.EpochState.Funded &&
-            scanned < MAX_CURSOR_SCAN
+            next < eq.currentEpochId && eq.epochs[next].state == EpochQueueStorage.EpochState.Funded
+                && scanned < MAX_CURSOR_SCAN
         ) {
-            unchecked { ++next; ++scanned; }
+            unchecked {
+                ++next;
+                ++scanned;
+            }
         }
         if (next != eq.oldestUnfundedEpochId) eq.oldestUnfundedEpochId = next;
     }
@@ -737,20 +721,18 @@ contract EpochedQueueModule {
     ///         solvent when funded. Never the live, cross-epoch liabilityIndex(): claim
     ///         timing inside (or after) the cohort cannot change what it pays. Shares were
     ///         burned at request: nothing is burned here.
-    function claimEpochAssets(uint256 epochId, uint256 claimId)
-        external
-        returns (uint256 assets)
-    {
+    function claimEpochAssets(uint256 epochId, uint256 claimId) external returns (uint256 assets) {
         _notPausedFundedClaim();
         _enterNonReentrant();
+        _rollCapEpochIfNeeded(CoreStorage.layout());
 
         EpochQueueStorage.Layout storage eq = EpochQueueStorage.layout();
-        EpochQueueStorage.EpochData  storage epoch = eq.epochs[epochId];
+        EpochQueueStorage.EpochData storage epoch = eq.epochs[epochId];
         EpochQueueStorage.EpochClaim storage claim = eq.claims[epochId][claimId];
 
         if (epoch.state != EpochQueueStorage.EpochState.Funded) revert EpochNotFunded();
-        if (claim.user  != msg.sender)  revert NotClaimOwner();
-        if (claim.claimed)              revert ClaimAlreadySettled();
+        if (claim.user != msg.sender) revert NotClaimOwner();
+        if (claim.claimed) revert ClaimAlreadySettled();
 
         (uint256 gross, uint256 owed, uint256 index) = _navState();
         _syncInsolvencyLatch(eq, gross, owed, index);
@@ -783,6 +765,7 @@ contract EpochedQueueModule {
     {
         _notPausedFundedClaim();
         _enterNonReentrant();
+        _rollCapEpochIfNeeded(CoreStorage.layout());
 
         EpochQueueStorage.Layout storage eq = EpochQueueStorage.layout();
         EpochQueueStorage.EpochData storage epoch = eq.epochs[epochId];
@@ -794,7 +777,7 @@ contract EpochedQueueModule {
         uint256 recoveryIndex = epoch.recoveryIndex;
         address assetAddr = _asset();
 
-        for (uint256 i = 0; i < claimIds.length; ) {
+        for (uint256 i = 0; i < claimIds.length;) {
             EpochQueueStorage.EpochClaim storage claim = eq.claims[epochId][claimIds[i]];
             if (claim.user == msg.sender && !claim.claimed) {
                 uint256 assetsOwed = claim.assetsOwed;
@@ -806,9 +789,13 @@ contract EpochedQueueModule {
                 totalAssets += assets;
 
                 emit EpochAssetsClaimed(epochId, claimIds[i], msg.sender, assets, assetsOwed);
-                emit IERC4626.Withdraw(address(this), msg.sender, msg.sender, assets, claim.grossShares);
+                emit IERC4626.Withdraw(
+                    address(this), msg.sender, msg.sender, assets, claim.grossShares
+                );
             }
-            unchecked { ++i; }
+            unchecked {
+                ++i;
+            }
         }
 
         if (totalAssets > 0) {
@@ -856,18 +843,19 @@ contract EpochedQueueModule {
     ///      same batch has already taken); if free liquidity is short by no more than the dust
     ///      tolerance the claim is paid what is available, beyond that it reverts and can be
     ///      retried once liquidity is back.
-    function _coverPayout(uint256 payout, uint256 released, uint256 reservedBefore, uint256 paidSoFar)
-        internal
-        view
-        returns (uint256)
-    {
+    function _coverPayout(
+        uint256 payout,
+        uint256 released,
+        uint256 reservedBefore,
+        uint256 paidSoFar
+    ) internal view returns (uint256) {
         if (payout <= released) return payout;
         uint256 hot = IERC20(_asset()).balanceOf(address(this));
         uint256 committed = reservedBefore + paidSoFar;
         uint256 free = hot > committed ? hot - committed : 0;
         uint256 available = released + free;
         if (payout <= available) return payout;
-        if (payout - available <= payout * INSOLVENCY_FUNDING_DUST_BPS / 10_000) return available;
+        if (payout - available <= INSOLVENCY_FUNDING_ROUNDING) return available;
         revert InsufficientFreeLiquidity();
     }
 
@@ -875,19 +863,17 @@ contract EpochedQueueModule {
         return ICoreVault(address(this)).isInsolvent();
     }
 
-    /// @dev Pre-crystallization ESTIMATE only: the live, cross-epoch liabilityIndex, used by
-    ///      fundEpoch() to size how much liquidity to go raise for a still-Closed epoch. Not
-    ///      what any claim is actually paid at -- see _payoutAt / EpochData.recoveryIndex.
+    /// @dev Size an unfunded cohort from assets and liabilities net of funded reserves.
     function _scaledByIndex(uint256 nominal) internal view returns (uint256) {
-        (,, uint256 index) = _navState();
-        return index >= FixedPoint.WAD ? nominal : FixedPoint.mulWadDown(nominal, index);
+        (uint256 gross, uint256 owed,) = _navState();
+        uint256 reserved = EpochQueueStorage.layout().reservedForClaims;
+        uint256 freeAssets = gross > reserved ? gross - reserved : 0;
+        uint256 freeOwed = owed > reserved ? owed - reserved : 0;
+        if (freeOwed == 0 || freeAssets >= freeOwed) return nominal;
+        return FixedPoint.mulDivDown(nominal, freeAssets, freeOwed);
     }
 
-    /// @dev nominal * index / 1e18, rounded DOWN. Rounding down is what keeps a pool coverable:
-    ///      floor is subadditive, so at one index the sum of floored payouts never exceeds the
-    ///      floored pool. Generic helper: callers pass either a live liabilityIndex (funding
-    ///      estimates) or a cohort's crystallized, immutable EpochData.recoveryIndex (claim
-    ///      payouts, Option A) -- identity (== nominal) when index >= 1e18 either way.
+    /// @dev Apply the cohort recovery index, rounding down to keep aggregate payouts covered.
     function _payoutAt(uint256 assetsOwed, uint256 index) internal pure returns (uint256) {
         return index >= FixedPoint.WAD ? assetsOwed : FixedPoint.mulWadDown(assetsOwed, index);
     }
@@ -965,8 +951,10 @@ contract EpochedQueueModule {
         // Interval guard: block fee extraction within the minimum crystallise interval.
         // Guard is skipped on the very first crystallise (highWaterMark == 0).
         uint64 minInterval = f.minCrystallizeInterval;
-        if (f.highWaterMark != 0 && minInterval > 0 &&
-            block.timestamp < uint256(f.lastCrystallize) + uint256(minInterval)) {
+        if (
+            f.highWaterMark != 0 && minInterval > 0
+                && block.timestamp < uint256(f.lastCrystallize) + uint256(minInterval)
+        ) {
             return (old, 0);
         }
 
@@ -999,8 +987,7 @@ contract EpochedQueueModule {
         if (!nsp.enabled) return;
 
         uint256 navReal = _totalAssets();
-        bool initialized =
-            (core.packedFlags & CoreStorage.FLAG_NAV_SMOOTH_INIT) != 0;
+        bool initialized = (core.packedFlags & CoreStorage.FLAG_NAV_SMOOTH_INIT) != 0;
 
         if (!initialized) {
             core.navSmooth = navReal;
@@ -1010,16 +997,12 @@ contract EpochedQueueModule {
             return;
         }
 
-        if (
-            block.timestamp
-                < uint256(core.lastNavSmoothUpdate) + nsp.interval
-        ) {
+        if (block.timestamp < uint256(core.lastNavSmoothUpdate) + nsp.interval) {
             return;
         }
 
         uint256 alpha = nsp.alphaBps;
-        uint256 newSmooth =
-            (alpha * navReal + (10000 - alpha) * core.navSmooth) / 10000;
+        uint256 newSmooth = (alpha * navReal + (10000 - alpha) * core.navSmooth) / 10000;
 
         core.navSmooth = newSmooth;
         core.lastNavSmoothUpdate = uint64(block.timestamp);
@@ -1031,37 +1014,14 @@ contract EpochedQueueModule {
     // INSTANT-CAP EPOCH ROLLOVER
     // =========================================================================
 
-    /// @notice Roll the instant-withdrawal cap epoch if its duration has elapsed, and
-    ///         (re)snapshot capBaseSnapshot for the new epoch. Permissionless -- anyone, in
-    ///         particular a keeper, can call this right at the cap-epoch boundary so the
-    ///         snapshot reflects the epoch's actual start rather than whatever totalAssets()
-    ///         happens to be whenever the first instant withdrawal after rollover is
-    ///         eventually submitted (review: Multyr, PR #19 second round -- "the cap-base
-    ///         snapshot should represent the actual cap-epoch start, not merely the first
-    ///         instant request that happens after the rollover"). Left coupled only to
-    ///         standard-queue timing before: if standard requests landed between the true
-    ///         boundary and whichever instant request happened to be first, the base was
-    ///         captured already shrunk by them -- the exact coupling capBaseSnapshot exists to
-    ///         prevent. A no-op once the epoch has already rolled and a base is snapshotted.
-    ///         requestInstantWithdrawal() calls the same internal helper, so a caller who is
-    ///         first is unaffected either way.
+    /// @notice Permissionlessly roll the cap epoch and snapshot its asset base.
+    /// @dev Asset- and supply-changing entrypoints call the same helper before mutation.
     function rollCapEpochIfNeeded() external {
         _rollCapEpochIfNeeded(CoreStorage.layout());
     }
 
     function _rollCapEpochIfNeeded(CoreStorage.Layout storage core) internal returns (bool rolled) {
-        rolled = ExitEngineLib.rollEpochIfNeeded(core);
-        if (rolled) emit Events.WithdrawalCapEpochRolled(core.epochStart);
-
-        // The instant bucket is meant to be independent of standard-queue activity, but
-        // totalAssets() = grossAssets - totalOwed, so a live read here would let every
-        // standard request shrink it. Snapshot the cap BASE once per cap-epoch instead, at
-        // rollover; only successful instant settlements ever consume it (consumeEpochCap,
-        // unchanged) (review: Pier). Backfilled if still zero (first call of the vault's
-        // life, or a genuinely empty vault) rather than treated as "no allowance".
-        if (rolled || core.capBaseSnapshot == 0) {
-            core.capBaseSnapshot = _totalAssets();
-        }
+        return ExitEngineLib.rollCapEpochIfNeeded(core);
     }
 
     // =========================================================================
@@ -1069,7 +1029,7 @@ contract EpochedQueueModule {
     // =========================================================================
 
     /// @notice Immediate settlement for cap-eligible exits.
-    /// @dev The tier is decided BEFORE crystallizing (review: Stefano) using a CONSERVATIVE,
+    /// @dev The tier is decided BEFORE crystallizing using a CONSERVATIVE,
     ///      pre-fee gross estimate: convertToAssets(shares) is monotonic and fee only shrinks
     ///      what is actually owed, so a pass here on the larger gross number always covers the
     ///      smaller exact assetsOwed _crystallizeExit produces. _crystallizeExit is then called
@@ -1082,24 +1042,25 @@ contract EpochedQueueModule {
     {
         _checkStandardExitAllowed(FixedMaturityStorage.layout(), true);
         _enterNonReentrant();
+        _rollCapEpochIfNeeded(CoreStorage.layout());
 
         if (shares == 0) revert ZeroAmount();
 
         CoreStorage.Layout storage core = CoreStorage.layout();
         IParamsProvider.WithdrawalParams memory wp = core.params.getWithdrawalParams(address(this));
 
-        // Deposit lock blocks BOTH ordinary exit paths outright -- checked here, before
-        // anything is crystallized, not as a soft "fall back to the queue" signal the way
-        // _canInstant used to treat it (review: Pier).
+        // Enforce the deposit lock before pricing.
         _requireNotLocked(wp);
 
-        _rollCapEpochIfNeeded(core);
         uint256 capRemaining = _epochCapRemaining(core, wp, core.capBaseSnapshot);
 
         // Decide the tier on a CONSERVATIVE pre-fee estimate -- before any pricing/burn.
+        _trySoftRefreshWarmNav();
+        _requireFreshNav();
         uint256 grossEstimate = _convertToAssets(shares);
         bool instantAllowed = core.packedFlags
-            & (CoreStorage.FLAG_PAUSED_WITHDRAWALS | CoreStorage.FLAG_INSTANT_WITHDRAWAL_PAUSED) == 0;
+                & (CoreStorage.FLAG_PAUSED_WITHDRAWALS | CoreStorage.FLAG_INSTANT_WITHDRAWAL_PAUSED)
+            == 0;
         (bool instantOk, address assetAddr) =
             instantAllowed ? _canInstant(grossEstimate, capRemaining, core) : (false, address(0));
 
@@ -1118,8 +1079,8 @@ contract EpochedQueueModule {
             emit Events.InstantExit(msg.sender, shares, assetsOwed, feeShares);
 
             settledImmediately = true;
-            epochId            = 0;
-            claimId            = 0;
+            epochId = 0;
+            claimId = 0;
         } else {
             // Fallback: record the already-priced liability in the current
             // bucket. Gated separately by the queued-request breaker
@@ -1146,6 +1107,7 @@ contract EpochedQueueModule {
     ///      the same sync, so a keeper poke is rarely needed.
     function syncInsolvencyState() external {
         _enterNonReentrant();
+        _rollCapEpochIfNeeded(CoreStorage.layout());
         (uint256 gross, uint256 owed, uint256 index) = _navState();
         _syncInsolvencyLatch(EpochQueueStorage.layout(), gross, owed, index);
         _exitNonReentrant();
@@ -1183,15 +1145,13 @@ contract EpochedQueueModule {
         return eq.epochs[eq.currentEpochId].claimCount;
     }
 
-    function epochData(uint256 epochId)
-        external view
-        returns (EpochQueueStorage.EpochData memory)
-    {
+    function epochData(uint256 epochId) external view returns (EpochQueueStorage.EpochData memory) {
         return EpochQueueStorage.layout().epochs[epochId];
     }
 
     function epochClaim(uint256 epochId, uint256 claimId)
-        external view
+        external
+        view
         returns (EpochQueueStorage.EpochClaim memory)
     {
         return EpochQueueStorage.layout().claims[epochId][claimId];
@@ -1307,16 +1267,8 @@ contract EpochedQueueModule {
     // INTERNAL: NAV FRESHNESS + INCENTIVES + REENTRANCY
     // =========================================================================
 
-    /// @dev A request turns the NAV into an irrevocable liability, so NAV correctness is a P0
-    ///      requirement: the request is only accepted if the WHOLE economic NAV passes the
-    ///      protocol's validity policy (CoreVault.navStatus): warm cache present, complete and
-    ///      no older than MAX_WARM_NAV_AGE (tested explicitly -- warmNavValid alone stayed true
-    ///      while the cache was days old, I-10), every enabled strategy readable and healthy,
-    ///      and any required oracle live. Deliberately does NOT try to refresh first: the keeper
-    ///      keeps the NAV fresh, and a request must revert rather than price off inputs the
-    ///      protocol itself considers unreliable. What passes the policy is accepted and is
-    ///      never repriced later; a loss no on-chain signal shows yet is protocol timing risk,
-    ///      covered only by the general insolvency mechanism.
+    /// @dev Requests require a complete, fresh warm cache, healthy readable strategies,
+    ///      and any configured oracle input to pass the vault's NAV validity policy.
     function _requireFreshNav() internal view {
         (bool valid, uint8 reason) = ICoreVault(address(this)).navStatus();
         if (valid) return;
@@ -1353,8 +1305,9 @@ contract EpochedQueueModule {
 
     function _enterNonReentrant() internal {
         CoreStorage.Layout storage core = CoreStorage.layout();
-        if (core.packedFlags & CoreStorage.FLAG_REENTRANCY_LOCKED != 0)
+        if (core.packedFlags & CoreStorage.FLAG_REENTRANCY_LOCKED != 0) {
             revert ReentrancyGuardLocked();
+        }
         core.packedFlags |= CoreStorage.FLAG_REENTRANCY_LOCKED;
     }
 
@@ -1370,16 +1323,13 @@ contract EpochedQueueModule {
     // and treats "paused" as "instant unavailable" (forcing its existing
     // queue-fallback branch) rather than reverting the whole call.
 
-    /// @dev Deposit lock: blocks both standard and instant exit requests outright while the
-    ///      caller is inside their post-deposit lock window. Force exit remains the deliberate,
-    ///      unchanged bypass. Previously only requestInstantWithdrawal consulted lockPeriod, and
-    ///      only as a soft "fall back to the queue" signal -- since a request now crystallizes
-    ///      (prices + burns) regardless of which path it takes, that silent fallback let a
-    ///      locked user's shares be burned and totalOwed created during the lock, defeating its
-    ///      purpose (review: Pier).
+    /// @dev Deposit locks apply to both ordinary exit paths; force exit bypasses them.
     function _requireNotLocked(IParamsProvider.WithdrawalParams memory wp) internal view {
-        if (wp.lockPeriod > 0 &&
-            block.timestamp < uint256(CoreStorage.layout().lastDepositTs[msg.sender]) + wp.lockPeriod) {
+        if (
+            wp.lockPeriod > 0
+                && block.timestamp
+                    < uint256(CoreStorage.layout().lastDepositTs[msg.sender]) + wp.lockPeriod
+        ) {
             revert DepositLockActive();
         }
     }
@@ -1397,7 +1347,10 @@ contract EpochedQueueModule {
 
     function _notPausedEpochCloseFund() internal view {
         uint256 flags = CoreStorage.layout().packedFlags;
-        if (flags & (CoreStorage.FLAG_PAUSED_WITHDRAWALS | CoreStorage.FLAG_EPOCH_CLOSE_FUND_PAUSED) != 0) {
+        if (
+            flags & (CoreStorage.FLAG_PAUSED_WITHDRAWALS | CoreStorage.FLAG_EPOCH_CLOSE_FUND_PAUSED)
+                != 0
+        ) {
             revert EpochCloseFundPaused();
         }
     }
@@ -1423,15 +1376,14 @@ contract EpochedQueueModule {
     ///      `assetsOwed` is the request's fixed, already-priced amount;
     ///      `capRemaining` was read BEFORE the request moved the NAV.
     ///      Lock period is no longer checked here: it is a hard revert, upstream, in
-    ///      _requireNotLocked(), before either exit path reaches this point (review: Pier).
+    ///      _requireNotLocked(), before either exit path reaches this point.
     ///      Liquidity waterfall is hot -> warm refill only, NEVER a strategy redeem -- the
-    ///      instant bucket is architecturally backed by hot + warm (review: Pier). Not `view`
+    ///      instant bucket is architecturally backed by hot + warm. Not `view`
     ///      any more: a warm shortfall attempts one BufferManager.refill() call.
-    function _canInstant(
-        uint256 assetsOwed,
-        uint256 capRemaining,
-        CoreStorage.Layout storage core
-    ) internal returns (bool ok, address assetAddr) {
+    function _canInstant(uint256 assetsOwed, uint256 capRemaining, CoreStorage.Layout storage core)
+        internal
+        returns (bool ok, address assetAddr)
+    {
         // Epoch cap (class B -- how fast shareholders' equity can leave)
         if (assetsOwed > capRemaining) return (false, address(0));
 
@@ -1459,28 +1411,13 @@ contract EpochedQueueModule {
         ok = free >= assetsOwed;
     }
 
-    /// @dev Remaining immediate-withdrawal capacity for the current cap epoch.
-    ///      This used to scale the bucket down by `outstandingClaimCount` (total unclaimed
-    ///      claims across ALL epochs) as a "queue depth" stress signal -- but that counter
-    ///      grows with ordinary STANDARD queued withdrawals too, so a burst of standard-queue
-    ///      activity shrank the instant bucket exactly like the live-NAV coupling
-    ///      capBaseSnapshot was built to close on the base side (review: Multyr, PR #19 second
-    ///      round -- "the instant-cap coupling is not fully closed yet"). Standard queue depth
-    ///      is no longer read here in any form. `DynamicCapParams` stays wired in
-    ///      IParamsProvider/GlobalConfig (governance-managed on-chain storage; deploy tooling
-    ///      reads/sets it) but, with its only signal gone, enabling it now simply pins the cap
-    ///      at `maxBps` -- the "queue empty" value -- rather than scaling with anything. A vault
-    ///      that wants a plain static bucket should configure `capPerEpochBps` directly instead.
+    /// @dev Static cap on the epoch snapshot; dynamic parameters are ignored.
     function _epochCapRemaining(
         CoreStorage.Layout storage core,
         IParamsProvider.WithdrawalParams memory wp,
         uint256 totalAssets_
     ) internal view returns (uint256) {
-        IParamsProvider.DynamicCapParams memory dcp = core.params.getDynamicCapParams(address(this));
-
-        uint16 cap = (dcp.enabled && dcp.minBps != 0 && dcp.maxBps != 0)
-            ? dcp.maxBps
-            : (wp.capPerEpochBps == 0 ? type(uint16).max : wp.capPerEpochBps);
+        uint16 cap = wp.capPerEpochBps == 0 ? type(uint16).max : wp.capPerEpochBps;
 
         if (cap == type(uint16).max) return type(uint256).max;
 

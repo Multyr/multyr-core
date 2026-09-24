@@ -132,7 +132,7 @@ Enforced structurally, not by convention (review §11):
 
 - **Cannot add new selectors** — `recoverModuleGroup` only ever rewrites `moduleOf` for the group's fixed, `SelectorLib`-derived selector set.
 - **Cannot relax or change roles** — `recoverModuleGroup` takes no role parameter at all and never writes `roleOf`.
-- **Cannot expose previously privileged selectors** — same reason.
+- **Cannot expose privileged selectors** — same reason.
 - **Cannot touch CoreVault's shell, ownership, guardian, or vetoer** — none of these are `moduleOf`-routed selectors.
 - **Cannot modify its own policy** — no setters exist on `vault`, `rootTimelock`, `minDelay`, `cooldown`, or the recoverable group definitions.
 - **Cannot reach `AdminModule`'s governance/sealing selectors, or any satellite component** ([§4](#4-recoverable-groups)).

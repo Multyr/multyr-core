@@ -202,7 +202,7 @@ contract QueueEpochModule_WithdrawFlow_POC is Test {
     // own shares) reverted, and the whole requestInstantWithdrawal() call
     // reverted instead of gracefully queueing the claim as documented.
     function test_instantWithdrawalFallback_attributesClaimToRealUser() public {
-        // Deposit lock is now a hard revert on BOTH exit paths (review: Pier), so it can no
+        // Deposit lock is now a hard revert on BOTH exit paths, so it can no
         // longer be used to force the fallback branch here -- an exhausted cap does the same
         // deterministic job without touching lock semantics.
         params.setCapPerEpochBps(1);
@@ -340,17 +340,7 @@ contract QueueEpochModule_WithdrawFlow_POC is Test {
     }
 
     // =========================================================================
-    // BUG D (MEDIUM) -- instant cap check must honor dynamic cap policy
-    // =========================================================================
-    //
-    // Historically: dynamic cap enabled (min 1% / max 20%, stress threshold 1 pending
-    // claim), and a standard claim queued by another user drove the instant cap down to
-    // its 1% floor via `outstandingClaimCount`. That coupling -- an ordinary STANDARD
-    // queued withdrawal shrinking the INSTANT bucket -- was itself later identified as a
-    // bug and removed (review: Multyr, PR #19 second round -- "standard queued withdrawals
-    // must have zero effect on the instant 10% bucket"). Queue depth is no longer read by
-    // the dynamic-cap calculation at all: an enabled DynamicCapParams now simply pins the
-    // cap at maxBps, regardless of standard-queue activity.
+    // Standard queue depth and dynamic settings do not affect the static cap.
     function test_instantWithdrawal_unaffectedByStandardQueueDepth() public {
         params.setDynamicCap(true, 100, 2000, 1); // enabled, min 1%, max 20%, threshold 1
         uint256 sharesA = _deposit(user, 1_000_000e6);
@@ -361,9 +351,7 @@ contract QueueEpochModule_WithdrawFlow_POC is Test {
         vm.prank(userB);
         EpochedQueueModule(address(core)).requestEpochWithdrawal(1_000e6);
 
-        // userA requests an instant withdrawal worth ~5% of TVL -- well under the 20%
-        // (maxBps) cap dynamic-cap pins at now that queue depth no longer scales it down,
-        // so it must settle immediately.
+        // This request fits the static cap.
         uint256 fivePctShares = sharesA / 20;
         vm.prank(user);
         (bool settledImmediately,,) =

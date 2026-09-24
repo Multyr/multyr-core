@@ -296,8 +296,7 @@ contract AdapterShortfall_Test is Test {
         // Option A: the cohort's recovery ratio is crystallized once, at fund time
         // (EpochData.recoveryIndex), not read from the live liabilityIndex() -- which
         // normalizes back toward 1e18 once totalOwed is written down to match exactly what
-        // was reserved for this (sole outstanding) cohort (review: Multyr, PR #19 second
-        // round).
+        // was reserved for this (sole outstanding) cohort.
         uint256 recoveryIndex = _q().epochData(e).recoveryIndex;
         assertLe(recoveryIndex, idx0 + 1e12, "the recognised shortfall can only lower the crystallized ratio (or leave it)");
         uint256 paid = _claim(alice, e, c);

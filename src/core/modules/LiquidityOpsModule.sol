@@ -372,12 +372,8 @@ contract LiquidityOpsModule {
                 IStrategyRouter.Allocation[] memory deposits = new IStrategyRouter.Allocation[](depositCount);
                 uint256 dk = 0;
                 uint256 remaining = totalWithdrawn;
-                // Hoisted out of the loop below: asset() is invariant across
-                // iterations, so this replaces what was previously up to
-                // `depositCount` identical self-calls with exactly one. Same
-                // tolerant-failure semantics as before: if the query fails,
-                // assetAddr stays address(0) and every iteration's transfer is
-                // skipped, matching the old per-iteration "ok && length==32" gate.
+                // Resolve the invariant asset address once. If the query fails,
+                // skip transfers that require the address.
                 (bool assetOk, bytes memory assetData) =
                     address(this).staticcall(abi.encodeWithSignature("asset()"));
                 address assetAddr =

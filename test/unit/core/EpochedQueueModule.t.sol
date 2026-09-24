@@ -69,22 +69,14 @@ contract EpochedQueueModule_Test is Test {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // outstandingClaimCount persists across epoch close (still true, and still relied on by
-    // FixedMaturityModule's Matured->Closed gate) but is NO LONGER the dynamic-cap "queue
-    // depth" signal: standard queue depth must have zero effect on the instant bucket (review:
-    // Multyr, PR #19 second round -- "the instant-cap coupling is not fully closed yet"). This
-    // used to assert the OPPOSITE (that a standard claim, even from a closed epoch, tightened
-    // the instant cap) -- that coupling is exactly what was removed.
-    // ═══════════════════════════════════════════════════════════════════════
+    // Standard queue depth and dynamic parameters do not change the static instant cap.
 
     function test_dynamicCap_unaffectedByStandardQueueDepth_evenAfterEpochClose() public {
         params.setDynamicCap(true, 100, 2000, 1); // enabled, min 1%, max 20%, threshold 1
         uint256 sharesA = _deposit(user, 1_000_000e6);
         _deposit(userB, 10_000e6);
 
-        // userB queues a small standard claim, then the epoch closes. Under the old
-        // outstandingClaimCount-driven dynamic cap this would have tightened the instant
-        // bucket to its 1% floor; queue depth is no longer read at all now.
+        // A standard claim remains outstanding across epoch close.
         vm.prank(userB);
         EpochedQueueModule(address(core)).requestEpochWithdrawal(1_000e6);
 
@@ -97,9 +89,7 @@ contract EpochedQueueModule_Test is Test {
             "userB's claim is still outstanding (unfunded/unclaimed) after the epoch closed"
         );
 
-        // userA now requests an instant withdrawal worth 5% of TVL -- with queue depth no
-        // longer feeding the dynamic cap, an enabled DynamicCapParams pins the cap at maxBps
-        // (20% here), so this must settle immediately despite the outstanding standard claim.
+        // The static cap permits this instant request despite the queued claim.
         uint256 fivePctShares = sharesA / 20;
         vm.prank(user);
         (bool settledImmediately,,) =
@@ -107,7 +97,7 @@ contract EpochedQueueModule_Test is Test {
 
         assertTrue(
             settledImmediately,
-            "standard queue depth must have zero effect on the instant bucket: cap pins at maxBps"
+            "standard queue depth must have zero effect on the static instant cap"
         );
     }
 

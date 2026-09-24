@@ -343,7 +343,6 @@ contract FeeCollector is ReentrancyGuard, Pausable {
         emit Distributed(token, bal, toTreasury, toOps, toSafetyReserve);
     }
 
-    /// @notice Pull underlying for a previously-queued AUTO_HARVEST fallback claim.
     /// @notice Pull underlying for every queued AUTO_HARVEST claim that is ready.
     /// @dev Iterates the token's pending claims and settles the ones whose epoch
     ///      has been funded, leaving the rest queued. One epoch that never funds

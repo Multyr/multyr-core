@@ -79,6 +79,8 @@ contract CoreHarness is CoreVault {
         _setModuleUnsafe(EpochedQueueModule.reservedForClaims.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.syncInsolvencyState.selector, address(queueModule), ROLE_PUBLIC);
 
+        _setModuleUnsafe(EpochedQueueModule.rollCapEpochIfNeeded.selector, address(queueModule), ROLE_PUBLIC);
+
         // Wire up admin module owner selectors (OWNER)
         _setModuleUnsafe(AdminModule.submitFeeParams.selector, address(adminModule), ROLE_OWNER);
         _setModuleUnsafe(AdminModule.acceptFeeParams.selector, address(adminModule), ROLE_OWNER);

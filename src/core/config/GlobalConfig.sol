@@ -91,14 +91,12 @@ contract GlobalConfig is IParamsProvider {
         uint64 lockPeriod; // Deposit lock period in seconds
     }
 
-    // @dev DEAD as a stress throttle: see IParamsProvider.DynamicCapParams. `enabled: true` now
-    // just pins the cap at `maxBps`; `minBps` only gates (`!= 0`) whether that happens at all,
-    // and `queueStressThreshold` is unused.
+    /// @dev Retained for storage and ABI compatibility; ignored by cap enforcement.
     struct DynamicCapConfig {
-        uint16 minBps; // DEAD as a floor -- see @dev above
-        uint16 maxBps; // Max cap when queue empty -- the ONLY value used now
+        uint16 minBps; // Unused
+        uint16 maxBps; // Unused
         uint256 queueStressThreshold; // DEPRECATED, unused
-        bool enabled; // Enable dynamic adjustment -- see @dev above: pins the cap at maxBps
+        bool enabled; // Unused
     }
 
     struct QueueConfig {
@@ -264,9 +262,7 @@ contract GlobalConfig is IParamsProvider {
             lockPeriod: _lockPeriod
         });
 
-        // Set default dynamic cap params. `enabled: false` by default: even if a governor
-        // later flips this to true, see DynamicCapConfig's @dev -- it is DEAD as a stress
-        // throttle and just pins the cap at maxBps.
+        // Compatibility configuration; ignored by cap enforcement.
         defaultDynamicCap = DynamicCapConfig({
             minBps: 200, // 2%
             maxBps: 2000, // 20%
@@ -545,7 +541,7 @@ contract GlobalConfig is IParamsProvider {
         emit VaultOracleOverrideSet(vault, oracle, maxStaleness_);
     }
 
-    /// @notice Per-vault withdrawal config override — completes the previously dead
+    /// @notice Per-vault withdrawal config override — configures the
     ///         WITHDRAWAL override path (vaultWithdrawalOverrides/DefaultWithdrawalUpdated
     ///         existed but nothing ever wrote them). minClaimAmount is denominated in
     ///         asset units; zero disables the exit floor independently of deposit limits.
@@ -560,13 +556,7 @@ contract GlobalConfig is IParamsProvider {
     }
 
     /// @notice Set vault-specific dynamic instant-withdrawal cap parameters.
-    /// @dev DEAD as a stress throttle -- see DynamicCapConfig's @dev. `cfg.enabled: true` pins
-    ///      the instant-withdrawal cap at `cfg.maxBps` unconditionally; `cfg.minBps` only gates
-    ///      whether that happens (`!= 0`), and `cfg.queueStressThreshold` is unused. This setter
-    ///      is kept (rather than reverting) only because 16+ deploy/ops files and this
-    ///      governance-managed storage still reference it -- do not read this docstring as a
-    ///      promise of queue-stress scaling; use `setVaultWithdrawalOverride`'s `capPerEpochBps`
-    ///      for a plain static instant-withdrawal cap instead.
+    /// @dev Stores compatibility parameters; use capPerEpochBps to configure the cap.
     function setVaultDynamicCapOverride(address vault, DynamicCapConfig calldata cfg)
         external
         onlyGovernor

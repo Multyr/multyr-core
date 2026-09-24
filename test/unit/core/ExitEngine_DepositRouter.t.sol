@@ -1,19 +1,20 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { Test } from "forge-std/Test.sol";
-import { console2 } from "forge-std/console2.sol";
-import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { CoreHarness } from "../../helpers/CoreHarness.sol";
-import { ERC20Mock } from "../../../src/mocks/ERC20Mock.sol";
-import { MockParamsProvider } from "../../helpers/MockParamsProvider.sol";
-import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTests.sol";
-import { MockDepositRouter } from "../../mocks/MockDepositRouter.sol";
-import { MockReferralBinding } from "../../mocks/MockReferralBinding.sol";
-import { ExitEngineLib } from "../../../src/core/libraries/ExitEngineLib.sol";
+import {Test} from "forge-std/Test.sol";
+import {console2} from "forge-std/console2.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {CoreHarness} from "../../helpers/CoreHarness.sol";
+import {ERC20Mock} from "../../../src/mocks/ERC20Mock.sol";
+import {MockParamsProvider} from "../../helpers/MockParamsProvider.sol";
+import {MockBufferManagerForTests} from "../../helpers/MockBufferManagerForTests.sol";
+import {MockDepositRouter} from "../../mocks/MockDepositRouter.sol";
+import {MockReferralBinding} from "../../mocks/MockReferralBinding.sol";
+import {ExitEngineLib} from "../../../src/core/libraries/ExitEngineLib.sol";
 
 interface IQueueModule {
+    function rollCapEpochIfNeeded() external;
     function requestInstantWithdrawal(uint256 shares)
         external
         returns (bool settledImmediately, uint256 epochId, uint256 claimId);
@@ -59,12 +60,7 @@ contract ExitEngine_DepositRouter is Test {
         params.setCapPerEpochBps(1000); // 10%
 
         vault = new CoreHarness(
-            IERC20Metadata(address(usdc)),
-            "Vault",
-            "vUSDC",
-            owner,
-            feeCollector,
-            address(params)
+            IERC20Metadata(address(usdc)), "Vault", "vUSDC", owner, feeCollector, address(params)
         );
 
         MockBufferManagerForTests mockBM = new MockBufferManagerForTests(address(vault));
@@ -75,7 +71,9 @@ contract ExitEngine_DepositRouter is Test {
 
         // Deploy MockReferralBinding + MockDepositRouter
         referralBinding = new MockReferralBinding();
-        router = new MockDepositRouter(address(vault), address(usdc), address(0), address(referralBinding));
+        router = new MockDepositRouter(
+            address(vault), address(usdc), address(0), address(referralBinding)
+        );
 
         // Authorize router in referralBinding
         referralBinding.setRouter(address(router), true);
@@ -102,10 +100,10 @@ contract ExitEngine_DepositRouter is Test {
         vm.prank(users[0]);
         uint256 shares = router.depositWithPermit2Transfer(
             amount,
-            referrer,      // referrer
-            0,             // nonce (ignored in mock)
+            referrer, // referrer
+            0, // nonce (ignored in mock)
             block.timestamp + 1 hours, // deadline (ignored)
-            "mock_sig"     // signature (ignored)
+            "mock_sig" // signature (ignored)
         );
 
         uint256 usdcAfter = usdc.balanceOf(users[0]);
@@ -132,12 +130,12 @@ contract ExitEngine_DepositRouter is Test {
         vm.prank(users[1]);
         uint256 shares1 = router.depositWithPermit2Allowance(
             amount,
-            address(0),    // no referrer
+            address(0), // no referrer
             type(uint160).max, // allowanceAmount (ignored in mock)
             uint48(block.timestamp + 365 days), // expiry (ignored)
-            0,             // nonce (ignored)
+            0, // nonce (ignored)
             block.timestamp + 1 hours,
-            "mock_sig"     // sig (ignored)
+            "mock_sig" // sig (ignored)
         );
 
         assertGt(shares1, 0, "first deposit via allowance");
@@ -148,7 +146,10 @@ contract ExitEngine_DepositRouter is Test {
         uint256 shares2 = router.depositWithPermit2Allowance(
             amount,
             address(0),
-            0, 0, 0, 0,   // all zero
+            0,
+            0,
+            0,
+            0, // all zero
             ""
         );
 
@@ -177,13 +178,18 @@ contract ExitEngine_DepositRouter is Test {
 
         uint256 totalAssets = vault.totalAssets();
         uint256 totalSupply = vault.totalSupply();
-        console2.log("After router deposits: assets=", totalAssets / 1e6, "supply=", totalSupply / 1e6);
+        console2.log(
+            "After router deposits: assets=", totalAssets / 1e6, "supply=", totalSupply / 1e6
+        );
         assertGe(totalAssets, 99_000_000e6, "~100M TVL");
 
         // withdraw() MUST revert (even for router-deposited shares)
         vm.prank(users[0]);
         vm.expectRevert(ExitEngineLib.AsyncWithdrawalRequired.selector);
         vault.withdraw(1e6, users[0], users[0]);
+
+        vm.warp(block.timestamp + 31 days);
+        IQueueModule(address(vault)).rollCapEpochIfNeeded();
 
         // INSTANT claim — user0
         uint256 user0UsdcBefore = usdc.balanceOf(users[0]);
@@ -243,8 +249,7 @@ contract ExitEngine_DepositRouter is Test {
         for (uint256 i = 0; i < 5; i++) {
             vm.prank(users[i]);
             router.depositWithPermit2Transfer(
-                20_000_000e6, referrer, i,
-                block.timestamp + 1 hours, "mock_sig"
+                20_000_000e6, referrer, i, block.timestamp + 1 hours, "mock_sig"
             );
         }
         console2.log("TVL:", vault.totalAssets() / 1e6);
@@ -269,8 +274,7 @@ contract ExitEngine_DepositRouter is Test {
         // New deposit via router after epoch
         vm.prank(users[3]);
         router.depositWithPermit2Transfer(
-            10_000_000e6, address(0), 99,
-            block.timestamp + 1 hours, "mock_sig"
+            10_000_000e6, address(0), 99, block.timestamp + 1 hours, "mock_sig"
         );
 
         // Fresh cap — instant claim works
@@ -303,8 +307,7 @@ contract ExitEngine_DepositRouter is Test {
         g = gasleft();
         vm.prank(users[0]);
         router.depositWithPermit2Transfer(
-            1_000_000e6, referrer, 0,
-            block.timestamp + 1 hours, "mock_sig"
+            1_000_000e6, referrer, 0, block.timestamp + 1 hours, "mock_sig"
         );
         console2.log("depositWithPermit2Transfer (Mode A):", g - gasleft());
 
@@ -312,19 +315,20 @@ contract ExitEngine_DepositRouter is Test {
         g = gasleft();
         vm.prank(users[1]);
         router.depositWithPermit2Allowance(
-            1_000_000e6, address(0),
-            type(uint160).max, uint48(block.timestamp + 365 days),
-            0, block.timestamp + 1 hours, "mock_sig"
+            1_000_000e6,
+            address(0),
+            type(uint160).max,
+            uint48(block.timestamp + 365 days),
+            0,
+            block.timestamp + 1 hours,
+            "mock_sig"
         );
         console2.log("depositWithPermit2Allowance (Mode B, first):", g - gasleft());
 
         // Mode B subsequent
         g = gasleft();
         vm.prank(users[1]);
-        router.depositWithPermit2Allowance(
-            1_000_000e6, address(0),
-            0, 0, 0, 0, ""
-        );
+        router.depositWithPermit2Allowance(1_000_000e6, address(0), 0, 0, 0, 0, "");
         console2.log("depositWithPermit2Allowance (Mode B, reuse):", g - gasleft());
 
         assertLt(g, type(uint256).max, "gas measured");

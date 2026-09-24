@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { Test } from "forge-std/Test.sol";
-import { console2 } from "forge-std/console2.sol";
-import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import { CoreHarness } from "../../helpers/CoreHarness.sol";
-import { ERC20Mock } from "../../../src/mocks/ERC20Mock.sol";
-import { MockParamsProvider } from "../../helpers/MockParamsProvider.sol";
-import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTests.sol";
-import { VaultUpkeep } from "../../../src/automation/VaultUpkeep.sol";
+import {Test} from "forge-std/Test.sol";
+import {console2} from "forge-std/console2.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {CoreHarness} from "../../helpers/CoreHarness.sol";
+import {ERC20Mock} from "../../../src/mocks/ERC20Mock.sol";
+import {MockParamsProvider} from "../../helpers/MockParamsProvider.sol";
+import {MockBufferManagerForTests} from "../../helpers/MockBufferManagerForTests.sol";
+import {VaultUpkeep} from "../../../src/automation/VaultUpkeep.sol";
 
 interface IQueueModule {
+    function rollCapEpochIfNeeded() external;
     function requestInstantWithdrawal(uint256 shares)
         external
         returns (bool settledImmediately, uint256 epochId, uint256 claimId);
@@ -43,9 +44,7 @@ contract Hardening_RemainingItems is Test {
         params.setCapPerEpochBps(1000);
 
         vault = new CoreHarness(
-            IERC20Metadata(address(usdc)),
-            "Vault", "vUSDC",
-            owner, feeCollector, address(params)
+            IERC20Metadata(address(usdc)), "Vault", "vUSDC", owner, feeCollector, address(params)
         );
         MockBufferManagerForTests mockBM = new MockBufferManagerForTests(address(vault));
         vault.setBufferManagerUnsafe(address(mockBM));
@@ -167,6 +166,9 @@ contract Hardening_RemainingItems is Test {
         // User deposits and queues immediate claim that exceeds cap
         vm.prank(user1);
         vault.deposit(50_000_000e6, user1);
+
+        vm.warp(block.timestamp + 31 days);
+        IQueueModule(address(vault)).rollCapEpochIfNeeded();
 
         // Exhaust cap with first instant claim
         vm.prank(user1);

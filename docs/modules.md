@@ -173,84 +173,36 @@ Source: `src/core/modules/ERC4626Module.sol:163-250`.
 
 ### 3.1 Role
 
-Manages the async exit queue using Renzo ezETH-style epoch batching: accepts claim requests
-into a currently-open epoch, closes the epoch to lock a single price-per-share for every claim
-in it, pulls liquidity once per epoch, and lets users self-serve their claim via a pull-based
-call. Also owns performance-fee crystallization and NAV smoothing (decoupled from the epoch
-lifecycle — see `docs/queue-mechanics.md` §7).
+Manages economic exit at request and epoch-wide settlement. Requests fix assets owed,
+transfer fee shares and burn net shares. Epochs group liquidity funding and claims.
 
-### 3.2 Public Functions
+### 3.2 Public functions
 
 | Function | Access | Description |
 |---|---|---|
-| `requestEpochWithdrawal(uint256 shares)` | PUBLIC | Submit a standard (queued) withdrawal into the current open epoch |
-| `cancelEpochWithdrawal(uint256 epochId, uint256 claimId)` | PUBLIC | Cancel a claim while its epoch is still Open |
-| `closeCurrentEpoch()` | PUBLIC | Lock PPS for the current epoch, open the next one |
-| `fundEpoch(uint256 epochId)` | PUBLIC | Pull liquidity (warm refill → strategy redeem) for a Closed epoch |
-| `claimEpochAssets(uint256 epochId, uint256 claimId)` | PUBLIC | Self-serve claim from a Funded epoch |
-| `batchClaimEpochAssets(uint256 epochId, uint256[] claimIds)` | PUBLIC | Batch self-serve claim for one user's multiple claims |
-| `requestInstantWithdrawal(uint256 shares)` | PUBLIC | Cap-eligible instant exit; falls back to the epoch queue otherwise |
-| `endEpochCrystallize()` | PUBLIC | Crystallize perf fee + update NAV smoothing (independent of epoch state) |
-| `currentEpochId()` / `epochData(id)` / `epochClaim(id, claimId)` | PUBLIC view | Epoch and claim state |
-| `nextClaimIdForEpoch(id)` | PUBLIC view | Next claim ID counter for a given epoch |
-| `totalEscrowedShares()` | PUBLIC view | Total shares in escrow across all epochs |
-| `outstandingClaimCount()` | PUBLIC view | Total unclaimed claims across all epochs (dynamic-cap signal) |
-| `oldestUnfundedEpochId()` | PUBLIC view | Keeper cursor — oldest Closed-not-yet-Funded epoch |
-| `epochDeficit(id)` | PUBLIC view | Remaining liquidity shortfall for a Closed epoch |
-| `canCloseCurrentEpoch()` / `currentEpochClaimCount()` | PUBLIC view | Keeper eligibility + anti-churn checks |
+| `requestEpochWithdrawal(shares)` | PUBLIC | Fix a standard exit liability |
+| `requestInstantWithdrawal(shares)` | PUBLIC | Settle within the static cap or queue at the standard fee |
+| `closeCurrentEpoch()` | PUBLIC | Close the settlement bucket and open the next |
+| `fundEpoch(epochId)` | PUBLIC | Raise liquidity and crystallize the recovery index |
+| `claimEpochAssets(epochId, claimId)` | PUBLIC | Pay the claimant using the funded cohort index |
+| `batchClaimEpochAssets(epochId, claimIds)` | PUBLIC | Settle a user's claims in one epoch |
+| `rollCapEpochIfNeeded()` | PUBLIC | Roll the cap period and snapshot shareholder NAV |
+| `endEpochCrystallize()` | PUBLIC | Crystallize performance fees and update NAV smoothing |
 
-Source: `src/core/modules/EpochedQueueModule.sol:212-833`.
+### 3.3 Requests
 
-### 3.3 requestEpochWithdrawal / requestInstantWithdrawal Decision Tree
-
-```
-requestInstantWithdrawal(shares):
-  1. _checkStandardExitAllowed(fm, immediate=true)
-  2. _trySoftRefreshWarmNav(); rollEpochIfNeeded()   — the CAP epoch (ExitEngineLib), not the settlement epoch
-  3. gross = convertToAssets(shares)
-  4. if _canInstant(gross, wp, core):
-       INSTANT PATH:
-       - computeFeeShares(shares, INSTANT, fee)
-       - _transferShares(user → feeCollector, feeShares); _burn(user, netShares)
-       - safeTransfer(user, netAssets); consumeEpochCap(gross)
-       - emit InstantExit
-       - return (settledImmediately=true, epochId=0, claimId=0)
-     else:
-       FALLBACK — same as requestEpochWithdrawal(shares):
-       - _transferShares(user → vault, shares)  [escrow ALL gross shares]
-       - claimId = ++nextClaimId[epochId]; record EpochClaim{user, netShares, feeShares, claimed=false}
-       - escrowedShares += shares; outstandingClaimCount += 1
-       - emit EpochWithdrawalRequested
-       - return (settledImmediately=false, epochId, claimId)
-```
-
-Callers must branch on `settledImmediately` — a cap-exhausted instant request never reverts,
-it silently becomes a standard epoch claim (W2 rule).
-
-Source: `src/core/modules/EpochedQueueModule.sol:212-289, 698-749`.
+Refresh warm NAV and validate all valuation inputs before pricing. Standard and queued
+fallback requests pay the standard fee. Instant eligibility uses refreshed gross share
+value; immediate payouts consume the net amount from the cap. The cap uses a NAV snapshot
+and `capPerEpochBps`; dynamic cap settings are ignored. Requests cannot be cancelled.
 
 ### 3.4 Settlement: Close → Fund → Claim
 
-Settlement is a three-step, **epoch-wide** (not per-claim) process — the core structural
-difference from the old per-claim settle loop:
-
-**Step A — `closeCurrentEpoch()`** (permissionless, gated on `minEpochDuration`):
-- Snapshots `ppsAtClose = totalAssets/totalSupply` once for the whole epoch.
-- Batch-transfers accumulated fee shares to `feeCollector` in one call.
-- Opens the next epoch immediately so new submissions are never blocked.
-
-**Step B — `fundEpoch(epochId)`** (permissionless, repeatable):
-- One liquidity pull covers the epoch's entire net liability, not a per-batch slice.
-- Waterfall: warm refill first (`bm.refill`), then strategy redeem (`router.planRedeem` /
-  `executeRedeemBatch`) for any remaining gap — both try/catch, W2 rule.
-- Epoch transitions to `Funded` only once `hot >= totalNetAssets`; otherwise stays `Closed`
-  for a later retry.
-
-**Step C — `claimEpochAssets(epochId, claimId)`** (pull-based, per claimant, any time after Funded):
-- `assets = claim.netShares * epoch.ppsAtClose / WAD` — deterministic, no live-PPS exposure.
-- No keeper required for a user to receive funds.
-
-Source: `src/core/modules/EpochedQueueModule.sol:327-513`.
+Closing changes only the settlement bucket. Funding raises liquidity through warm refill
+and strategy redeem, then sizes unfunded liabilities against assets net of existing reserves.
+A haircut requires valid NAV. Once funded, a cohort's recovery index is immutable and its
+write-down is removed from `totalOwed`. Claims pay `assetsOwed * recoveryIndex / 1e18`, rounded
+down, directly to the claimant. See [economic-exit.md](economic-exit.md) for accounting rules.
 
 ### 3.5 Epoch Management
 
@@ -283,19 +235,21 @@ Performance fee minting is the ONLY exit-related path that mints new shares (fee
 | M3-I1 | totalSupply NEVER increases on exit (only decreases via burn) |
 | M3-I2 | feeShares transferred via processorTransfer (TRANSFER, not mint) |
 | M3-I3 | epochWithdrawn ≤ cap (INSTANT only; STANDARD claims have no cap) |
-| M3-I4 | Intra-batch PPS deterministic: all claims in same settleFeesAndProcessQueue use same cachedTA/cachedTS |
-| M3-I5 | Queue escrow: vault holds pendingShares; settlement decrements pendingShares on each claim |
+| M3-I4 | Claim payouts use the immutable funded cohort recovery index |
+| M3-I5 | Requests burn net shares and record liabilities; funding reserves cash; claims discharge liabilities |
 
 ### 3.8 Errors
 
 | Error | Condition |
 |---|---|
-| `ZeroAmount`, `ClaimTooSmall` | Validation on requestClaim |
+| `ZeroAmount` | Zero shares or a request that rounds to zero assets owed |
 | `TooManyClaimsThisEpoch` | Anti-spam per-epoch limit exceeded |
 | `ClaimCooldownActive` | Anti-spam cooldown active |
-| `NotClaimOwner` | cancelClaim: caller != claim.user |
-| `AlreadySettled` | cancelClaim on already-settled claim |
-| `ReentrancyGuardLocked` | Reentrant requestClaim |
+| `NotClaimOwner` | Self-claim caller differs from the claim owner |
+| `ClaimAlreadySettled` | Self-claim has already been paid |
+| `ReentrancyGuardLocked` | Reentrant state-changing operation |
+| `NavStale`, `NavInvalid`, `NavInputInvalid` | Invalid request valuation inputs |
+| `VaultInsolvent` | Ordinary exit pricing has no shareholder equity |
 
 ---
 
@@ -329,7 +283,7 @@ revoke*():
 
 ### 4.3 Key Functions
 
-> **Correction**: `setGuardian(address)` previously appeared in this table but is not an `AdminModule` function — it's implemented directly on `CoreVault` (see [architecture.md §2.3](architecture.md#23-functions-implemented-directly-on-corevault)). It is now `onlyOwner` and blocked post-seal, matching `setVetoer()` below.
+`setGuardian(address)` is implemented directly on `CoreVault` (see [architecture.md §2.3](architecture.md#23-functions-implemented-directly-on-corevault)). It is `onlyOwner` and blocked post-seal, matching `setVetoer()` below.
 
 | Function | Role | Timelock | Description |
 |---|---|---|---|
@@ -1111,7 +1065,7 @@ graph LR
 | Module | Key Invariants |
 |---|---|
 | ERC4626Module | withdraw/redeem always revert; no mint on exit; deposit blocked if warmNavInvalid |
-| EpochedQueueModule | totalSupply decreases only on exit; PPS deterministic per-epoch (locked at close); escrow balance == totalEscrowedShares |
+| EpochedQueueModule | net shares burned at request; assets owed fixed at request; recovery index fixed at funding |
 | AdminModule | Pending params must be resolved before new submission; ETA window 7 days; fee caps enforced |
 | BufferManager | Never holds idle USDC; cachedWarmNav reflects 100% of warm assets |
 | FixedMaturityModule | finalPerformanceFeeApplied exactly once; fundingFailedPPS immutable after markFundingFailed |
