@@ -28,35 +28,18 @@ interface IParamsProvider {
         uint16 capPerEpochBps; // Max immediate withdrawals per epoch (e.g., 1000 = 10%)
         uint256 maxWithdrawalPerBlock; // Max total withdrawals per block
         uint256 maxWithdrawalPerTx; // Max single transaction withdrawal
-        // @dev DEAD for withdrawals under the economic-exit model (spec §6.4: no withdrawal
-        // minimum, deposits only). No code path reads this for a request any more. Left in the
-        // struct/storage rather than removed -- 16 deploy/ops scripts (including a dedicated
-        // SetMinClaimAmount.s.sol) read and assert on it, and governance-managed GlobalConfig
-        // storage would need a coordinated migration. Review ("to complete"): remove in a
-        // follow-up alongside those scripts, not here.
+        // Retained for storage, ABI and deployment-script compatibility.
+        // Economic exits have no minimum claim amount; deposit limits are separate.
         uint256 minClaimAmount; // DEPRECATED, unused for exits -- see @dev above
         uint64 lockPeriod; // Deposit lock period in seconds
     }
 
-    /// @notice Dynamic withdrawal cap parameters (B5)
-    /// @dev DEAD as a stress throttle. The only signal this scaled against, queue depth
-    ///      (outstandingClaimCount), was removed from EpochedQueueModule._epochCapRemaining()
-    ///      because it grew with ordinary STANDARD queued withdrawals and coupled the
-    ///      supposedly-independent instant bucket to unrelated queue activity (review: Multyr,
-    ///      PR #19 second round -- "the instant-cap coupling is not fully closed yet"). With
-    ///      that signal gone, `enabled: true` now simply pins the effective cap at `maxBps`
-    ///      unconditionally: `minBps` is read only as a `!= 0` gate (whether to prefer this
-    ///      struct's `maxBps` over `WithdrawalParams.capPerEpochBps`, not scaled toward), and
-    ///      `queueStressThreshold` is never read at all. No code path lowers the cap toward
-    ///      `minBps` any more. Left in the struct/storage rather than removed -- governance-
-    ///      managed `GlobalConfig` storage would need a coordinated migration (same treatment
-    ///      as `WithdrawalParams.minClaimAmount` above). A vault that wants a plain static
-    ///      instant-withdrawal cap should configure `WithdrawalParams.capPerEpochBps` directly.
+    /// @dev Retained for storage and ABI compatibility; ignored by cap enforcement.
     struct DynamicCapParams {
-        uint16 minBps; // DEAD as a floor -- see @dev above. Only its zero-ness still matters.
-        uint16 maxBps; // Max cap when queue empty (e.g., 2000 = 20%) -- the ONLY value used now
+        uint16 minBps; // Unused
+        uint16 maxBps; // Unused
         uint256 queueStressThreshold; // DEPRECATED, unused -- see @dev above
-        bool enabled; // Enable dynamic adjustment -- see @dev above: pins the cap at maxBps
+        bool enabled; // Unused
     }
 
     /// @notice Queue anti-spam parameters (A4)

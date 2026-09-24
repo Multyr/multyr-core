@@ -4,20 +4,9 @@ pragma solidity ^0.8.28;
 // ──────────────────────────────────────────────────────────────────────────────
 // SPRINT SECURITY TEST — SystemSealer non-6dp decimals guard
 //
-// BUG (kpi4/corevault-decimals-guard review, 2026-08-11):
-//   GlobalConfig's defaults (defaultVaultDepositCap = 10M * 1e6,
-//   defaultMinDeployAmount = 10 * 1e6, ...) are 6dp/USDC-shaped. The per-vault
-//   override setters (setVaultDepositLimits, setVaultWithdrawalOverride,
-//   setVaultGovCaps) exist to correct this for non-6dp assets (e.g. 18dp WETH),
-//   but nothing enforced their use — an 18dp vault sealed without calling them
-//   ends up with a deposit cap of ~0.00001 WETH and a near-zero minDeployAmount:
-//   a bricked configuration that SystemSealer previously let through.
-//
-// FIX:
-//   SystemSealer.verifyAndSeal / canSeal now require, for any vault whose asset
-//   is not 6dp, that VAULT_CAP, WITHDRAWAL, and GOV_CAPS overrides are all set
-//   in GlobalConfig before the vault can be sealed. 6dp vaults are exempt (they
-//   already match the GlobalConfig defaults).
+// GlobalConfig's asset-denominated defaults use 6 decimals. For other assets,
+// SystemSealer.verifyAndSeal / canSeal require VAULT_CAP, WITHDRAWAL and
+// GOV_CAPS overrides before sealing. Six-decimal vaults use the defaults.
 // ──────────────────────────────────────────────────────────────────────────────
 
 import { Test } from "forge-std/Test.sol";

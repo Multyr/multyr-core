@@ -353,7 +353,7 @@ contract Hardening_MissingTests is Test {
         vm.prank(user1);
         vault.transfer(residualOwner, 100);
 
-        // Deposit lock is now a hard revert on both exit paths (review: Pier), so it can no
+        // Deposit lock is now a hard revert on both exit paths, so it can no
         // longer be used to force the fallback branch for this 100-wei withdrawal (a
         // cap-bps reduction would still leave far more than 100 wei of headroom against a
         // 10M-USDC deposit). Move all hot liquidity into the (mock) warm bucket instead --

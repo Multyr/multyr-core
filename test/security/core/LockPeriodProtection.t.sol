@@ -42,6 +42,7 @@ contract LockPeriodProtection is Test {
 
         // Deploy params WITH lock period enabled
         params = new MockParamsProvider();
+        params.setCapPerEpochBps(0); // Isolate lock/accounting checks from the instant cap.
         params.setLockPeriod(LOCK_PERIOD);
 
         // Deploy modules

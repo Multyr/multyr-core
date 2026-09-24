@@ -1,16 +1,21 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { Test } from "lib/forge-std/src/Test.sol";
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {Test} from "lib/forge-std/src/Test.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
-import { CoreHarness } from "../../helpers/CoreHarness.sol";
-import { MockUSDC } from "../../helpers/MockUSDC.sol";
-import { ERC4626Module } from "../../../src/core/modules/ERC4626Module.sol";
-import { EpochedQueueModule, EpochQueueStorage } from "../../../src/core/modules/EpochedQueueModule.sol";
-import { MockQueueEpochParamsProvider } from "../../sprint-test/QueueEpochModule_WithdrawFlow_POC.t.sol";
-import { ClaimSettlementUpkeep } from "../../../src/automation/ClaimSettlementUpkeep.sol";
+import {CoreHarness} from "../../helpers/CoreHarness.sol";
+import {MockUSDC} from "../../helpers/MockUSDC.sol";
+import {ERC4626Module} from "../../../src/core/modules/ERC4626Module.sol";
+import {
+    EpochedQueueModule,
+    EpochQueueStorage
+} from "../../../src/core/modules/EpochedQueueModule.sol";
+import {
+    MockQueueEpochParamsProvider
+} from "../../sprint-test/QueueEpochModule_WithdrawFlow_POC.t.sol";
+import {ClaimSettlementUpkeep} from "../../../src/automation/ClaimSettlementUpkeep.sol";
 
 contract ClaimSettlementUpkeep_Test is Test {
     address constant USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
@@ -29,7 +34,12 @@ contract ClaimSettlementUpkeep_Test is Test {
         vm.etch(USDC, address(new MockUSDC()).code);
         MockQueueEpochParamsProvider params = new MockQueueEpochParamsProvider();
         core = new CoreHarness(
-            IERC20Metadata(USDC), "USDC Agg", "agUSDC", address(this), address(this), address(params)
+            IERC20Metadata(USDC),
+            "USDC Agg",
+            "agUSDC",
+            address(this),
+            address(this),
+            address(params)
         );
         core.setEpochDurationUnsafe(7 days);
         upkeep = new ClaimSettlementUpkeep(address(core));
@@ -104,7 +114,9 @@ contract ClaimSettlementUpkeep_Test is Test {
         vm.prank(keeperBot); // an address with zero stake in this claim calls performUpkeep
         upkeep.performUpkeep(data);
 
-        assertEq(IERC20(USDC).balanceOf(alice), aliceBefore + 1_000e6, "alice, not the caller, is paid");
+        assertEq(
+            IERC20(USDC).balanceOf(alice), aliceBefore + 1_000e6, "alice, not the caller, is paid"
+        );
         assertEq(IERC20(USDC).balanceOf(keeperBot), botBefore, "the keeper caller receives nothing");
         assertTrue(_q().epochClaim(e, c).claimed);
     }
@@ -161,7 +173,8 @@ contract ClaimSettlementUpkeep_Test is Test {
 
         (bool needed, bytes memory data) = upkeep.checkUpkeep("");
         assertTrue(needed);
-        (uint256 epochId, uint256[] memory claimIds,,) = abi.decode(data, (uint256, uint256[], uint256, uint256));
+        (uint256 epochId, uint256[] memory claimIds,,) =
+            abi.decode(data, (uint256, uint256[], uint256, uint256));
         assertEq(epochId, e1, "skips the still-unfunded e0, finds work in e1");
         assertEq(claimIds.length, 1);
         assertEq(claimIds[0], cb);
@@ -200,9 +213,9 @@ contract ClaimSettlementUpkeep_Test is Test {
         _q().claimEpochAssets(e, c);
     }
 
-    // ═════ 5. failure leaves the cursor untouched; retries next tick ═════
+    // ═════ 5. pause leaves the cursor untouched; resumes when unpaused ═════
 
-    function test_performUpkeep_onFailure_doesNotAdvanceTheCursor() public {
+    function test_performUpkeep_whilePaused_doesNotAdvanceTheCursor() public {
         uint256 sa = _deposit(alice, 1_000e6);
         (uint256 e, uint256 c) = _request(alice, sa);
         _close();
@@ -211,7 +224,7 @@ contract ClaimSettlementUpkeep_Test is Test {
         (, bytes memory data) = upkeep.checkUpkeep("");
 
         core.pauseFundedClaimOnly(true);
-        upkeep.performUpkeep(data); // keeperSettleClaims reverts, swallowed
+        upkeep.performUpkeep(data); // pause check returns without settlement
         assertFalse(_q().epochClaim(e, c).claimed, "nothing settled while paused");
 
         core.pauseFundedClaimOnly(false);
@@ -287,9 +300,88 @@ contract ClaimSettlementUpkeep_Test is Test {
 
         (bool needed, bytes memory data) = upkeep.checkUpkeep("");
         assertTrue(needed);
-        (uint256 epochId, uint256[] memory claimIds,,) = abi.decode(data, (uint256, uint256[], uint256, uint256));
+        (uint256 epochId, uint256[] memory claimIds,,) =
+            abi.decode(data, (uint256, uint256[], uint256, uint256));
         assertEq(epochId, e1);
         assertEq(claimIds.length, 1);
         assertEq(claimIds[0], ca);
+    }
+
+    function test_forgedCursorIsIgnored() public {
+        uint256 a = _deposit(alice, 100e6);
+        (uint256 e, uint256 c) = _request(alice, a);
+        _close();
+        _q().fundEpoch(e);
+        upkeep.performUpkeep(abi.encode(e, new uint256[](0), type(uint256).max, type(uint256).max));
+        assertTrue(_q().epochClaim(e, c).claimed);
+        assertLe(upkeep.cursorEpochId(), _q().currentEpochId());
+    }
+
+    function test_skippedEpochIsRevisitedAfterFunding() public {
+        uint256 a = _deposit(alice, 100e6);
+        uint256 b = _deposit(bob, 100e6);
+        (uint256 e0, uint256 c0) = _request(alice, a);
+        _close();
+        (uint256 e1, uint256 c1) = _request(bob, b);
+        _close();
+        _q().fundEpoch(e1);
+        upkeep.performUpkeep("");
+        assertTrue(_q().epochClaim(e1, c1).claimed);
+        _q().fundEpoch(e0);
+        (bool needed,) = upkeep.checkUpkeep("");
+        assertTrue(needed);
+        upkeep.performUpkeep("");
+        assertTrue(_q().epochClaim(e0, c0).claimed);
+    }
+
+    function test_pausedClaimsDoNotRequestUpkeep() public {
+        uint256 a = _deposit(alice, 100e6);
+        (uint256 e,) = _request(alice, a);
+        _close();
+        _q().fundEpoch(e);
+        core.pauseFundedClaimOnly(true);
+        (bool needed,) = upkeep.checkUpkeep("");
+        assertFalse(needed);
+    }
+
+    function test_poisonedClaimDoesNotBlockHealthyClaimAndBacksOff() public {
+        uint256 a = _deposit(alice, 100e6);
+        uint256 b = _deposit(bob, 100e6);
+        (uint256 e, uint256 ca) = _request(alice, a);
+        (, uint256 cb) = _request(bob, b);
+        _close();
+        _q().fundEpoch(e);
+        vm.mockCallRevert(
+            USDC, abi.encodeWithSelector(IERC20.transfer.selector, alice, 100e6), "blocked"
+        );
+        upkeep.performUpkeep("");
+        assertFalse(_q().epochClaim(e, ca).claimed);
+        assertTrue(_q().epochClaim(e, cb).claimed);
+        assertGt(upkeep.retryAfter(e, ca), block.timestamp);
+        (bool needed,) = upkeep.checkUpkeep("");
+        assertFalse(needed);
+        vm.clearMockedCalls();
+        vm.warp(block.timestamp + upkeep.RETRY_DELAY());
+        upkeep.performUpkeep("");
+        assertTrue(_q().epochClaim(e, ca).claimed);
+    }
+
+    function test_boundedEmptyPagesProgressToPayableClaim() public {
+        uint256 a = _deposit(alice, 100e6);
+        uint256 b = _deposit(bob, 100e6);
+        (uint256 e, uint256 ca) = _request(alice, a);
+        (, uint256 cb) = _request(bob, b);
+        _close();
+        _q().fundEpoch(e);
+        vm.prank(alice);
+        _q().claimEpochAssets(e, ca);
+        upkeep.setBatchSizes(1, 1);
+        (bool needed,) = upkeep.checkUpkeep("");
+        assertTrue(needed, "bounded empty page needs cursor progress");
+        upkeep.performUpkeep("");
+        assertEq(upkeep.cursorClaimId(), cb);
+        vm.warp(block.timestamp + 1 minutes);
+        upkeep.performUpkeep("");
+        assertTrue(_q().epochClaim(e, cb).claimed);
     }
 }

@@ -10,9 +10,7 @@ import { FixedMaturityModule } from "../../../src/core/modules/FixedMaturityModu
 import { InvalidVaultState } from "../../../src/core/libraries/Errors.sol";
 
 /// @notice Proves configureFixedMaturity's funding-target overflow guard scales with the
-///         vault asset's actual decimals. Previously hardcoded to 1_000_000_000e6 (6dp),
-///         which made a realistic 18dp (e.g. WETH) funding target of 500 tokens (500e18)
-///         spuriously revert as "too large" even though it's a tiny, sane amount.
+///         vault asset's actual decimals, including 18dp funding targets such as 500e18.
 contract FixedMaturityModule_Decimals_Test is Test {
     function _deployHarness(uint8 decimals) internal returns (FixedMaturityHarness h) {
         ERC20Mock asset_ = new ERC20Mock("TOK", "TOK", decimals);
@@ -25,7 +23,7 @@ contract FixedMaturityModule_Decimals_Test is Test {
 
     function test_18dp_realisticFundingTarget_noLongerRejected() public {
         FixedMaturityHarness h = _deployHarness(18);
-        uint256 target = 500e18; // 500 whole tokens — would have exceeded the old 6dp-scaled cap
+        uint256 target = 500e18; // 500 whole tokens at 18 decimals
 
         FixedMaturityModule(address(h)).configureFixedMaturity(
             uint64(block.timestamp + 30 days),

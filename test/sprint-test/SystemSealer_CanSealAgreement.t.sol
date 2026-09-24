@@ -178,9 +178,9 @@ contract SystemSealer_CanSealAgreement_Test is Test {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // Happy path — the property review §42 requires: canSeal() true implies
+    // Happy path — canSeal() true implies
     // verifyAndSeal() succeeds against unchanged state. Exercises the strategy
-    // and chainId dimensions that were previously untested end-to-end.
+    // and chainId dimensions end-to-end.
     // ══════════════════════════════════════════════════════════════════════════
 
     function test_canSealTrue_impliesVerifyAndSealSucceeds() public {
@@ -192,11 +192,9 @@ contract SystemSealer_CanSealAgreement_Test is Test {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // Live-wiring bind checks (review §24) — a correctly governed decoy
+    // Live-wiring bind checks — a correctly governed decoy
     // component must not be able to satisfy the seal if it is not the
-    // component actually wired into the vault. Previously only globalConfig
-    // had this check (fixed on PR #11); feeCollector/strategyRouter/
-    // bufferManager/healthRegistry did not.
+    // component actually wired into the vault.
     // ══════════════════════════════════════════════════════════════════════════
 
     function test_canSeal_and_verifyAndSeal_agree_whenSystemSealerIsNotAuthorizedOnVault() public {
@@ -319,9 +317,7 @@ contract SystemSealer_CanSealAgreement_Test is Test {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // Strategy role invariant — previously checked ONLY in verifyAndSeal().
-    // canSeal() used to return (true, "") here; it must now agree with
-    // verifyAndSeal() and reject it too.
+    // Both canSeal() and verifyAndSeal() must reject missing strategy roles.
     // ══════════════════════════════════════════════════════════════════════════
 
     function test_canSeal_and_verifyAndSeal_agree_whenRootTimelockMissingParamRole() public {
@@ -366,8 +362,7 @@ contract SystemSealer_CanSealAgreement_Test is Test {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // Deployer-retains-no-roles invariant — previously checked ONLY in
-    // verifyAndSeal(). canSeal() used to return (true, "") here too.
+    // Both seal checks reject a deployer that retains strategy roles.
     // ══════════════════════════════════════════════════════════════════════════
 
     function test_canSeal_and_verifyAndSeal_agree_whenDeployerStillHasStrategyAdminRole() public {

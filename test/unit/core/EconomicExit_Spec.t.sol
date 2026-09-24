@@ -10,17 +10,22 @@ pragma solidity ^0.8.28;
 // directly (the harness has no strategy, so hot == the portfolio).
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { Test } from "lib/forge-std/src/Test.sol";
-import { Vm } from "lib/forge-std/src/Vm.sol";
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {Test} from "lib/forge-std/src/Test.sol";
+import {Vm} from "lib/forge-std/src/Vm.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
-import { CoreHarness } from "../../helpers/CoreHarness.sol";
-import { MockUSDC } from "../../helpers/MockUSDC.sol";
-import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTests.sol";
-import { ERC4626Module } from "../../../src/core/modules/ERC4626Module.sol";
-import { EpochedQueueModule, EpochQueueStorage } from "../../../src/core/modules/EpochedQueueModule.sol";
-import { MockQueueEpochParamsProvider } from "../../sprint-test/QueueEpochModule_WithdrawFlow_POC.t.sol";
+import {CoreHarness} from "../../helpers/CoreHarness.sol";
+import {MockUSDC} from "../../helpers/MockUSDC.sol";
+import {MockBufferManagerForTests} from "../../helpers/MockBufferManagerForTests.sol";
+import {ERC4626Module} from "../../../src/core/modules/ERC4626Module.sol";
+import {
+    EpochedQueueModule,
+    EpochQueueStorage
+} from "../../../src/core/modules/EpochedQueueModule.sol";
+import {
+    MockQueueEpochParamsProvider
+} from "../../sprint-test/QueueEpochModule_WithdrawFlow_POC.t.sol";
 
 contract EconomicExit_Spec_Test is Test {
     address constant USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
@@ -47,7 +52,12 @@ contract EconomicExit_Spec_Test is Test {
 
         params = new MockQueueEpochParamsProvider();
         core = new CoreHarness(
-            IERC20Metadata(USDC), "USDC Agg", "agUSDC", address(this), address(this), address(params)
+            IERC20Metadata(USDC),
+            "USDC Agg",
+            "agUSDC",
+            address(this),
+            address(this),
+            address(params)
         );
         core.setEpochDurationUnsafe(7 days);
         bm = MockBufferManagerForTests(address(core.bufferManager()));
@@ -72,7 +82,10 @@ contract EconomicExit_Spec_Test is Test {
         shares = ERC4626Module(address(core)).deposit(assets, who);
     }
 
-    function _request(address who, uint256 shares) internal returns (uint256 epochId, uint256 claimId) {
+    function _request(address who, uint256 shares)
+        internal
+        returns (uint256 epochId, uint256 claimId)
+    {
         vm.prank(who);
         (epochId, claimId) = _q().requestEpochWithdrawal(shares);
     }
@@ -115,7 +128,11 @@ contract EconomicExit_Spec_Test is Test {
         paid = _q().claimEpochAssets(epochId, claimId);
     }
 
-    function _claimOf(uint256 e, uint256 c) internal view returns (EpochQueueStorage.EpochClaim memory) {
+    function _claimOf(uint256 e, uint256 c)
+        internal
+        view
+        returns (EpochQueueStorage.EpochClaim memory)
+    {
         return _q().epochClaim(e, c);
     }
 
@@ -128,7 +145,9 @@ contract EconomicExit_Spec_Test is Test {
 
         _request(alice, s);
         assertEq(core.totalOwed(), 1_000e6);
-        assertEq(core.totalAssets(), core.grossAssets() - core.totalOwed(), "NAV nets the liability");
+        assertEq(
+            core.totalAssets(), core.grossAssets() - core.totalOwed(), "NAV nets the liability"
+        );
         assertEq(core.totalAssets(), 1_000e6);
 
         _loss(1_500e6); // gross 500 < owed 1000
@@ -136,7 +155,11 @@ contract EconomicExit_Spec_Test is Test {
         assertEq(core.totalAssets(), _max0(core.grossAssets(), core.totalOwed()));
     }
 
-    function testFuzz_W1_totalAssets_neverRevertsAndMatchesFormula(uint96 gain, uint96 loss, uint96 exitPct) public {
+    function testFuzz_W1_totalAssets_neverRevertsAndMatchesFormula(
+        uint96 gain,
+        uint96 loss,
+        uint96 exitPct
+    ) public {
         uint256 s = _deposit(alice, 1_000e6);
         _deposit(bob, 1_000e6);
         _request(alice, bound(exitPct, 1, 100) * s / 100);
@@ -226,7 +249,7 @@ contract EconomicExit_Spec_Test is Test {
         uint256 s = _deposit(alice, 1_000e6);
         _deposit(bob, 1_000e6);
         _request(alice, s); // owes 1000
-        _loss(1_000e6);     // gross 1000 == owed 1000
+        _loss(1_000e6); // gross 1000 == owed 1000
         assertFalse(core.isInsolvent(), "not insolvent in the spec's sense: gross >= owed");
         assertEq(core.totalAssets(), 0, "but no equity");
         assertEq(core.liabilityIndex(), WAD);
@@ -265,7 +288,11 @@ contract EconomicExit_Spec_Test is Test {
         assertEq(_q().reservedForClaims(), 400e6);
 
         _claim(bob, e0, cb);
-        assertEq(_q().reservedForClaims(), 0, "exact round trip: a drained epoch releases exactly what it reserved");
+        assertEq(
+            _q().reservedForClaims(),
+            0,
+            "exact round trip: a drained epoch releases exactly what it reserved"
+        );
         assertEq(core.totalOwed(), 0);
     }
 
@@ -348,11 +375,17 @@ contract EconomicExit_Spec_Test is Test {
         _gain(20e6); // vault gains 20
 
         // Bob (the only remaining holder) captures all of it: 200 gross - 100 owed = 120 for his shares.
-        assertApproxEqAbs(core.convertToAssets(sb), 120e6, 2, "remaining holder owns the whole gain");
+        assertApproxEqAbs(
+            core.convertToAssets(sb), 120e6, 2, "remaining holder owns the whole gain"
+        );
 
         _closeEpoch();
         _q().fundEpoch(e);
-        assertEq(_claim(alice, e, c), 100e6, "the exited user is paid the fixed amount, not a cent of the gain");
+        assertEq(
+            _claim(alice, e, c),
+            100e6,
+            "the exited user is paid the fixed amount, not a cent of the gain"
+        );
     }
 
     function test_W8_lossAfterRequest_isBorneOnlyByRemainingHolders_whileSolvent() public {
@@ -364,7 +397,9 @@ contract EconomicExit_Spec_Test is Test {
 
         assertFalse(core.isInsolvent());
         assertEq(core.liabilityIndex(), WAD, "solvent: index is exactly 1e18");
-        assertApproxEqAbs(core.convertToAssets(sb), 70e6, 2, "remaining holder absorbs the whole loss");
+        assertApproxEqAbs(
+            core.convertToAssets(sb), 70e6, 2, "remaining holder absorbs the whole loss"
+        );
 
         _closeEpoch();
         _q().fundEpoch(e);
@@ -424,7 +459,8 @@ contract EconomicExit_Spec_Test is Test {
 
     function _assertCancelReverts(address who, uint256 e, uint256 c) internal {
         vm.prank(who);
-        (bool ok,) = address(core).call(abi.encodeWithSignature("cancelEpochWithdrawal(uint256,uint256)", e, c));
+        (bool ok,) = address(core)
+            .call(abi.encodeWithSignature("cancelEpochWithdrawal(uint256,uint256)", e, c));
         assertFalse(ok, "cancelEpochWithdrawal must not exist");
     }
 
@@ -448,7 +484,7 @@ contract EconomicExit_Spec_Test is Test {
     // ═════════════════════════ W-11  views never revert on underflow, in any state ═════════════════════════
 
     function test_W11_viewsNeverRevert_inInsolvency() public {
-        (, , uint256 s) = _makeInsolvent();
+        (,, uint256 s) = _makeInsolvent();
         assertEq(core.totalAssets(), 0);
         core.convertToShares(1_000e6);
         core.convertToAssets(s);
@@ -505,16 +541,20 @@ contract EconomicExit_Spec_Test is Test {
         assertEq(core.totalOwed(), 0, "and the liability is discharged in the same tx");
 
         // (c) instant that falls back into the queue. Deposit lock is now a hard revert on
-        // both exit paths (review: Pier), so an exhausted cap forces the fallback instead.
+        // both exit paths, so an exhausted cap forces the fallback instead.
         vm.revertToState(snap);
         params.setCapPerEpochBps(1);
         vm.prank(alice);
         (bool instant2, uint256 fe, uint256 fc) = _q().requestInstantWithdrawal(s / 2);
         assertFalse(instant2);
-        assertEq(_claimOf(fe, fc).assetsOwed, queuedOwed, "fallback carries exactly the request-time assetsOwed");
+        assertEq(
+            _claimOf(fe, fc).assetsOwed,
+            queuedOwed,
+            "fallback carries exactly the request-time assetsOwed"
+        );
     }
 
-    /// @notice The fee tier is decided BEFORE crystallizing (review: Stefano), so a request
+    /// @notice The fee tier is decided BEFORE crystallizing, so a request
     ///         that falls back into the queue pays the STANDARD fee, not the instant one --
     ///         unlike the previous behaviour (documented as a deliberate deviation), which
     ///         always crystallized as INSTANT first and so overcharged every fallback.
@@ -575,17 +615,26 @@ contract EconomicExit_Spec_Test is Test {
     ///         parties sharing one pool). W-13: claiming from a cohort never moves its
     ///         (immutable) index. W-14: every claim WITHIN the same epoch pays that epoch's
     ///         identical index.
-    function test_W13_W14_fundedClaimsAcrossEpochs_getTheSameIndex_andClaimingDoesNotMoveIt() public {
+    function test_W13_W14_fundedClaimsAcrossEpochs_getTheSameIndex_andClaimingDoesNotMoveIt()
+        public
+    {
         (uint256 e0, uint256 ca, uint256 e1, uint256 cb, uint256 cc) = _fundedThenLoss();
 
         uint256 index0 = _q().epochData(e0).recoveryIndex;
         // Two floors deep (target sizing, then the ratio derived from what was actually
         // reserved), so this lands a hair under the pure division, never over.
-        assertApproxEqAbs(index0, 600e6 * WAD / 1_100e6, 1e9, "crystallized from the pre-crystallization global ratio");
+        assertApproxEqAbs(
+            index0,
+            600e6 * WAD / 1_100e6,
+            1e9,
+            "crystallized from the pre-crystallization global ratio"
+        );
         assertLt(index0, WAD);
 
         uint256 paidA = _claim(alice, e0, ca);
-        assertEq(paidA, 600e6 * index0 / WAD, "alice (epoch 0) paid at epoch 0's crystallized index");
+        assertEq(
+            paidA, 600e6 * index0 / WAD, "alice (epoch 0) paid at epoch 0's crystallized index"
+        );
         assertEq(_q().epochData(e0).recoveryIndex, index0, "W-13: claiming does not move the index");
 
         // Only now can epoch 1 fund: its target overshot the shared pool while alice's
@@ -597,7 +646,9 @@ contract EconomicExit_Spec_Test is Test {
         assertApproxEqAbs(index1, index0, 1e9, "the same ratio recurs once e0's cash actually left");
 
         uint256 paidB = _claim(bob, e1, cb);
-        assertApproxEqAbs(paidB, 400e6 * index0 / WAD, 1e3, "bob (epoch 1) paid at epoch 1's crystallized index");
+        assertApproxEqAbs(
+            paidB, 400e6 * index0 / WAD, 1e3, "bob (epoch 1) paid at epoch 1's crystallized index"
+        );
         assertEq(_q().epochData(e1).recoveryIndex, index1, "W-13 again after the second claim");
 
         uint256 paidC = _claim(carol, e1, cc);
@@ -622,7 +673,11 @@ contract EconomicExit_Spec_Test is Test {
         vm.prank(bob);
         uint256 paid = _q().batchClaimEpochAssets(e1, ids);
         assertEq(paid, 400e6 * index1 / WAD);
-        assertEq(_q().epochData(e1).recoveryIndex, index1, "W-13 batch: claiming does not move the immutable index");
+        assertEq(
+            _q().epochData(e1).recoveryIndex,
+            index1,
+            "W-13 batch: claiming does not move the immutable index"
+        );
         cc;
     }
 
@@ -644,20 +699,38 @@ contract EconomicExit_Spec_Test is Test {
     ///         CoreVault shell; no module sums it, and none subtracts totalOwed.
     function test_W15_noModuleReconstructsNavLocally() public view {
         string[13] memory modules = [
-            "AdminModule", "BatchGuardrails", "BufferManager", "EpochedQueueModule", "ERC4626Module",
-            "ExecutionMemory", "FeeCollector", "FixedMaturityModule", "Incentives", "IncentivesEngine",
-            "LiquidityOpsModule", "StrategyRouter", "PriceOracleMiddleware"
+            "AdminModule",
+            "BatchGuardrails",
+            "BufferManager",
+            "EpochedQueueModule",
+            "ERC4626Module",
+            "ExecutionMemory",
+            "FeeCollector",
+            "FixedMaturityModule",
+            "Incentives",
+            "IncentivesEngine",
+            "LiquidityOpsModule",
+            "StrategyRouter",
+            "PriceOracleMiddleware"
         ];
         for (uint256 i; i < modules.length; i++) {
             string memory src = vm.readFile(string.concat("src/core/modules/", modules[i], ".sol"));
-            assertFalse(_contains(src, "hot + strat + warm"), string.concat(modules[i], ": sums the portfolio locally"));
+            assertFalse(
+                _contains(src, "hot + strat + warm"),
+                string.concat(modules[i], ": sums the portfolio locally")
+            );
             // StrategyRouter is where strategy NAV is defined; everyone else must go through the vault.
             if (i != 11) {
-                assertFalse(_contains(src, "totalStrategyAssetsSafe"), string.concat(modules[i], ": reads strategy NAV directly"));
+                assertFalse(
+                    _contains(src, "totalStrategyAssetsSafe"),
+                    string.concat(modules[i], ": reads strategy NAV directly")
+                );
             }
         }
         string memory vault = vm.readFile("src/core/CoreVault.sol");
-        assertTrue(_contains(vault, "hot + strat + warm"), "the shell is the one place it is defined");
+        assertTrue(
+            _contains(vault, "hot + strat + warm"), "the shell is the one place it is defined"
+        );
     }
 
     function _contains(string memory hay, string memory needle) internal pure returns (bool) {
@@ -753,8 +826,7 @@ contract EconomicExit_Spec_Test is Test {
         _q().requestEpochWithdrawal(s);
     }
 
-    /// @notice Option A (review: Multyr, PR #19 second round -- "creditor parity after
-    ///         recovery"): a cohort funded WHILE SOLVENT crystallizes recoveryIndex = 1e18 and is
+    /// @notice Option A: a cohort funded WHILE SOLVENT crystallizes recoveryIndex = 1e18 and is
     ///         immutable from then on -- it is immune to a loss that lands afterward. Alice's
     ///         epoch is funded before the loss and is paid in full; carol's epoch, still closed
     ///         when the loss lands, absorbs the entire remaining shortfall alone once it is
@@ -767,7 +839,9 @@ contract EconomicExit_Spec_Test is Test {
         (uint256 e0, uint256 ca) = _request(alice, sa);
         _closeEpoch();
         _q().fundEpoch(e0);
-        assertEq(_q().epochData(e0).recoveryIndex, WAD, "funded while solvent: full nominal crystallized");
+        assertEq(
+            _q().epochData(e0).recoveryIndex, WAD, "funded while solvent: full nominal crystallized"
+        );
 
         // carol 200 -> epoch 1 (closed, not yet funded)
         (uint256 e1, uint256 cc) = _request(carol, core.balanceOf(carol));
@@ -787,25 +861,27 @@ contract EconomicExit_Spec_Test is Test {
         vm.expectRevert(EpochedQueueModule.VaultInsolvent.selector);
         _q().requestEpochWithdrawal(sd);
 
-        // settlement keeps working. Epoch 1 needs 200 * liveIndex = 175, but alice's epoch still
-        // holds its untouchable 600 earmark, so it cannot be funded yet (no revert, just not yet).
+        // Carol funds from free assets without waiting for Alice's claim.
         _q().fundEpoch(e1);
-        assertTrue(_q().epochData(e1).state == EpochQueueStorage.EpochState.Closed);
-        vm.prank(carol);
-        vm.expectRevert(EpochedQueueModule.EpochNotFunded.selector);
-        _q().claimEpochAssets(e1, cc);
+        assertTrue(_q().epochData(e1).state == EpochQueueStorage.EpochState.Funded);
+        assertEq(_q().epochData(e1).recoveryIndex, 0.5e18);
 
         // alice (funded while solvent, recoveryIndex crystallized at 1e18) is immune to the loss:
         // paid in full, and her whole earmark is released once claimed.
         uint256 paid = _claim(alice, e0, ca);
-        assertEq(paid, 600e6, "funded-while-solvent cohort is immune to a loss that lands afterward");
+        assertEq(
+            paid, 600e6, "funded-while-solvent cohort is immune to a loss that lands afterward"
+        );
         assertEq(_q().epochData(e0).recoveryIndex, WAD, "W-13: immutable");
-        assertEq(_q().reservedForClaims(), 0, "her whole earmark was released");
+        assertEq(_q().reservedForClaims(), 100e6, "only Carol remains reserved");
 
         // Only now does anything remain for carol's epoch to fund from: gross fell to whatever
         // alice's full payout left behind, and carol's 200 nominal absorbs the shortfall alone.
         _q().fundEpoch(e1);
-        assertTrue(_q().epochData(e1).state == EpochQueueStorage.EpochState.Funded, "funds at whatever recovery ratio is left");
+        assertTrue(
+            _q().epochData(e1).state == EpochQueueStorage.EpochState.Funded,
+            "funds at whatever recovery ratio is left"
+        );
         uint256 carolIndex = _q().epochData(e1).recoveryIndex;
         assertLt(carolIndex, WAD, "carol absorbs the loss alice was protected from");
 
@@ -835,7 +911,9 @@ contract EconomicExit_Spec_Test is Test {
         _gain(1_000e6); // a recovery -- NOT owed to this already-crystallized cohort
         assertFalse(core.isInsolvent());
         assertEq(_q().epochData(e0).recoveryIndex, WAD / 2, "immutable: never re-crystallized");
-        assertEq(_claim(alice, e0, ca), 300e6, "paid the crystallized share, not topped up to nominal");
+        assertEq(
+            _claim(alice, e0, ca), 300e6, "paid the crystallized share, not topped up to nominal"
+        );
         assertEq(_q().reservedForClaims(), 0);
     }
 
@@ -862,10 +940,7 @@ contract EconomicExit_Spec_Test is Test {
         assertApproxEqAbs(paidA + paidB, 30e6, 4, "everything available, nothing more");
     }
 
-    /// @notice Real lending adapters cannot return the last wei of a position (fork finding: a
-    ///         1,218,285-unit realise returned 1,213,315). In insolvency the whole portfolio is owed,
-    ///         so a strict "hot >= need" would leave the epoch unfundable by dust. A shortfall within
-    ///         INSOLVENCY_FUNDING_DUST_BPS (10 bps) funds; a real illiquid remainder does not.
+    /// @notice Funding permits at most one base unit of rounding.
     function test_s11_insolvencyFunding_toleratesDust_butNotARealIlliquidRemainder() public {
         uint256 sa = _deposit(alice, 600e6);
         _deposit(dave, 1_400e6);
@@ -873,24 +948,20 @@ contract EconomicExit_Spec_Test is Test {
         _closeEpoch();
         _loss(1_700e6); // gross 300 vs owed 600: index 0.5
 
-        // 0.05% of the portfolio is stuck outside hot (warm/strategy dust): within tolerance
-        _moveHotToWarm(0.15e6);
+        // One underlying base unit remains outside hot.
+        _moveHotToWarm(1);
         _q().fundEpoch(e);
-        assertTrue(_q().epochData(e).state == EpochQueueStorage.EpochState.Funded, "dust shortfall funds");
-        assertLe(_q().reservedForClaims(), _hot(), "the earmark never promises cash that is not there");
+        assertTrue(
+            _q().epochData(e).state == EpochQueueStorage.EpochState.Funded, "dust shortfall funds"
+        );
+        assertLe(
+            _q().reservedForClaims(), _hot(), "the earmark never promises cash that is not there"
+        );
         uint256 paid = _claim(alice, e, c);
-        assertApproxEqAbs(paid, 300e6, 0.2e6, "paid the recovery ratio, short by at most the dust");
+        assertApproxEqAbs(paid, 300e6, 2, "funding and index rounding only");
     }
 
-    /// @notice Review (Stefano): measures the WORST-CASE dust drift precisely, in bps, so
-    ///         Multyr can sign off on the exact number INSOLVENCY_FUNDING_DUST_BPS = 10 allows.
-    ///         At the boundary -- hot short by exactly 0.1% of the epoch's target reserve --
-    ///         funding still succeeds, and the claimant realizes exactly 10 bps less than the
-    ///         formula `assetsOwed * grossAssets / totalOwed` would give them. Any shortfall
-    ///         one wei larger stays unfunded (proven by the sibling test right below).
-    /// @notice Review ("to complete", scenario with five claimants): the same pro-rata
-    ///         guarantee tested with 2 claimants elsewhere holds at 5 -- every claimant gets the
-    ///         identical recovery ratio regardless of claim size or the order they claim in.
+    /// @notice Five claimants receive the same recovery ratio in any claim order.
     function test_s11_insolvency_fiveClaimants_allGetTheIdenticalRatio_anyOrder() public {
         address e1 = makeAddr("e1");
         address e2 = makeAddr("e2");
@@ -935,13 +1006,18 @@ contract EconomicExit_Spec_Test is Test {
         for (uint256 k; k < 5; k++) {
             uint256 i = claimOrder[k];
             uint256 paid = _claim(us[i], epochId, claimIds[i]);
-            assertApproxEqRel(paid, owed[i] * index / WAD, 1e12, "every claimant, any position in the order, gets the same ratio");
+            assertApproxEqRel(
+                paid,
+                owed[i] * index / WAD,
+                1e12,
+                "every claimant, any position in the order, gets the same ratio"
+            );
         }
         assertEq(core.totalOwed(), 0);
         assertEq(_q().reservedForClaims(), 0);
     }
 
-    function test_s11_insolvencyFunding_dustTolerance_worstCaseDriftIsExactlyTenBps() public {
+    function test_s11_insolvencyFunding_dustTolerance_worstCaseDriftIsOneBaseUnit() public {
         uint256 sa = _deposit(alice, 1_000_000e6);
         _deposit(dave, 1_000_000e6);
         (uint256 e, uint256 c) = _request(alice, sa); // owed 1,000,000
@@ -952,24 +1028,34 @@ contract EconomicExit_Spec_Test is Test {
         // Read the constant off a bare (unwired) module instance -- constants are the same
         // regardless of deployment, and this avoids needing the selector routed through the
         // vault's dispatch just for this one read.
-        uint256 dustBps = (new EpochedQueueModule()).INSOLVENCY_FUNDING_DUST_BPS();
-        uint256 worstCaseShortfall = idealPayout * dustBps / 10_000; // 500
-        assertEq(worstCaseShortfall, 500e6, "10 bps of the 500,000 target is exactly 500");
+        uint256 rounding = (new EpochedQueueModule()).INSOLVENCY_FUNDING_ROUNDING();
+        uint256 worstCaseShortfall = rounding;
+        assertEq(worstCaseShortfall, 1);
 
         // Push hot down to precisely the boundary the dust tolerance allows.
         _moveHotToWarm(worstCaseShortfall);
 
         _q().fundEpoch(e);
-        assertTrue(_q().epochData(e).state == EpochQueueStorage.EpochState.Funded, "funds exactly at the boundary");
-        assertEq(_q().reservedForClaims(), idealPayout - worstCaseShortfall, "earmark short by exactly the dust");
+        assertTrue(
+            _q().epochData(e).state == EpochQueueStorage.EpochState.Funded,
+            "funds exactly at the boundary"
+        );
+        assertEq(
+            _q().reservedForClaims(),
+            idealPayout - worstCaseShortfall,
+            "earmark short by exactly the dust"
+        );
 
         uint256 paid = _claim(alice, e, c);
-        assertEq(paid, idealPayout - worstCaseShortfall, "paid short by exactly the dust, not a wei more");
+        assertEq(
+            paid, idealPayout - worstCaseShortfall, "paid short by exactly the dust, not a wei more"
+        );
 
         // State the drift the way Multyr needs to sign off on it: in basis points of the
         // amount the pro-rata formula would otherwise have given this claimant.
         uint256 driftBps = (idealPayout - paid) * 10_000 / idealPayout;
-        assertEq(driftBps, dustBps, "worst-case realized drift == INSOLVENCY_FUNDING_DUST_BPS, exactly");
+        assertEq(idealPayout - paid, rounding);
+        assertEq(driftBps, 0);
     }
 
     function test_s11_insolvencyFunding_illiquidRemainderBeyondTolerance_staysClosed() public {
@@ -981,10 +1067,15 @@ contract EconomicExit_Spec_Test is Test {
 
         _moveHotToWarm(30e6); // 10% of the remaining portfolio is illiquid: a real shortfall
         _q().fundEpoch(e);
-        assertTrue(_q().epochData(e).state == EpochQueueStorage.EpochState.Closed, "a real shortfall does not fund");
+        assertTrue(
+            _q().epochData(e).state == EpochQueueStorage.EpochState.Closed,
+            "a real shortfall does not fund"
+        );
     }
 
-    function test_s11_forceExit_inInsolvency_returnsNothing_burnsNothing_revertsForNoOtherReason() public {
+    function test_s11_forceExit_inInsolvency_returnsNothing_burnsNothing_revertsForNoOtherReason()
+        public
+    {
         _makeInsolvent();
         uint256 bobShares = core.balanceOf(bob);
         uint256 supply = core.totalSupply();
@@ -1028,7 +1119,11 @@ contract EconomicExit_Spec_Test is Test {
 
         _closeEpoch();
         EpochQueueStorage.EpochData memory ed = _q().epochData(e);
-        assertEq(ed.totalAssetsOwed, owed, "the bucket sums request-time liabilities; nothing was re-priced at close");
+        assertEq(
+            ed.totalAssetsOwed,
+            owed,
+            "the bucket sums request-time liabilities; nothing was re-priced at close"
+        );
 
         _q().fundEpoch(e);
         assertEq(_q().reservedForClaims(), owed);
@@ -1064,10 +1159,14 @@ contract EconomicExit_Spec_Test is Test {
         assertFalse(valid);
         assertEq(reason, 4);
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(EpochedQueueModule.NavInputInvalid.selector, uint8(4)));
+        vm.expectRevert(
+            abi.encodeWithSelector(EpochedQueueModule.NavInputInvalid.selector, uint8(4))
+        );
         _q().requestEpochWithdrawal(s);
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(EpochedQueueModule.NavInputInvalid.selector, uint8(4)));
+        vm.expectRevert(
+            abi.encodeWithSelector(EpochedQueueModule.NavInputInvalid.selector, uint8(4))
+        );
         _q().requestInstantWithdrawal(s);
         assertEq(core.totalOwed(), 0, "no liability was crystallized");
         assertEq(core.balanceOf(alice), s, "and the user is still a shareholder");
@@ -1077,7 +1176,9 @@ contract EconomicExit_Spec_Test is Test {
         uint256 s = _deposit(alice, 1_000e6);
         _withRouter(0, 5);
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(EpochedQueueModule.NavInputInvalid.selector, uint8(5)));
+        vm.expectRevert(
+            abi.encodeWithSelector(EpochedQueueModule.NavInputInvalid.selector, uint8(5))
+        );
         _q().requestEpochWithdrawal(s);
     }
 
@@ -1085,7 +1186,9 @@ contract EconomicExit_Spec_Test is Test {
         uint256 s = _deposit(alice, 1_000e6);
         _withRouter(0, 6);
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(EpochedQueueModule.NavInputInvalid.selector, uint8(6)));
+        vm.expectRevert(
+            abi.encodeWithSelector(EpochedQueueModule.NavInputInvalid.selector, uint8(6))
+        );
         _q().requestEpochWithdrawal(s);
     }
 
@@ -1104,7 +1207,11 @@ contract EconomicExit_Spec_Test is Test {
         _withRouter(0, 4); // NAV inputs become untrustworthy AFTER acceptance
         _closeEpoch();
         _q().fundEpoch(e);
-        assertEq(_claim(alice, e, c), 1_000e6, "an accepted claim is never repriced or blocked by later NAV doubt");
+        assertEq(
+            _claim(alice, e, c),
+            1_000e6,
+            "an accepted claim is never repriced or blocked by later NAV doubt"
+        );
     }
 }
 

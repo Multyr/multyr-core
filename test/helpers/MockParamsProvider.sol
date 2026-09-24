@@ -11,7 +11,7 @@ import { IParamsProvider } from "../../src/interfaces/IParamsProvider.sol";
 contract MockParamsProvider is IParamsProvider {
     // Configurable parameters for tests that need non-default values
     uint64 private _lockPeriod;
-    uint16 private _capPerEpochBps = 10000; // Default: 100% (no cap)
+    uint16 private _capPerEpochBps = 10000; // Default: 100% of the epoch snapshot
     uint256 private _minClaimAmount = 0; // Default: no minimum
     uint256 private _maxWithdrawalPerBlock = 0; // Default: unlimited
     uint256 private _maxWithdrawalPerTx = 0; // Default: unlimited
@@ -84,7 +84,7 @@ contract MockParamsProvider is IParamsProvider {
         returns (WithdrawalParams memory)
     {
         return WithdrawalParams({
-            capPerEpochBps: _capPerEpochBps, // configurable (default: 100% no cap)
+            capPerEpochBps: _capPerEpochBps, // configurable (default: 100% of the epoch snapshot)
             maxWithdrawalPerBlock: _maxWithdrawalPerBlock, // configurable (default: unlimited)
             maxWithdrawalPerTx: _maxWithdrawalPerTx, // configurable (default: unlimited)
             minClaimAmount: _minClaimAmount, // configurable (default: 0)

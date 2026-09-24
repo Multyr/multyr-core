@@ -1,22 +1,23 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { Test } from "forge-std/Test.sol";
-import { console2 } from "forge-std/console2.sol";
-import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import { CoreHarness } from "../../helpers/CoreHarness.sol";
-import { ERC20Mock } from "../../../src/mocks/ERC20Mock.sol";
-import { MockParamsProvider } from "../../helpers/MockParamsProvider.sol";
-import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTests.sol";
-import { StrategyMock } from "../../helpers/StrategyMock.sol";
-import { MockPriceOracleMiddleware } from "../../helpers/MockPriceOracleMiddleware.sol";
+import {Test} from "forge-std/Test.sol";
+import {console2} from "forge-std/console2.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {CoreHarness} from "../../helpers/CoreHarness.sol";
+import {ERC20Mock} from "../../../src/mocks/ERC20Mock.sol";
+import {MockParamsProvider} from "../../helpers/MockParamsProvider.sol";
+import {MockBufferManagerForTests} from "../../helpers/MockBufferManagerForTests.sol";
+import {StrategyMock} from "../../helpers/StrategyMock.sol";
+import {MockPriceOracleMiddleware} from "../../helpers/MockPriceOracleMiddleware.sol";
 
 interface IDeploy {
     function deployToStrategies(uint256 maxAmount) external;
 }
-import { EpochQueueStorage } from "../../../src/core/modules/EpochedQueueModule.sol";
+import {EpochQueueStorage} from "../../../src/core/modules/EpochedQueueModule.sol";
 
 interface IQueueModule {
+    function rollCapEpochIfNeeded() external;
     function requestInstantWithdrawal(uint256 shares)
         external
         returns (bool settledImmediately, uint256 epochId, uint256 claimId);
@@ -57,9 +58,7 @@ contract Hardening_GasAndChaos is Test {
         params.setCapPerEpochBps(1000);
 
         vault = new CoreHarness(
-            IERC20Metadata(address(usdc)),
-            "Vault", "vUSDC",
-            owner, feeCollector, address(params)
+            IERC20Metadata(address(usdc)), "Vault", "vUSDC", owner, feeCollector, address(params)
         );
         MockBufferManagerForTests mockBM = new MockBufferManagerForTests(address(vault));
         vault.setBufferManagerUnsafe(address(mockBM));
@@ -209,6 +208,9 @@ contract Hardening_GasAndChaos is Test {
 
         console2.log("TVL:", vault.totalAssets());
         assertEq(vault.totalAssets(), 1000e6, "TVL = 1000 USDC");
+
+        vm.warp(block.timestamp + 31 days);
+        IQueueModule(address(vault)).rollCapEpochIfNeeded();
 
         // Instant claim — small amount
         uint256 usdcBefore = usdc.balanceOf(user1);

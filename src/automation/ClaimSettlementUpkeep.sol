@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { AutomationCompatibleInterface } from "./AutomationCompatibleInterface.sol";
-import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
-import { EpochQueueStorage } from "../core/modules/EpochedQueueModule.sol";
+import {AutomationCompatibleInterface} from "./AutomationCompatibleInterface.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {EpochQueueStorage} from "../core/modules/EpochedQueueModule.sol";
 
 /// @notice Minimal interface for CoreVault + EpochedQueueModule (epoch-model queue) settlement.
 interface IClaimSettlementTarget {
+    function pausedFundedClaim() external view returns (bool);
     function currentEpochId() external view returns (uint256);
     function nextClaimIdForEpoch(uint256 epochId) external view returns (uint256);
     function epochData(uint256 epochId) external view returns (EpochQueueStorage.EpochData memory);
@@ -22,49 +24,25 @@ interface IClaimSettlementTarget {
 /// @title ClaimSettlementUpkeep
 /// @notice Dedicated Chainlink Automation keeper that sweeps FUNDED epochs' unclaimed claims,
 ///         paying each one directly to its owner via EpochedQueueModule.keeperSettleClaims().
-/// @dev Deliberately a SEPARATE contract from VaultUpkeep, not an added Op on it.
-///
-///      VaultUpkeep's checkUpkeep is a strict single-op-per-tick priority chain (EPOCH_FUND >
-///      EPOCH_CLOSE > RECONCILE > CRYSTALLIZE > REBALANCE > STRATEGY_REBALANCE > DEPLOY >
-///      REALIZE), each already carefully cooldown-/starvation-tuned against the others. Claim
-///      settlement is a different SHAPE of work -- not "flip one vault-wide state machine
-///      transition" but "drain a per-user, per-claim backlog that can span many claims across
-///      many epochs, needing many consecutive ticks and its own pagination cursor." Slotting it
-///      into that priority chain would either starve it (placed low, behind ops that fire most
-///      cycles on an active vault) or destabilize the existing order (placed high). A separate
-///      contract gets its own independent Chainlink Automation registration, tick cadence and
-///      gas budget, and does not compete with vault-lifecycle upkeep for priority.
-///
-///      Self-claim (EpochedQueueModule.claimEpochAssets/batchClaimEpochAssets) remains the
-///      permissionless fallback if this keeper is never run, lags, or is deliberately paused --
-///      nothing here changes those paths, and a claim settled by either one is a no-op for the
-///      other (idempotent on EpochClaim.claimed).
-contract ClaimSettlementUpkeep is AutomationCompatibleInterface, Ownable {
+/// @dev Uses a bounded circular scan. Cursor state is computed from the target, never caller data.
+contract ClaimSettlementUpkeep is AutomationCompatibleInterface, Ownable, ReentrancyGuard {
     IClaimSettlementTarget public immutable target;
 
     /// @notice Max UNCLAIMED claims collected into one keeperSettleClaims() batch.
     uint256 public maxClaimsPerUpkeep = 20;
-    /// @notice Max claim IDs examined per checkUpkeep() call, regardless of how many qualify --
-    ///         bounds scan cost through a long run of already-claimed/excluded IDs.
+    /// @notice Maximum epoch/claim probes in one bounded scan.
     uint256 public maxScanPerUpkeep = 200;
 
-    /// @notice Pagination cursor: the next claim ID to examine within cursorEpochId. Only ever
-    ///         advances forward -- a settlement epoch's claim set is final once it is Funded
-    ///         (EpochedQueueModule never adds claims to a closed epoch), so nothing here is
-    ///         ever re-scanned once passed.
+    /// @notice Circular scan position. Wrapping revisits unfunded and retryable claims.
     uint256 public cursorEpochId;
     uint256 public cursorClaimId = 1;
 
-    /// @notice Governance escape hatch: a claim whose owner cannot receive the asset (e.g. a
-    ///         contract that reverts on transfer) would otherwise block every batch it's
-    ///         bundled into forever, atomically, at every retry (keeperSettleClaims is
-    ///         all-or-nothing by design -- see its own docs for why). Excluding it here lets
-    ///         the cursor advance past it; the excluded user can still self-claim if their
-    ///         address is later able to receive the asset -- exclusion only affects this
-    ///         keeper's scan, not the module's claim functions.
+    /// @notice Optional owner exclusion from automated settlement. Self-claim remains available.
     mapping(uint256 => mapping(uint256 => bool)) public excluded;
 
-    event UpkeepPerformed(uint256 indexed epochId, uint256 claimCount, uint256 totalSettled, bool success);
+    event UpkeepPerformed(
+        uint256 indexed epochId, uint256 claimCount, uint256 totalSettled, bool success
+    );
     event ClaimExcluded(uint256 indexed epochId, uint256 indexed claimId, bool excludedNow);
     event CursorSet(uint256 epochId, uint256 claimId);
     event BatchSizeConfigured(uint256 maxClaimsPerUpkeep, uint256 maxScanPerUpkeep);
@@ -80,116 +58,142 @@ contract ClaimSettlementUpkeep is AutomationCompatibleInterface, Ownable {
     // checkUpkeep / performUpkeep
     // ═══════════════════════════════════════════════════════════════════════════════
 
+    uint256 public constant RETRY_DELAY = 1 hours;
+    uint256 public nextAttemptAt;
+    mapping(uint256 => mapping(uint256 => uint256)) public retryAfter;
+    event ClaimSettlementFailed(uint256 indexed epochId, uint256 indexed claimId, uint256 retryAt);
+
     function checkUpkeep(bytes calldata)
         external
         view
         override
         returns (bool upkeepNeeded, bytes memory performData)
     {
-        (uint256 epochId, uint256[] memory claimIds, uint256 nextEpochId, uint256 nextClaimId) = _scan();
-        if (claimIds.length == 0) return (false, bytes(""));
-        return (true, abi.encode(epochId, claimIds, nextEpochId, nextClaimId));
+        if (target.pausedFundedClaim() || block.timestamp < nextAttemptAt) {
+            return (false, bytes(""));
+        }
+        (
+            uint256 epochId,
+            uint256[] memory ids,
+            uint256 nextEpoch,
+            uint256 nextClaim,
+            bool maintenance
+        ) = _scan();
+        return (ids.length != 0 || maintenance, abi.encode(epochId, ids, nextEpoch, nextClaim));
     }
 
-    function performUpkeep(bytes calldata performData) external override {
-        (uint256 epochId, uint256[] memory claimIds, uint256 nextEpochId, uint256 nextClaimId) =
-            abi.decode(performData, (uint256, uint256[], uint256, uint256));
-
-        bool success;
+    function performUpkeep(bytes calldata) external override nonReentrant {
+        if (target.pausedFundedClaim() || block.timestamp < nextAttemptAt) return;
+        (
+            uint256 epochId,
+            uint256[] memory ids,
+            uint256 nextEpoch,
+            uint256 nextClaim,
+            bool maintenance
+        ) = _scan();
+        if (ids.length == 0 && !maintenance) return;
         uint256 totalSettled;
-        // Atomic: keeperSettleClaims() itself never swallows a failed transfer (fund-loss risk
-        // if it did -- see its own docs). This try/catch is the automation-layer liveness
-        // pattern VaultUpkeep already uses for every op: a revert here just means "nothing to
-        // do this tick," not a contract-level panic.
-        try target.keeperSettleClaims(epochId, claimIds) returns (uint256 settled) {
-            success = true;
-            totalSettled = settled;
-        } catch {}
-
-        emit UpkeepPerformed(epochId, claimIds.length, totalSettled, success);
-
-        if (success) {
-            // Advance past exactly what checkUpkeep() actually scanned -- not merely past the
-            // last claim ID collected, so a scan that stopped on maxScanPerUpkeep (not
-            // maxClaimsPerUpkeep) doesn't force re-examining already-checked, non-qualifying
-            // IDs next tick.
-            cursorEpochId = nextEpochId;
-            cursorClaimId = nextClaimId;
+        bool success;
+        if (ids.length != 0) {
+            try target.keeperSettleClaims(epochId, ids) returns (uint256 amount) {
+                totalSettled = amount;
+                success = true;
+            } catch {
+                uint256[] memory single = new uint256[](1);
+                for (uint256 i; i < ids.length; ++i) {
+                    single[0] = ids[i];
+                    try target.keeperSettleClaims(epochId, single) returns (uint256 amount) {
+                        totalSettled += amount;
+                        success = true;
+                    } catch {
+                        retryAfter[epochId][ids[i]] = block.timestamp + RETRY_DELAY;
+                        emit ClaimSettlementFailed(epochId, ids[i], block.timestamp + RETRY_DELAY);
+                    }
+                }
+            }
         }
-        // On failure the cursor is left exactly where it was: the same batch is retried next
-        // tick. A transient liquidity shortfall self-heals; a permanently poisoned claim needs
-        // excludeClaim() from the owner to unblock the cursor.
+        cursorEpochId = nextEpoch;
+        cursorClaimId = nextClaim;
+        if (!success) nextAttemptAt = block.timestamp + 1 minutes;
+        emit UpkeepPerformed(epochId, ids.length, totalSettled, success);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
     // Scan
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    /// @dev Walks forward from (cursorEpochId, cursorClaimId), collecting unclaimed claim IDs
-    ///      from the FIRST epoch that has any, up to maxClaimsPerUpkeep, stopping at the
-    ///      currently OPEN settlement epoch (never Funded, so never itself a source of claims)
-    ///      or once maxScanPerUpkeep IDs have been examined. keeperSettleClaims() only accepts
-    ///      one epochId per call, so a batch never spans two epochs even if both have room.
+    /// @dev Counts both epoch and claim probes against the scan budget. Wraps to revisit
+    ///      unfunded epochs and failed claims without rescanning an unbounded history.
     function _scan()
         internal
         view
-        returns (uint256 epochId, uint256[] memory claimIds, uint256 nextEpochId, uint256 nextClaimId)
+        returns (
+            uint256 epochId,
+            uint256[] memory claimIds,
+            uint256 nextEpochId,
+            uint256 nextClaimId,
+            bool maintenance
+        )
     {
         uint256 openEpoch = target.currentEpochId();
-        uint256 eId = cursorEpochId;
-        uint256 cId = cursorClaimId;
+        uint256 startEpoch = cursorEpochId <= openEpoch ? cursorEpochId : 0;
+        uint256 startClaim = cursorEpochId <= openEpoch ? cursorClaimId : 1;
+        uint256 e = startEpoch;
+        uint256 c = startClaim;
         uint256 scanned;
         uint256 found;
-        uint256 targetEpoch = type(uint256).max;
+        bool wrapped;
         uint256[] memory buf = new uint256[](maxClaimsPerUpkeep);
-
-        while (eId <= openEpoch && scanned < maxScanPerUpkeep && found < maxClaimsPerUpkeep) {
-            EpochQueueStorage.EpochData memory epoch = target.epochData(eId);
-            if (epoch.state != EpochQueueStorage.EpochState.Funded) {
-                // Open or Closed-but-unfunded: nothing payable here yet. Move on -- if this
-                // epoch funds later, the cursor having passed it is fine, since its claims are
-                // still there waiting; but a keeper only advances past a FUNDED epoch below
-                // (targetEpoch != type(uint256).max branch), so a not-yet-Funded epoch is
-                // re-examined every scan until it funds, at negligible cost (one epochData read).
-                if (targetEpoch != type(uint256).max) break; // don't cross into another epoch mid-batch
-                eId += 1;
-                cId = 1;
+        while (scanned < maxScanPerUpkeep && found < maxClaimsPerUpkeep) {
+            if (e > openEpoch) {
+                if (found != 0) break;
+                e = 0;
+                c = 1;
+                wrapped = true;
+            }
+            if (wrapped && (e > startEpoch || (e == startEpoch && c >= startClaim))) break;
+            ++scanned;
+            EpochQueueStorage.EpochData memory epoch = target.epochData(e);
+            uint256 last = target.nextClaimIdForEpoch(e);
+            if (epoch.state != EpochQueueStorage.EpochState.Funded || c > last) {
+                if (found != 0) break;
+                if (wrapped && e == startEpoch) break;
+                ++e;
+                c = 1;
                 continue;
             }
-
-            uint256 lastClaimId = target.nextClaimIdForEpoch(eId);
-            if (cId > lastClaimId) {
-                if (targetEpoch != type(uint256).max) break; // batch's epoch is exhausted -- stop, don't cross over
-                eId += 1;
-                cId = 1;
-                continue;
+            EpochQueueStorage.EpochClaim memory claim = target.epochClaim(e, c);
+            if (
+                !claim.claimed && claim.user != address(0) && !excluded[e][c]
+                    && block.timestamp >= retryAfter[e][c]
+            ) {
+                epochId = e;
+                buf[found++] = c;
             }
-
-            EpochQueueStorage.EpochClaim memory claim = target.epochClaim(eId, cId);
-            scanned += 1;
-            if (!claim.claimed && claim.user != address(0) && !excluded[eId][cId]) {
-                targetEpoch = eId;
-                buf[found] = cId;
-                found += 1;
-            }
-            cId += 1;
+            ++c;
         }
-
-        nextEpochId = eId;
-        nextClaimId = cId;
-        if (found == 0) return (0, new uint256[](0), nextEpochId, nextClaimId);
-
-        epochId = targetEpoch;
+        nextEpochId = e > openEpoch ? 0 : e;
+        nextClaimId = e > openEpoch ? 1 : c;
+        maintenance = found == 0 && scanned == maxScanPerUpkeep
+            && (nextEpochId != cursorEpochId || nextClaimId != cursorClaimId);
         claimIds = new uint256[](found);
-        for (uint256 i; i < found; ++i) claimIds[i] = buf[i];
+        for (uint256 i; i < found; ++i) {
+            claimIds[i] = buf[i];
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
     // Owner controls
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    function setBatchSizes(uint256 maxClaimsPerUpkeep_, uint256 maxScanPerUpkeep_) external onlyOwner {
-        if (maxClaimsPerUpkeep_ == 0 || maxScanPerUpkeep_ == 0 || maxScanPerUpkeep_ < maxClaimsPerUpkeep_) {
+    function setBatchSizes(uint256 maxClaimsPerUpkeep_, uint256 maxScanPerUpkeep_)
+        external
+        onlyOwner
+    {
+        if (
+            maxClaimsPerUpkeep_ == 0 || maxScanPerUpkeep_ == 0
+                || maxScanPerUpkeep_ < maxClaimsPerUpkeep_
+        ) {
             revert BadBatchSize();
         }
         maxClaimsPerUpkeep = maxClaimsPerUpkeep_;

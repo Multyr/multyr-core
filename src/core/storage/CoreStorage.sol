@@ -21,8 +21,7 @@ library CoreStorage {
     uint64 internal constant MAX_EPOCH_DURATION = 30 days;
 
     // Single source of truth for warm-NAV cache staleness, used by CoreVault.navStatus(),
-    // ERC4626Module and EpochedQueueModule. Previously duplicated as three separate literals/
-    // constants that could drift out of sync (review: Stefano, "Single MAX_WARM_NAV_AGE").
+    // ERC4626Module and EpochedQueueModule.
     uint256 internal constant MAX_WARM_NAV_AGE = 15 minutes;
 
     // Flag constants for _packedFlags
@@ -131,12 +130,8 @@ library CoreStorage {
         // sole authorized caller of recoverModuleGroup(). Review §7/§8.
         address recoveryGate;
 
-        // Instant-withdrawal cap base (appended) — snapshotted once per cap epoch, at
-        // rollEpochIfNeeded(), instead of read live. Review (Pier): live totalAssets() is
-        // grossAssets - totalOwed, so every STANDARD queued request shrinks it, coupling the
-        // supposedly-independent 10% instant bucket to standard-queue activity. Zero until the
-        // first instant/rollover call of a vault's life; requestInstantWithdrawal() backfills it
-        // on demand so a zero snapshot is never mistaken for "no allowance".
+        // Instant cap base, snapshotted before asset/supply changes at cap rollover.
+        // Zero is backfilled on the next interaction with nonzero shareholder assets.
         uint256 capBaseSnapshot;
     }
 

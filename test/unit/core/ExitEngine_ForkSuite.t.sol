@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { Test } from "forge-std/Test.sol";
-import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { CoreHarness } from "../../helpers/CoreHarness.sol";
-import { ERC20Mock } from "../../../src/mocks/ERC20Mock.sol";
-import { MockParamsProvider } from "../../helpers/MockParamsProvider.sol";
-import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTests.sol";
-import { ExitEngineLib } from "../../../src/core/libraries/ExitEngineLib.sol";
+import {Test} from "forge-std/Test.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {CoreHarness} from "../../helpers/CoreHarness.sol";
+import {ERC20Mock} from "../../../src/mocks/ERC20Mock.sol";
+import {MockParamsProvider} from "../../helpers/MockParamsProvider.sol";
+import {MockBufferManagerForTests} from "../../helpers/MockBufferManagerForTests.sol";
+import {ExitEngineLib} from "../../../src/core/libraries/ExitEngineLib.sol";
 
 interface IQueueModule {
+    function rollCapEpochIfNeeded() external;
     function requestInstantWithdrawal(uint256 shares)
         external
         returns (bool settledImmediately, uint256 epochId, uint256 claimId);
@@ -68,12 +69,7 @@ contract ExitEngine_ForkSuite is Test {
         params.setCapPerEpochBps(1000); // 10% per epoch
 
         vault = new CoreHarness(
-            IERC20Metadata(address(usdc)),
-            "Vault",
-            "vUSDC",
-            owner,
-            feeCollector,
-            address(params)
+            IERC20Metadata(address(usdc)), "Vault", "vUSDC", owner, feeCollector, address(params)
         );
 
         mockBM = new MockBufferManagerForTests(address(vault));
@@ -110,6 +106,9 @@ contract ExitEngine_ForkSuite is Test {
         vault.deposit(500_000e6, user3);
         vm.stopPrank();
 
+        // Begin the test cap epoch with the complete fixture TVL.
+        vm.warp(block.timestamp + 31 days);
+        IQueueModule(address(vault)).rollCapEpochIfNeeded();
         // Total: 2M USDC, 2M shares (1:1 PPS)
     }
 
@@ -160,7 +159,9 @@ contract ExitEngine_ForkSuite is Test {
             IQueueModule(address(vault)).requestEpochWithdrawal(200_000e6);
 
         // Priced at request: the (post-fee) amount owed is now a fixed liability
-        assertApproxEqRel(IQueueModule(address(vault)).totalOwed(), 200_000e6, 0.01e18, "amount owed");
+        assertApproxEqRel(
+            IQueueModule(address(vault)).totalOwed(), 200_000e6, 0.01e18, "amount owed"
+        );
         assertEq(IQueueModule(address(vault)).outstandingClaimCount(), 1, "queue has 1 claim");
 
         // Economic exit: the net shares were burned at request
@@ -332,7 +333,9 @@ contract ExitEngine_ForkSuite is Test {
         vm.prank(user2);
         IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
         uint256 supplyAfterSettle = vault.totalSupply();
-        assertEq(supplyAfterSettle, supplyAfterQueue, "settlement burns nothing: shares went at request");
+        assertEq(
+            supplyAfterSettle, supplyAfterQueue, "settlement burns nothing: shares went at request"
+        );
 
         // Force withdraw - supply must decrease further
         vm.prank(user3);

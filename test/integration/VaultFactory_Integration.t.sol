@@ -212,6 +212,7 @@ contract VaultFactory_Integration is Test {
     }
 
     function test_CreateVault_DepositWithdrawSmoke() public {
+        params.setCapPerEpochBps(0); // This smoke test exercises an uncapped round trip.
         MockBufferManager bufferManager = new MockBufferManager(address(usdc));
         MockStrategyRouter strategyRouter = new MockStrategyRouter(address(0));
 

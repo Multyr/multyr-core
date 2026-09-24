@@ -29,7 +29,7 @@ library SelectorLib {
     uint256 internal constant ADMIN_MODULE_VIEW_SELECTORS = 15; // +1: getForceExitPenalty, +1: isPerfInitialized
     uint256 internal constant ERC4626_MODULE_SELECTORS = 11; // +1: forceWithdraw, +1: forceWithdrawAll
     uint256 internal constant LIQUIDITY_OPS_MODULE_SELECTORS = 7; // canDeploy, deployToStrategies, deployToStrategiesWithPlan, realizeForQueue, realizeForReserveAndOps, canRebalanceStrategies, rebalanceStrategies
-    uint256 internal constant FIXED_MATURITY_MODULE_SELECTORS = 23; // 13 plan selectors + autoCloseFunding + 9 previously-unrouted views
+    uint256 internal constant FIXED_MATURITY_MODULE_SELECTORS = 23; // 13 plan selectors + autoCloseFunding + 9 view selectors
 
     uint256 internal constant TOTAL_SELECTORS = QUEUE_MODULE_SELECTORS + QUEUE_MODULE_VIEW_SELECTORS
         + ADMIN_MODULE_OWNER_SELECTORS + ADMIN_MODULE_VIEW_SELECTORS + ERC4626_MODULE_SELECTORS

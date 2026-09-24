@@ -16,14 +16,17 @@ pragma solidity ^0.8.28;
 //      real claim handle -- permanently unclaimable.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { Test } from "forge-std/Test.sol";
-import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import { CoreHarness } from "../../helpers/CoreHarness.sol";
-import { ERC20Mock } from "../../../src/mocks/ERC20Mock.sol";
-import { MockParamsProvider } from "../../helpers/MockParamsProvider.sol";
-import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTests.sol";
-import { FeeCollector } from "../../../src/core/modules/FeeCollector.sol";
-import { EpochQueueStorage } from "../../../src/core/modules/EpochedQueueModule.sol";
+import {Test} from "forge-std/Test.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {CoreHarness} from "../../helpers/CoreHarness.sol";
+import {ERC20Mock} from "../../../src/mocks/ERC20Mock.sol";
+import {MockParamsProvider} from "../../helpers/MockParamsProvider.sol";
+import {MockBufferManagerForTests} from "../../helpers/MockBufferManagerForTests.sol";
+import {FeeCollector} from "../../../src/core/modules/FeeCollector.sol";
+import {
+    EpochedQueueModule,
+    EpochQueueStorage
+} from "../../../src/core/modules/EpochedQueueModule.sol";
 
 interface IHarvestQueue {
     function requestEpochWithdrawal(uint256 shares) external returns (uint256, uint256);
@@ -56,8 +59,12 @@ contract FeeCollectorHarvestQueue is Test {
         collector = new FeeCollector(gov, treasury, ops, reserve, 5000, 300, 5000);
 
         vault = new CoreHarness(
-            IERC20Metadata(address(usdc)), "Vault", "vUSDC",
-            address(this), address(collector), address(params)
+            IERC20Metadata(address(usdc)),
+            "Vault",
+            "vUSDC",
+            address(this),
+            address(collector),
+            address(params)
         );
         vault.setBufferManagerUnsafe(address(new MockBufferManagerForTests(address(vault))));
         // Exit fee only: deposits stay clean so share maths is easy to follow.
@@ -115,7 +122,8 @@ contract FeeCollectorHarvestQueue is Test {
 
         collector.distribute(address(vault));
         assertEq(
-            collector.pendingHarvestClaimCount(address(vault)), 2,
+            collector.pendingHarvestClaimCount(address(vault)),
+            2,
             "second harvest queues alongside the first instead of reverting"
         );
 
@@ -152,12 +160,12 @@ contract FeeCollectorHarvestQueue is Test {
         collector.harvestQueued(address(vault));
 
         assertEq(
-            collector.pendingHarvestClaimCount(address(vault)), 1,
+            collector.pendingHarvestClaimCount(address(vault)),
+            1,
             "the ready claim settled, the unfunded one stayed queued"
         );
         assertGt(
-            usdc.balanceOf(treasury), treasuryBefore,
-            "underlying actually reached the treasury"
+            usdc.balanceOf(treasury), treasuryBefore, "underlying actually reached the treasury"
         );
     }
 
@@ -176,11 +184,13 @@ contract FeeCollectorHarvestQueue is Test {
         collector.distribute(address(vault));
 
         assertEq(
-            collector.pendingHarvestClaimCount(address(vault)), 0,
+            collector.pendingHarvestClaimCount(address(vault)),
+            0,
             "no phantom claim recorded for a dust settlement"
         );
         assertEq(
-            collector.pendingHarvestShares(address(vault)), 0,
+            collector.pendingHarvestShares(address(vault)),
+            0,
             "pendingHarvestShares stays clear, so distribute() is not bricked"
         );
 
@@ -189,6 +199,7 @@ contract FeeCollectorHarvestQueue is Test {
         _q().requestEpochWithdrawal(200_000e6);
         collector.distribute(address(vault));
     }
+
     // ═════════════════════════════════════════════════════════════════════════
     // DEGRADATION: distribute() must never be the thing that breaks.
     // ═════════════════════════════════════════════════════════════════════════
@@ -199,7 +210,7 @@ contract FeeCollectorHarvestQueue is Test {
     ///         and the liability is tracked in the pending-claim list.
     function test_noWithdrawalMinimum_harvestQueuesRegardlessOfMinClaimAmount() public {
         params.setMinClaimAmount(100_000e6); // ignored by exits
-        params.setCapPerEpochBps(1);         // and no instant route either
+        params.setCapPerEpochBps(1); // and no instant route either
 
         vm.prank(alice);
         vault.deposit(1_000_000e6, alice);
@@ -212,7 +223,11 @@ contract FeeCollectorHarvestQueue is Test {
 
         // Exit accepted: the shares left at request. What stays is the collector's own exit fee,
         // which the vault pays to its fee recipient -- the collector itself.
-        assertLt(vault.balanceOf(address(collector)), collectorShares, "the harvested shares left at request");
+        assertLt(
+            vault.balanceOf(address(collector)),
+            collectorShares,
+            "the harvested shares left at request"
+        );
         assertEq(collector.pendingHarvestClaimCount(address(vault)), 1, "and the claim is tracked");
     }
 
@@ -239,16 +254,57 @@ contract FeeCollectorHarvestQueue is Test {
         collector.distribute(address(vault));
 
         assertEq(
-            collector.pendingHarvestClaimCount(address(vault)), cap,
-            "nothing appended past the cap"
+            collector.pendingHarvestClaimCount(address(vault)), cap, "nothing appended past the cap"
         );
         assertEq(
-            vault.balanceOf(address(collector)), sharesBefore,
-            "shares stayed with the collector"
+            vault.balanceOf(address(collector)), sharesBefore, "shares stayed with the collector"
         );
         assertEq(
-            vault.balanceOf(address(vault)), escrowBefore,
+            vault.balanceOf(address(vault)),
+            escrowBefore,
             "and never entered vault escrow untracked"
         );
+    }
+
+    function test_permissionlessSettlementCanBeHarvested() public {
+        vm.prank(alice);
+        vault.deposit(1_000_000e6, alice);
+        _accrueFeeShares(200_000e6);
+        params.setCapPerEpochBps(1);
+        collector.distribute(address(vault));
+        (uint256 e, uint256 c) = collector.pendingHarvestClaimAt(address(vault), 0);
+        _warp(7 days + 1);
+        _q().closeCurrentEpoch();
+        _q().fundEpoch(e);
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = c;
+        EpochedQueueModule(address(vault)).keeperSettleClaims(e, ids);
+        uint256 received = usdc.balanceOf(address(collector));
+        assertGt(received, 0);
+        uint256 beforeTreasury = usdc.balanceOf(treasury);
+        collector.harvestQueued(address(vault));
+        assertEq(collector.pendingHarvestClaimCount(address(vault)), 0);
+        assertEq(collector.pendingHarvestShares(address(vault)), 0);
+        assertEq(usdc.balanceOf(address(collector)), 0);
+        assertEq(usdc.balanceOf(treasury) - beforeTreasury, received * 5000 / 10000);
+    }
+
+    function test_alreadyDistributedSettlementStillClearsPendingEntry() public {
+        vm.prank(alice);
+        vault.deposit(1_000_000e6, alice);
+        _accrueFeeShares(200_000e6);
+        params.setCapPerEpochBps(1);
+        collector.distribute(address(vault));
+        (uint256 e, uint256 c) = collector.pendingHarvestClaimAt(address(vault), 0);
+        _warp(7 days + 1);
+        _q().closeCurrentEpoch();
+        _q().fundEpoch(e);
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = c;
+        EpochedQueueModule(address(vault)).keeperSettleClaims(e, ids);
+        collector.distribute(address(usdc));
+        collector.harvestQueued(address(vault));
+        assertEq(collector.pendingHarvestClaimCount(address(vault)), 0);
+        assertEq(collector.pendingHarvestShares(address(vault)), 0);
     }
 }

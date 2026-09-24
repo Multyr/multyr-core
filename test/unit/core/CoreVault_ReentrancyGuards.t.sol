@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { Test } from "forge-std/Test.sol";
-import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import { CoreVault } from "../../../src/core/CoreVault.sol";
-import { ERC20Mock } from "../../../src/mocks/ERC20Mock.sol";
-import { MockParamsProvider } from "../../helpers/MockParamsProvider.sol";
-import { EpochedQueueModule } from "src/core/modules/EpochedQueueModule.sol";
-import { AdminModule } from "src/core/modules/AdminModule.sol";
-import { IQueueModule } from "src/interfaces/IQueueModule.sol";
-import { IAdminModule } from "src/interfaces/IAdminModule.sol";
-import { SelectorLib } from "src/core/libraries/SelectorLib.sol";
-import { ModuleSetter } from "test/helpers/ModuleSetter.sol";
-import { CoreHarness } from "test/helpers/CoreHarness.sol";
-import { MockBufferManagerForTests } from "test/helpers/MockBufferManagerForTests.sol";
+import {Test} from "forge-std/Test.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {CoreVault} from "../../../src/core/CoreVault.sol";
+import {ERC20Mock} from "../../../src/mocks/ERC20Mock.sol";
+import {MockParamsProvider} from "../../helpers/MockParamsProvider.sol";
+import {EpochedQueueModule} from "src/core/modules/EpochedQueueModule.sol";
+import {AdminModule} from "src/core/modules/AdminModule.sol";
+import {IQueueModule} from "src/interfaces/IQueueModule.sol";
+import {IAdminModule} from "src/interfaces/IAdminModule.sol";
+import {SelectorLib} from "src/core/libraries/SelectorLib.sol";
+import {ModuleSetter} from "test/helpers/ModuleSetter.sol";
+import {CoreHarness} from "test/helpers/CoreHarness.sol";
+import {MockBufferManagerForTests} from "test/helpers/MockBufferManagerForTests.sol";
 
 /**
  * @title CoreVault_ReentrancyGuards
@@ -269,7 +269,9 @@ contract CoreVault_ReentrancyGuards is Test {
 
         uint256 assetsAfterClaim = vault.totalAssets();
         // Assets decrease by approximately the claimed amount (exact depends on fee)
-        assertLt(assetsAfterClaim, assetsAfterDeposit, "assets decreased by requestInstantWithdrawal");
+        assertLt(
+            assetsAfterClaim, assetsAfterDeposit, "assets decreased by requestInstantWithdrawal"
+        );
     }
 
     function test_no_phantom_shares_created() public {
@@ -345,9 +347,8 @@ contract CoreVault_ReentrancyGuards is Test {
         // nonReentrant adds ~2100 gas for SSTORE operations
         // First call: ~130k gas (cold storage)
         assertGt(gasUsed, 100_000, "first call uses significant gas (cold storage)");
-        // Ceiling raised from 220k: this call was already at 220,034 before the economic-exit model;
-        // deposit now also reads grossAssets/totalOwed for the solvency check (+~9k cold).
-        assertLt(gasUsed, 240_000, "first call gas is reasonable");
+        // Includes solvency reads and the automatic cap-epoch snapshot before deposit.
+        assertLt(gasUsed, 250_000, "first call gas is reasonable");
 
         // Second call uses much less gas due to warm storage
         vm.prank(user1);
@@ -355,15 +356,9 @@ contract CoreVault_ReentrancyGuards is Test {
         vault.deposit(10_000e6, user1);
         uint256 gasUsed2 = gasStart - gasleft();
 
-        // Second call: warm storage path. Threshold raised from 50k to 55k to accommodate
-        // post-via_ir optimizer output and additional storage reads introduced by BufferManager,
-        // IncentivesEngine, FeeCollectorUpkeep, and EIP-7201 slot layout changes (measured: 51512).
-        // The reentrancy guard remains effective: warm call is still << cold call (assertLt below).
+        // The second deposit also initializes the cap base from the first deposit's assets.
         assertGt(gasUsed2, 10_000, "second call still has base gas + modifier");
-        // NOTE: at baseline this test already failed on the first-call ceiling above, so this second
-        // ceiling (55k) was never actually reached/verified. Measured now: ~133k, of which the new
-        // solvency read (liabilityState) is ~23k. The guard check that matters is the relative one below.
-        assertLt(gasUsed2, 150_000, "second call benefits from warm storage");
+        assertLt(gasUsed2, 175_000, "second call includes cap snapshot initialization");
         assertLt(gasUsed2, gasUsed, "second call uses less gas (warm storage)");
 
         // Verify both calls succeeded (proving lock was released)

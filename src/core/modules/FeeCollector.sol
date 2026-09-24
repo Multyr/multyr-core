@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import { ReentrancyGuard } from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import { Pausable } from "@openzeppelin/contracts/security/Pausable.sol";
-import { IQueueModule } from "../../interfaces/IQueueModule.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import {Pausable} from "@openzeppelin/contracts/security/Pausable.sol";
+import {EpochedQueueModule} from "./EpochedQueueModule.sol";
+import {IQueueModule} from "../../interfaces/IQueueModule.sol";
 
 interface IERC4626Minimal {
     function asset() external view returns (address);
@@ -124,7 +125,10 @@ contract FeeCollector is ReentrancyGuard, Pausable {
     ///         be blockable by the state of the queue.
     event HarvestDeferred(address indexed token, uint256 shares, string reason);
     event HarvestSettled(
-        address indexed token, address indexed underlying, uint256 sharesRedeemed, uint256 underlyingOut
+        address indexed token,
+        address indexed underlying,
+        uint256 sharesRedeemed,
+        uint256 underlyingOut
     );
     event FeeSourceTracked(address indexed vault, address indexed token, uint256 amount);
 
@@ -208,15 +212,15 @@ contract FeeCollector is ReentrancyGuard, Pausable {
         if (mode == ShareMode.AUTO_HARVEST) {
             try IERC4626Minimal(shareToken).asset() returns (address a) {
                 underlying = a;
-            } catch { }
+            } catch {}
             require(underlying != address(0), "FeeCollector: not ERC4626");
         } else {
             // best-effort probe for telemetry
             try IERC4626Minimal(shareToken).asset() returns (address a2) {
                 underlying = a2;
-            } catch { }
+            } catch {}
         }
-        shareConfigs[shareToken] = ShareConfig({ isSet: true, mode: mode, underlying: underlying });
+        shareConfigs[shareToken] = ShareConfig({isSet: true, mode: mode, underlying: underlying});
         emit ShareConfigUpdated(shareToken, mode, underlying);
     }
 
@@ -234,7 +238,7 @@ contract FeeCollector is ReentrancyGuard, Pausable {
             // auto-detect ERC4626 via asset()
             try IERC4626Minimal(token).asset() returns (address a) {
                 isShare = (a != address(0));
-                sc = ShareConfig({ isSet: false, mode: ShareMode.SPLIT_SHARES, underlying: a });
+                sc = ShareConfig({isSet: false, mode: ShareMode.SPLIT_SHARES, underlying: a});
             } catch { /* not ERC4626 */ }
         }
 
@@ -260,7 +264,6 @@ contract FeeCollector is ReentrancyGuard, Pausable {
                     emit HarvestDeferred(token, bal, "pending harvest queue full");
                     return;
                 }
-
 
                 // Snapshot underlying balance before the call
                 uint256 underBefore = IERC20(sc.underlying).balanceOf(address(this));
@@ -314,7 +317,7 @@ contract FeeCollector is ReentrancyGuard, Pausable {
                     // Call harvestQueued(token) once the epoch is FUNDED to pull the claim.
                     pendingHarvestShares[token] += bal;
                     _pendingHarvestClaims[token].push(
-                        PendingHarvestClaim({ epochId: uint128(epochId), claimId: uint128(claimId) })
+                        PendingHarvestClaim({epochId: uint128(epochId), claimId: uint128(claimId)})
                     );
                     emit HarvestQueued(token, bal);
                 }
@@ -343,7 +346,6 @@ contract FeeCollector is ReentrancyGuard, Pausable {
         emit Distributed(token, bal, toTreasury, toOps, toSafetyReserve);
     }
 
-    /// @notice Pull underlying for a previously-queued AUTO_HARVEST fallback claim.
     /// @notice Pull underlying for every queued AUTO_HARVEST claim that is ready.
     /// @dev Iterates the token's pending claims and settles the ones whose epoch
     ///      has been funded, leaving the rest queued. One epoch that never funds
@@ -357,27 +359,32 @@ contract FeeCollector is ReentrancyGuard, Pausable {
         uint256 pending = pendingHarvestShares[token];
         require(pending > 0, "FeeCollector: no pending harvest");
 
-        uint256 underBefore = IERC20(sc.underlying).balanceOf(address(this));
-
         PendingHarvestClaim[] storage claims = _pendingHarvestClaims[token];
         uint256 settled;
         uint256 i;
         while (i < claims.length) {
             PendingHarvestClaim memory c = claims[i];
-            try IQueueModule(token).claimEpochAssets(c.epochId, c.claimId) {
-                // Swap-and-pop, so do not advance i: a new element now sits here.
+            bool complete = EpochedQueueModule(token).epochClaim(c.epochId, c.claimId).claimed;
+            if (!complete) {
+                try IQueueModule(token).claimEpochAssets(c.epochId, c.claimId) {
+                    complete = true;
+                } catch {
+                    emit HarvestClaimNotReady(token, c.epochId, c.claimId);
+                }
+            }
+            if (complete) {
                 claims[i] = claims[claims.length - 1];
                 claims.pop();
-                unchecked { ++settled; }
-            } catch {
-                emit HarvestClaimNotReady(token, c.epochId, c.claimId);
-                unchecked { ++i; }
+                ++settled;
+            } else {
+                ++i;
             }
         }
 
-        uint256 underBal = IERC20(sc.underlying).balanceOf(address(this)) - underBefore;
+        // Include underlying delivered by permissionless settlement before this call.
+        // The token distribution entrypoint may also have distributed it already.
+        uint256 underBal = IERC20(sc.underlying).balanceOf(address(this));
         require(settled > 0, "FeeCollector: no claim ready");
-        require(underBal > 0, "FeeCollector: no underlying received");
 
         // Only clear the share tally once every claim has been drained; a
         // partial settlement leaves the remainder queued and retryable.
@@ -386,7 +393,7 @@ contract FeeCollector is ReentrancyGuard, Pausable {
         }
 
         emit HarvestSettled(token, sc.underlying, pending, underBal);
-        _distributeUnderlying(sc.underlying, underBal);
+        if (underBal > 0) _distributeUnderlying(sc.underlying, underBal);
     }
 
     /// @notice Number of queued epoch claims awaiting settlement for `token`.

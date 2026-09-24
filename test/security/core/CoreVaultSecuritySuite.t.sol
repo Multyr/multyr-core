@@ -51,6 +51,7 @@ contract CoreVaultSecuritySuite is Test {
         usdc._mint(address(this), type(uint128).max);
 
         params = new MockParamsProvider();
+        params.setCapPerEpochBps(0); // Isolate lock/accounting checks from the instant cap.
 
         // Deploy modules
         queueModule = new EpochedQueueModule();

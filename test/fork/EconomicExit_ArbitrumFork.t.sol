@@ -121,9 +121,7 @@ contract EconomicExit_ArbitrumFork_Test is Test {
     IERC20 usdc = IERC20(USDC);
 
     uint256 t; // local clock
-    uint64 liveLockPeriod; // live withdrawal-lock window (review: Pier's fix makes this a hard
-                           // revert on both exit paths now; the live vault has one configured
-                           // (86,400s at the pinned block) so tests must clear it after depositing)
+    uint64 liveLockPeriod; // live withdrawal-lock window so tests must clear it after depositing)
     uint256 liveGrossBefore;
     uint256 liveSupplyBefore;
     uint256 liveWarmNavAgeAtFork;
@@ -211,9 +209,7 @@ contract EconomicExit_ArbitrumFork_Test is Test {
     }
 
     /// @dev Deposits refresh the warm NAV themselves (ERC4626Module._ensureFreshWarmNav). Also
-    ///      clears the live deposit-lock window for `who` (review: Pier -- lock is now a hard
-    ///      revert on both requestEpochWithdrawal and requestInstantWithdrawal, and the live
-    ///      vault has a real, non-zero lockPeriod configured). None of these scenarios are ABOUT
+    ///      clears the live deposit-lock window for `who`. None of these scenarios are ABOUT
     ///      the lock itself (that is covered separately, see test_fork_depositLock_*).
     ///
     ///      Implementation note: clearing the lock by writing lastDepositTs[who] directly would
@@ -505,8 +501,7 @@ contract EconomicExit_ArbitrumFork_Test is Test {
     /// @notice GlobalConfig has a 100 USDC DEPOSIT minimum; exits have none (spec §6.4). A share
     ///         amount tiny enough to round to a NONZERO asset value is still accepted with no
     ///         floor beyond that. On the real, non-1.0 live price ratio a bare 1-wei share
-    ///         request genuinely rounds to zero -- and correctly reverts ZeroAmount (review:
-    ///         Stefano's empty-claims fix), which is not a minimum, just "not nothing".
+    ///         request genuinely rounds to zero -- and correctly reverts ZeroAmount, which is not a minimum, just "not nothing".
     function test_fork_noWithdrawalMinimum_acceptsATinyNonZeroRequest() public {
         _deposit(alice, 1_000e6);
         _freshOracle();
@@ -593,7 +588,7 @@ contract EconomicExit_ArbitrumFork_Test is Test {
 
     // ═════════════════════════ 6. insolvency, end to end, on real USDC ═════════════════════════
 
-    /// @dev Option A (review: Multyr, PR #19 second round): payout is compared against the
+    /// @dev Option A: payout is compared against the
     ///      cohort's crystallized `epochData(e).recoveryIndex`, not the live, cross-epoch
     ///      `liabilityIndex()` -- which, for a single fully-crystallized epoch, normalizes back
     ///      toward 1e18 the instant it is funded (totalOwed is written down to match what was
@@ -654,7 +649,7 @@ contract EconomicExit_ArbitrumFork_Test is Test {
         assertEq(ICoreVault(VAULT).totalOwed(), 0);
     }
 
-    /// @notice Option A (review: Multyr, PR #19 second round): once funded/crystallized, a
+    /// @notice Option A: once funded/crystallized, a
     ///         recovery is NOT owed to the cohort any more -- it flows to remaining shareholders
     ///         (bob) instead. Alice is paid exactly the crystallized ~50%, never topped up.
     function test_fork_insolvency_recoveryAfterFunding_doesNotTopUp() public {
@@ -889,7 +884,7 @@ contract EconomicExit_ArbitrumFork_Test is Test {
     // ═════════════════════════ 10. deposit lock, on the real live policy ═════════════════════════
 
     /// @notice The live vault has a real, non-zero lockPeriod (86,400s at the pinned block).
-    ///         Review (Pier): during the lock, standard and instant requests must both revert
+    ///         during the lock, standard and instant requests must both revert
     ///         outright -- not silently fall back -- and force exit remains the bypass.
     function test_fork_depositLock_blocksStandardAndInstant_forceStillWorks() public {
         assertGt(liveLockPeriod, 0, "the live vault has a real lock configured");
