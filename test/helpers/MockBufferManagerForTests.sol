@@ -18,6 +18,13 @@ contract MockBufferManagerForTests is IBufferManager {
     uint256 private _nav;
     uint40 private _ts;
     bool private _valid = true;
+    /// @dev Simulates a keeper that keeps the warm NAV cache perpetually fresh:
+    ///      warmNavState() reports `block.timestamp` while true. Requests now
+    ///      revert on a stale cache (spec §8), so tests that warp time would
+    ///      otherwise all need a manual refresh. Any explicit setter below
+    ///      switches it off, so tests that inject a specific timestamp/validity
+    ///      get exactly what they set.
+    bool private _autoFresh = true;
     bool private _refreshShouldRevert;
     uint256 private _refreshNav;
     uint40 private _refreshTs;
@@ -37,7 +44,12 @@ contract MockBufferManagerForTests is IBufferManager {
     // ═══════════════════════════════════════════════════════════════════════
 
     /// @notice Set warm NAV state directly
+    function setAutoFresh(bool on) external {
+        _autoFresh = on;
+    }
+
     function setWarmNav(uint256 nav_, uint40 ts_, bool valid_) external {
+        _autoFresh = false;
         _nav = nav_;
         _ts = ts_;
         _valid = valid_;
@@ -45,11 +57,13 @@ contract MockBufferManagerForTests is IBufferManager {
 
     /// @notice Make refreshWarmNav() revert
     function setRefreshShouldRevert(bool shouldRevert_) external {
+        _autoFresh = false;
         _refreshShouldRevert = shouldRevert_;
     }
 
     /// @notice Set what refreshWarmNav() will produce after being called
     function setRefreshResult(uint256 nav_, uint40 ts_, bool valid_) external {
+        _autoFresh = false;
         _hasRefreshOverride = true;
         _refreshNav = nav_;
         _refreshTs = ts_;
@@ -66,7 +80,7 @@ contract MockBufferManagerForTests is IBufferManager {
     // ═══════════════════════════════════════════════════════════════════════
 
     function warmNavState() external view override returns (uint256 nav, uint40 ts, bool valid) {
-        return (_nav, _ts, _valid);
+        return (_nav, _autoFresh ? uint40(block.timestamp) : _ts, _valid);
     }
 
     function refreshWarmNav() external override {

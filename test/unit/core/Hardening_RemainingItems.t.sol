@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { Test } from "forge-std/Test.sol";
-import { console2 } from "forge-std/console2.sol";
-import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import { CoreHarness } from "../../helpers/CoreHarness.sol";
-import { ERC20Mock } from "../../../src/mocks/ERC20Mock.sol";
-import { MockParamsProvider } from "../../helpers/MockParamsProvider.sol";
-import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTests.sol";
-import { VaultUpkeep } from "../../../src/automation/VaultUpkeep.sol";
+import {Test} from "forge-std/Test.sol";
+import {console2} from "forge-std/console2.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {CoreHarness} from "../../helpers/CoreHarness.sol";
+import {ERC20Mock} from "../../../src/mocks/ERC20Mock.sol";
+import {MockParamsProvider} from "../../helpers/MockParamsProvider.sol";
+import {MockBufferManagerForTests} from "../../helpers/MockBufferManagerForTests.sol";
+import {VaultUpkeep} from "../../../src/automation/VaultUpkeep.sol";
 
 interface IQueueModule {
+    function rollCapEpochIfNeeded() external;
     function requestInstantWithdrawal(uint256 shares)
         external
         returns (bool settledImmediately, uint256 epochId, uint256 claimId);
@@ -20,7 +21,7 @@ interface IQueueModule {
     function closeCurrentEpoch() external;
     function fundEpoch(uint256 epochId) external;
     function claimEpochAssets(uint256 epochId, uint256 claimId) external returns (uint256 assets);
-    function totalEscrowedShares() external view returns (uint256);
+    function totalOwed() external view returns (uint256);
     function outstandingClaimCount() external view returns (uint256);
 }
 
@@ -43,9 +44,7 @@ contract Hardening_RemainingItems is Test {
         params.setCapPerEpochBps(1000);
 
         vault = new CoreHarness(
-            IERC20Metadata(address(usdc)),
-            "Vault", "vUSDC",
-            owner, feeCollector, address(params)
+            IERC20Metadata(address(usdc)), "Vault", "vUSDC", owner, feeCollector, address(params)
         );
         MockBufferManagerForTests mockBM = new MockBufferManagerForTests(address(vault));
         vault.setBufferManagerUnsafe(address(mockBM));
@@ -159,7 +158,7 @@ contract Hardening_RemainingItems is Test {
             IQueueModule(address(vault)).claimEpochAssets(epochId, claimIds[i]);
         }
 
-        assertEq(IQueueModule(address(vault)).totalEscrowedShares(), 0, "all claims settled");
+        assertEq(IQueueModule(address(vault)).totalOwed(), 0, "all claims settled");
     }
 
     /// @notice Fallback-to-queue claims are retrievable once the epoch is funded
@@ -167,6 +166,9 @@ contract Hardening_RemainingItems is Test {
         // User deposits and queues immediate claim that exceeds cap
         vm.prank(user1);
         vault.deposit(50_000_000e6, user1);
+
+        vm.warp(block.timestamp + 31 days);
+        IQueueModule(address(vault)).rollCapEpochIfNeeded();
 
         // Exhaust cap with first instant claim
         vm.prank(user1);
@@ -178,7 +180,7 @@ contract Hardening_RemainingItems is Test {
             IQueueModule(address(vault)).requestInstantWithdrawal(3_000_000e6);
 
         assertFalse(settledImmediately, "claim queued due to cap");
-        uint256 pending = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pending = IQueueModule(address(vault)).totalOwed();
         assertGt(pending, 0, "claim queued due to cap");
 
         // Settle: close + fund the epoch, then user1 self-claims (standard claims
@@ -188,7 +190,7 @@ contract Hardening_RemainingItems is Test {
         IQueueModule(address(vault)).fundEpoch(epochId);
         vm.prank(user1);
         IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
-        uint256 pendingAfter = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pendingAfter = IQueueModule(address(vault)).totalOwed();
 
         // Claim should be settled (standard claims have no cap, only lock period)
         assertEq(pendingAfter, 0, "standard claim settled after epoch funded");

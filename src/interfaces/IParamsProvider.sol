@@ -28,16 +28,22 @@ interface IParamsProvider {
         uint16 capPerEpochBps; // Max immediate withdrawals per epoch (e.g., 1000 = 10%)
         uint256 maxWithdrawalPerBlock; // Max total withdrawals per block
         uint256 maxWithdrawalPerTx; // Max single transaction withdrawal
-        uint256 minClaimAmount; // Minimum claim amount (anti-spam)
+        // @dev DEAD for withdrawals under the economic-exit model (spec §6.4: no withdrawal
+        // minimum, deposits only). No code path reads this for a request any more. Left in the
+        // struct/storage rather than removed -- 16 deploy/ops scripts (including a dedicated
+        // SetMinClaimAmount.s.sol) read and assert on it, and governance-managed GlobalConfig
+        // storage would need a coordinated migration. remove in a
+        // follow-up alongside those scripts, not here.
+        uint256 minClaimAmount; // DEPRECATED, unused for exits -- see @dev above
         uint64 lockPeriod; // Deposit lock period in seconds
     }
 
-    /// @notice Dynamic withdrawal cap parameters (B5)
+    /// @dev Retained for storage and ABI compatibility; ignored by cap enforcement.
     struct DynamicCapParams {
-        uint16 minBps; // Min cap when queue stressed (e.g., 200 = 2%)
-        uint16 maxBps; // Max cap when queue empty (e.g., 2000 = 20%)
-        uint256 queueStressThreshold; // Queue depth triggering min cap
-        bool enabled; // Enable dynamic adjustment
+        uint16 minBps; // Unused
+        uint16 maxBps; // Unused
+        uint256 queueStressThreshold; // DEPRECATED, unused -- see @dev above
+        bool enabled; // Unused
     }
 
     /// @notice Queue anti-spam parameters (A4)

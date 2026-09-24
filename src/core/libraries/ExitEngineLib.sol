@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { CoreStorage } from "../storage/CoreStorage.sol";
-import { FeeStorage } from "../storage/FeeStorage.sol";
-import { ExitFeeLib } from "./ExitFeeLib.sol";
-import { WithdrawalCapLib } from "./WithdrawalCapLib.sol";
-import { Percentage } from "../../libs/Percentage.sol";
-import { IParamsProvider } from "../../interfaces/IParamsProvider.sol";
+import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
+import {Events} from "./Events.sol";
+import {CoreStorage} from "../storage/CoreStorage.sol";
+import {FeeStorage} from "../storage/FeeStorage.sol";
+import {ExitFeeLib} from "./ExitFeeLib.sol";
+import {WithdrawalCapLib} from "./WithdrawalCapLib.sol";
+import {Percentage} from "../../libs/Percentage.sol";
+import {IParamsProvider} from "../../interfaces/IParamsProvider.sol";
 
 /// @title ExitEngineLib — Single source of truth for exit orchestration + policy
 /// @notice Pure library: epoch rollover, cap enforcement, fee computation, exit simulation.
@@ -39,12 +41,10 @@ library ExitEngineLib {
         uint256 penaltyAssets; // penalty fee in assets (immediate or force)
         bool willQueue; // true if exit cannot settle immediately
         uint256 epochCapRemaining; // cap remaining after this exit
-        // NOTE on netAssets:
-        //   INSTANT/FORCE: netAssets is EXACT — settlement happens in the same tx.
-        //   STANDARD: netAssets is INDICATIVE — settlement is deferred to a future tx,
-        //     and totalAssets/totalSupply may change between queue and settle.
-        //     The actual net at settlement depends on the PPS at settlement time.
-        //     Use feeShares and userShares (which are exact) for accounting.
+        // NOTE on netAssets (economic exit at request):
+        //   Every mode is EXACT: the price is fixed and the shares are burned in the request
+        //   transaction, so netAssets is the assetsOwed a request would record. Settlement of a
+        //   queued request only pays that fixed amount (× liabilityIndex, 1e18 while solvent).
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -68,11 +68,17 @@ library ExitEngineLib {
     // EPOCH MANAGEMENT
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    /// @notice Roll epoch if current epoch has expired. Parametric duration.
-    /// @dev MUST be called before any cap check or epoch consumption.
-    ///      epochDuration MUST be initialized at deploy time (no zero fallback).
-    /// @param core CoreStorage layout
-    /// @return rolled True if epoch was rolled
+    /// @notice Roll and snapshot before changing assets or supply.
+    /// @dev An unconfigured duration disables rollover so deposits remain available.
+    function rollCapEpochIfNeeded(CoreStorage.Layout storage core) internal returns (bool rolled) {
+        if (core.epochDuration == 0) return false;
+        rolled = rollEpochIfNeeded(core);
+        if (rolled) emit Events.WithdrawalCapEpochRolled(core.epochStart);
+        if (rolled || core.capBaseSnapshot == 0) {
+            core.capBaseSnapshot = IERC4626(address(this)).totalAssets();
+        }
+    }
+
     function rollEpochIfNeeded(CoreStorage.Layout storage core) internal returns (bool rolled) {
         uint64 dur = core.epochDuration;
         if (dur == 0) revert EpochDurationNotSet();
@@ -82,8 +88,7 @@ library ExitEngineLib {
 
         if (block.timestamp >= next) {
             // Align epoch start to duration boundary relative to original start
-            core.epochStart =
-                uint64(block.timestamp - ((block.timestamp - es) % dur));
+            core.epochStart = uint64(block.timestamp - ((block.timestamp - es) % dur));
             core.epochWithdrawn = 0;
             return true;
         }
@@ -136,13 +141,9 @@ library ExitEngineLib {
     // ═══════════════════════════════════════════════════════════════════════════════
 
     /// @notice Simulate an exit for preview/max functions
-    /// @dev SEMANTICS:
-    ///      - INSTANT/FORCE: netAssets is EXACT — identical to runtime (same tx).
-    ///        Same formulas, same rounding, same operation order.
-    ///      - STANDARD (queued): netAssets is INDICATIVE — the queued path cannot
-    ///        promise today the exact net of a future settlement. The PPS at
-    ///        settlement time may differ. feeShares and userShares ARE exact
-    ///        (computed at queue time), but the asset conversion is indicative.
+    /// @dev SEMANTICS: netAssets is EXACT for every mode — a request prices at the current
+    ///      share price and burns its net shares in the same transaction, with the same
+    ///      formulas, rounding and operation order as this function.
     ///
     ///      Callers MUST provide inputs computed AFTER soft NAV refresh:
     ///        grossAssets = convertToAssets(shares)
@@ -196,8 +197,7 @@ library ExitEngineLib {
         } else if (mode == ExitMode.INSTANT) {
             // INSTANT: queues if cap insufficient
             r.willQueue = grossAssets > capRemaining;
-            r.epochCapRemaining =
-                r.willQueue ? capRemaining : capRemaining - grossAssets;
+            r.epochCapRemaining = r.willQueue ? capRemaining : capRemaining - grossAssets;
         } else {
             // FORCE: never queues, no cap consumption
             r.willQueue = false;
@@ -213,10 +213,7 @@ library ExitEngineLib {
     /// @dev ONLY called for INSTANT mode. FORCE does NOT consume cap.
     /// @param core CoreStorage layout
     /// @param grossAssets Gross assets consumed
-    function consumeEpochCap(
-        CoreStorage.Layout storage core,
-        uint256 grossAssets
-    ) internal {
+    function consumeEpochCap(CoreStorage.Layout storage core, uint256 grossAssets) internal {
         core.epochWithdrawn += grossAssets;
     }
 
@@ -227,11 +224,7 @@ library ExitEngineLib {
     /// @notice Validate epoch duration is within bounds
     /// @param duration Proposed epoch duration
     /// @return valid True if within [MIN_EPOCH_DURATION, MAX_EPOCH_DURATION]
-    function validateEpochDuration(uint64 duration)
-        internal
-        pure
-        returns (bool valid)
-    {
+    function validateEpochDuration(uint64 duration) internal pure returns (bool valid) {
         return duration >= MIN_EPOCH_DURATION && duration <= MAX_EPOCH_DURATION;
     }
 }

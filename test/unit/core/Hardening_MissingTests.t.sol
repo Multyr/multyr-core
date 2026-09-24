@@ -24,7 +24,7 @@ interface IQueueModule {
     function canCloseCurrentEpoch() external view returns (bool);
     function currentEpochClaimCount() external view returns (uint256);
     function outstandingClaimCount() external view returns (uint256);
-    function totalEscrowedShares() external view returns (uint256);
+    function totalOwed() external view returns (uint256);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -101,7 +101,7 @@ contract Hardening_MissingTests is Test {
         (uint256 epochId, uint256 claimId) =
             IQueueModule(address(vault)).requestEpochWithdrawal(400_000e6);
 
-        uint256 pendingBefore = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pendingBefore = IQueueModule(address(vault)).totalOwed();
         assertGt(pendingBefore, 0, "claim queued");
 
         // Settle — no router configured, hot likely < gross for this claim.
@@ -112,7 +112,7 @@ contract Hardening_MissingTests is Test {
         vm.prank(user1);
         try IQueueModule(address(vault)).claimEpochAssets(epochId, claimId) { } catch { }
 
-        uint256 pendingAfter = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pendingAfter = IQueueModule(address(vault)).totalOwed();
 
         // If claim was skipped (insufficient hot), it stays pending
         // If claim was settled (hot was enough), pending = 0 — also fine
@@ -150,7 +150,7 @@ contract Hardening_MissingTests is Test {
 
         // Verify claim was processed (we have enough hot)
         assertEq(
-            IQueueModule(address(vault)).totalEscrowedShares(), 0, "claim settled with available hot"
+            IQueueModule(address(vault)).totalOwed(), 0, "claim settled with available hot"
         );
     }
 
@@ -348,33 +348,43 @@ contract Hardening_MissingTests is Test {
     function test_noClaimFloor_instantFallbackQueuesTinyResidual() public {
         params.setDepositLimits(0, 0, 100e6);
         params.setMinClaimAmount(0);
-        params.setLockPeriod(1 days); // force the instant path into the queue
         vm.warp(1 hours);
         address residualOwner = address(0xD057);
         vm.prank(user1);
         vault.transfer(residualOwner, 100);
+
+        // Deposit lock is now a hard revert on both exit paths, so it can no
+        // longer be used to force the fallback branch for this 100-wei withdrawal (a
+        // cap-bps reduction would still leave far more than 100 wei of headroom against a
+        // 10M-USDC deposit). Move all hot liquidity into the (mock) warm bucket instead --
+        // solvency is untouched, but the instant liquidity check now has nothing free.
+        uint256 hotBal = usdc.balanceOf(address(vault));
+        vm.prank(address(vault));
+        usdc.transfer(address(0xBEEF), hotBal);
+        MockBufferManagerForTests(address(vault.bufferManager())).setWarmNav(
+            hotBal, uint40(block.timestamp), true
+        );
         vm.prank(residualOwner);
         (bool instant,, uint256 claim) = IQueueModule(address(vault)).requestInstantWithdrawal(100);
         assertFalse(instant);
         assertGt(claim, 0);
         assertEq(vault.balanceOf(residualOwner), 0);
-        assertEq(IQueueModule(address(vault)).totalEscrowedShares(), 100);
+        // Priced at request: 100 shares less the (rounded-up) withdraw fee share.
+        assertApproxEqAbs(IQueueModule(address(vault)).totalOwed(), 100, 1);
     }
 
-    function test_minClaimAmount_blocksQueuedDustClaim() public {
+    /// @notice Spec §6.4: there is no withdrawal minimum. The minimum applies to
+    ///         deposits only, so a configured minClaimAmount no longer gates exits.
+    function test_noWithdrawalMinimum_evenWhenMinClaimAmountIsConfigured() public {
         params.setMinClaimAmount(50e6);
 
         vm.prank(user1);
-        vm.expectRevert(EpochedQueueModule.ClaimTooSmall.selector);
-        IQueueModule(address(vault)).requestEpochWithdrawal(10e6);
-    }
-
-    function test_minClaimAmount_allowsClaimAtFloor() public {
-        params.setMinClaimAmount(50e6);
+        (, uint256 claimId) = IQueueModule(address(vault)).requestEpochWithdrawal(10e6);
+        assertGt(claimId, 0, "sub-'floor' request is accepted");
 
         vm.prank(user1);
-        (, uint256 claimId) = IQueueModule(address(vault)).requestEpochWithdrawal(50e6);
-        assertGt(claimId, 0, "exactly-at-floor claim is accepted");
+        (bool settled,,) = IQueueModule(address(vault)).requestInstantWithdrawal(10e6);
+        settled; // settled or queued: either way accepted, never reverted
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -384,57 +394,6 @@ contract Hardening_MissingTests is Test {
     // router/warm liquidity to cover the gap) starved
     // CRYSTALLIZE/REBALANCE/DEPLOY/REALIZE/RECONCILE forever.
     // ═══════════════════════════════════════════════════════════════════════════
-
-    /// @notice The floor is enforced on BOTH legs, so a sub-floor instant
-    ///         request reverts on the caller's input rather than on whatever
-    ///         the cap happens to allow at that moment.
-    function test_minClaimAmount_instantPath_revertsDeterministically() public {
-        params.setMinClaimAmount(100e6);
-        params.setCapPerEpochBps(10); // 0.1% of TVL == 1_000 USDC of allowance
-
-        // Cap wide open: still rejected on the input alone.
-        vm.prank(user1);
-        vm.expectRevert(EpochedQueueModule.ClaimTooSmall.selector);
-        IQueueModule(address(vault)).requestInstantWithdrawal(50e6);
-
-        // Consume the cap allowance with an above-floor exit.
-        vm.prank(user1);
-        (bool settled,,) = IQueueModule(address(vault)).requestInstantWithdrawal(900e6);
-        assertTrue(settled, "above-floor instant exit settles");
-
-        // Cap exhausted: same rejection, same reason. Previously this leg
-        // reverted while the first one succeeded.
-        vm.prank(user1);
-        vm.expectRevert(EpochedQueueModule.ClaimTooSmall.selector);
-        IQueueModule(address(vault)).requestInstantWithdrawal(50e6);
-    }
-
-    /// @notice The floor applies to every caller, with no address carve-out.
-    ///         An exemption inside a security check is an invitation to widen
-    ///         it; callers that cannot tolerate the revert -- FeeCollector's
-    ///         AUTO_HARVEST is the one in-protocol case -- absorb it on their
-    ///         own side instead. See FeeCollectorHarvestQueue.
-    function test_minClaimAmount_appliesToEveryCallerIncludingFeeCollector() public {
-        params.setMinClaimAmount(100e6);
-
-        usdc._mint(feeCollector, 1_000e6);
-        vm.startPrank(feeCollector);
-        usdc.approve(address(vault), type(uint256).max);
-        vault.deposit(1_000e6, feeCollector);
-
-        vm.expectRevert(EpochedQueueModule.ClaimTooSmall.selector);
-        IQueueModule(address(vault)).requestEpochWithdrawal(50e6);
-        vm.stopPrank();
-
-        assertEq(
-            IQueueModule(address(vault)).outstandingClaimCount(), 0,
-            "no claim reaches the queue below the floor, whoever asks"
-        );
-        assertEq(
-            IQueueModule(address(vault)).totalEscrowedShares(), 0,
-            "and nothing was escrowed on the way to the revert"
-        );
-    }
 
     /// @notice A fundEpoch that REVERTS must still register as a stall. The
     ///         accounting used to sit inside the success branch, so a target
@@ -472,8 +431,15 @@ contract Hardening_MissingTests is Test {
         vm.warp(block.timestamp + 7 days + 1);
         IQueueModule(address(vault)).closeCurrentEpoch();
 
+        // Move the cash into the (mock) warm bucket: it leaves hot but stays in grossAssets, so the
+        // vault is solvent and the epoch is unfundable only for lack of liquidity.
         vm.prank(address(vault));
         usdc.transfer(makeAddr("elsewhere"), 8_000_000e6);
+        {
+            MockBufferManagerForTests bm_ = MockBufferManagerForTests(address(vault.bufferManager()));
+            (uint256 nav_,,) = bm_.warmNavState();
+            bm_.setWarmNav(nav_ + 8_000_000e6, uint40(block.timestamp), true);
+        }
 
         // Give the vault a genuinely pending CRYSTALLIZE, so cycle 2 has real
         // lower-priority work to fall through to.

@@ -13,10 +13,7 @@ interface IQueueModule {
         external
         returns (uint256 epochId, uint256 claimId);
 
-    /// @notice Cancel a pending claim in an OPEN epoch and return shares to the caller
-    function cancelEpochWithdrawal(uint256 epochId, uint256 claimId) external;
-
-    /// @notice Close the currently open epoch, locking PPS for all claims submitted to it
+    /// @notice Close the currently open epoch's settlement bucket (sets no price)
     function closeCurrentEpoch() external;
 
     /// @notice Pull liquidity for a CLOSED epoch, transitioning it to FUNDED once fully covered
@@ -38,6 +35,15 @@ interface IQueueModule {
     /// @notice Advance the oldest-unfunded epoch cursor past any leading FUNDED epochs
     function syncOldestUnfundedEpoch() external;
 
+    /// @notice Emit InsolvencyEntered / InsolvencyExited if the derived state changed
+    function syncInsolvencyState() external;
+
+    /// @notice Roll the instant-withdrawal cap epoch if due and (re)snapshot capBaseSnapshot
+    ///         for it. Permissionless -- lets a keeper checkpoint right at the cap-epoch
+    ///         boundary instead of the snapshot being taken lazily by whichever instant
+    ///         withdrawal happens to be first after rollover.
+    function rollCapEpochIfNeeded() external;
+
     /// @notice End epoch and crystallize performance fee
     /// @dev Calls performance fee crystallization and updates NAV smoothing
     function endEpochCrystallize() external;
@@ -57,15 +63,17 @@ interface IQueueModule {
 
     function nextClaimIdForEpoch(uint256 epochId) external view returns (uint256);
 
-    function totalEscrowedShares() external view returns (uint256);
+    /// @notice Σ nominal assetsOwed over all unclaimed claims (native CoreVault view,
+    ///         listed here for convenience: see ICoreVault.totalOwed())
+    function totalOwed() external view returns (uint256);
 
-    /// @notice Assets earmarked for FUNDED-but-unclaimed claims across all epochs
+    /// @notice Liquidity earmarked for FUNDED-but-unclaimed claims across all epochs
+    ///         (NOT subtracted from NAV: see ICoreVault.totalOwed())
     function reservedForClaims() external view returns (uint256);
 
-    /// @notice Locked-pps liability for CLOSED-but-not-yet-FUNDED epochs
-    function closedPendingAssets() external view returns (uint256);
-
-    /// @notice Total unclaimed claims across all epochs -- dynamic-cap "queue depth" signal
+    /// @notice Total unclaimed claims across all epochs. No longer the instant-cap "queue depth"
+    ///         signal (standard queue depth has zero effect on the instant bucket); still the
+    ///         FixedMaturityModule Matured->Closed gate (== 0 required).
     function outstandingClaimCount() external view returns (uint256);
 
     /// @notice Oldest epoch that is CLOSED but not yet FUNDED

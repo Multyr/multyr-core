@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { Test } from "forge-std/Test.sol";
-import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { CoreHarness } from "../../helpers/CoreHarness.sol";
-import { ERC20Mock } from "../../../src/mocks/ERC20Mock.sol";
-import { MockParamsProvider } from "../../helpers/MockParamsProvider.sol";
-import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTests.sol";
-import { ExitEngineLib } from "../../../src/core/libraries/ExitEngineLib.sol";
+import {Test} from "forge-std/Test.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {CoreHarness} from "../../helpers/CoreHarness.sol";
+import {ERC20Mock} from "../../../src/mocks/ERC20Mock.sol";
+import {MockParamsProvider} from "../../helpers/MockParamsProvider.sol";
+import {MockBufferManagerForTests} from "../../helpers/MockBufferManagerForTests.sol";
+import {ExitEngineLib} from "../../../src/core/libraries/ExitEngineLib.sol";
 
 interface IQueueModule {
+    function rollCapEpochIfNeeded() external;
     function requestInstantWithdrawal(uint256 shares)
         external
         returns (bool settledImmediately, uint256 epochId, uint256 claimId);
@@ -25,7 +26,7 @@ interface IQueueModule {
     function canCloseCurrentEpoch() external view returns (bool);
     function currentEpochClaimCount() external view returns (uint256);
     function outstandingClaimCount() external view returns (uint256);
-    function totalEscrowedShares() external view returns (uint256);
+    function totalOwed() external view returns (uint256);
 }
 
 interface IForceWithdrawAll {
@@ -68,12 +69,7 @@ contract ExitEngine_ForkSuite is Test {
         params.setCapPerEpochBps(1000); // 10% per epoch
 
         vault = new CoreHarness(
-            IERC20Metadata(address(usdc)),
-            "Vault",
-            "vUSDC",
-            owner,
-            feeCollector,
-            address(params)
+            IERC20Metadata(address(usdc)), "Vault", "vUSDC", owner, feeCollector, address(params)
         );
 
         mockBM = new MockBufferManagerForTests(address(vault));
@@ -110,6 +106,9 @@ contract ExitEngine_ForkSuite is Test {
         vault.deposit(500_000e6, user3);
         vm.stopPrank();
 
+        // Begin the test cap epoch with the complete fixture TVL.
+        vm.warp(block.timestamp + 31 days);
+        IQueueModule(address(vault)).rollCapEpochIfNeeded();
         // Total: 2M USDC, 2M shares (1:1 PPS)
     }
 
@@ -152,20 +151,21 @@ contract ExitEngine_ForkSuite is Test {
 
     function test_fork2_queuedClaim_keeperSettles_feeTransfer() public {
         uint256 supplyBefore = vault.totalSupply();
+        uint256 feeCollectorSharesBefore = vault.balanceOf(feeCollector);
 
         // User queues a claim (not immediate)
         vm.prank(user1);
         (uint256 epochId, uint256 claimId) =
             IQueueModule(address(vault)).requestEpochWithdrawal(200_000e6);
 
-        // Shares moved to escrow
-        assertEq(IQueueModule(address(vault)).totalEscrowedShares(), 200_000e6, "pending shares");
+        // Priced at request: the (post-fee) amount owed is now a fixed liability
+        assertApproxEqRel(
+            IQueueModule(address(vault)).totalOwed(), 200_000e6, 0.01e18, "amount owed"
+        );
         assertEq(IQueueModule(address(vault)).outstandingClaimCount(), 1, "queue has 1 claim");
 
-        // Supply unchanged (shares in escrow, not burned yet)
-        assertEq(vault.totalSupply(), supplyBefore, "supply unchanged during queue");
-
-        uint256 feeCollectorSharesBefore = vault.balanceOf(feeCollector);
+        // Economic exit: the net shares were burned at request
+        assertLt(vault.totalSupply(), supplyBefore, "supply decreased at request");
 
         // Keeper settles: close + fund the epoch, then the user self-claims
         vm.warp(block.timestamp + 7 days + 1);
@@ -188,7 +188,7 @@ contract ExitEngine_ForkSuite is Test {
         assertLe(supplyDrop, 200_000e6, "supply drop <= claimed shares");
 
         // Queue cleared
-        assertEq(IQueueModule(address(vault)).totalEscrowedShares(), 0, "queue empty");
+        assertEq(IQueueModule(address(vault)).totalOwed(), 0, "queue empty");
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -202,10 +202,10 @@ contract ExitEngine_ForkSuite is Test {
         IQueueModule(address(vault)).requestInstantWithdrawal(150_000e6);
 
         // Claim another 100K - should queue (total 250K > 200K cap)
-        uint256 pendingBefore = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pendingBefore = IQueueModule(address(vault)).totalOwed();
         vm.prank(user2);
         IQueueModule(address(vault)).requestInstantWithdrawal(100_000e6);
-        uint256 pendingAfter = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pendingAfter = IQueueModule(address(vault)).totalOwed();
 
         // Should have been queued (cap exhausted)
         assertGt(pendingAfter, pendingBefore, "second claim queued due to cap");
@@ -234,12 +234,12 @@ contract ExitEngine_ForkSuite is Test {
 
         // Next instant claim should queue (cap nearly exhausted)
         uint256 sharesBefore = vault.balanceOf(user2);
-        uint256 pendingBefore = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pendingBefore = IQueueModule(address(vault)).totalOwed();
 
         vm.prank(user2);
         IQueueModule(address(vault)).requestInstantWithdrawal(50_000e6);
 
-        uint256 pendingAfter = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pendingAfter = IQueueModule(address(vault)).totalOwed();
 
         // Shares moved to escrow (queued, not settled)
         assertGt(pendingAfter, pendingBefore, "claim queued when cap exhausted");
@@ -262,7 +262,7 @@ contract ExitEngine_ForkSuite is Test {
         vm.prank(user2);
         IQueueModule(address(vault)).requestInstantWithdrawal(50_000e6);
         // If this queued, cap is exhausted - verify:
-        assertGt(IQueueModule(address(vault)).totalEscrowedShares(), 0, "cap exhausted, claims queuing");
+        assertGt(IQueueModule(address(vault)).totalOwed(), 0, "cap exhausted, claims queuing");
 
         // forceWithdrawAll should still work (bypasses cap)
         uint256 user3SharesBefore = vault.balanceOf(user3);
@@ -295,10 +295,10 @@ contract ExitEngine_ForkSuite is Test {
         IQueueModule(address(vault)).requestInstantWithdrawal(80_000e6);
 
         // User3 claims 80K - should queue (cumulative 240K > 200K cap)
-        uint256 pendingBefore = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pendingBefore = IQueueModule(address(vault)).totalOwed();
         vm.prank(user3);
         IQueueModule(address(vault)).requestInstantWithdrawal(80_000e6);
-        uint256 pendingAfter = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pendingAfter = IQueueModule(address(vault)).totalOwed();
 
         assertGt(pendingAfter, pendingBefore, "user3 claim queued - cap exhausted by multi-user");
     }
@@ -323,8 +323,8 @@ contract ExitEngine_ForkSuite is Test {
             IQueueModule(address(vault)).requestEpochWithdrawal(30_000e6);
 
         uint256 supplyAfterQueue = vault.totalSupply();
-        // During queue, shares are in escrow (still counted in supply)
-        assertEq(supplyAfterQueue, supplyAfterInstant, "supply unchanged during queue escrow");
+        // The queued exit burns its net shares at request too (no escrow any more)
+        assertLt(supplyAfterQueue, supplyAfterInstant, "supply decreased at request");
 
         // Settle: close + fund + self-claim
         vm.warp(block.timestamp + 7 days + 1);
@@ -333,7 +333,9 @@ contract ExitEngine_ForkSuite is Test {
         vm.prank(user2);
         IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
         uint256 supplyAfterSettle = vault.totalSupply();
-        assertLt(supplyAfterSettle, supplyAfterQueue, "supply decreased after settlement");
+        assertEq(
+            supplyAfterSettle, supplyAfterQueue, "settlement burns nothing: shares went at request"
+        );
 
         // Force withdraw - supply must decrease further
         vm.prank(user3);
@@ -386,10 +388,10 @@ contract ExitEngine_ForkSuite is Test {
         vm.warp(block.timestamp + 7 days);
 
         // Large claim should exceed remaining cap and queue
-        uint256 pendingBefore = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pendingBefore = IQueueModule(address(vault)).totalOwed();
         vm.prank(user3);
         IQueueModule(address(vault)).requestInstantWithdrawal(100_000e6);
-        uint256 pendingAfter = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pendingAfter = IQueueModule(address(vault)).totalOwed();
         assertGt(pendingAfter, pendingBefore, "claim queued - 30-day epoch not yet rolled");
 
         // After remaining 23+ days - epoch rolls

@@ -23,13 +23,13 @@ library SelectorLib {
     // SELECTOR COUNTS (for validation)
     // ═══════════════════════════════════════════════════════════════════════════════
     // "Queue module" = EpochedQueueModule (the sole queue-settlement mechanism).
-    uint256 internal constant QUEUE_MODULE_SELECTORS = 9; // +1: syncOldestUnfundedEpoch
-    uint256 internal constant QUEUE_MODULE_VIEW_SELECTORS = 12; // +1: reservedForClaims, +1: closedPendingAssets
+    uint256 internal constant QUEUE_MODULE_SELECTORS = 10; // -1: cancelEpochWithdrawal (removed), +1: syncInsolvencyState, +1: rollCapEpochIfNeeded
+    uint256 internal constant QUEUE_MODULE_VIEW_SELECTORS = 10; // reservedForClaims; closedPendingAssets + totalEscrowedShares removed (economic-exit model)
     uint256 internal constant ADMIN_MODULE_OWNER_SELECTORS = 35; // +1: setRewardsTreasury
     uint256 internal constant ADMIN_MODULE_VIEW_SELECTORS = 15; // +1: getForceExitPenalty, +1: isPerfInitialized
     uint256 internal constant ERC4626_MODULE_SELECTORS = 11; // +1: forceWithdraw, +1: forceWithdrawAll
     uint256 internal constant LIQUIDITY_OPS_MODULE_SELECTORS = 7; // canDeploy, deployToStrategies, deployToStrategiesWithPlan, realizeForQueue, realizeForReserveAndOps, canRebalanceStrategies, rebalanceStrategies
-    uint256 internal constant FIXED_MATURITY_MODULE_SELECTORS = 23; // 13 plan selectors + autoCloseFunding + 9 previously-unrouted views
+    uint256 internal constant FIXED_MATURITY_MODULE_SELECTORS = 23; // 13 plan selectors + autoCloseFunding + 9 view selectors
 
     uint256 internal constant TOTAL_SELECTORS = QUEUE_MODULE_SELECTORS + QUEUE_MODULE_VIEW_SELECTORS
         + ADMIN_MODULE_OWNER_SELECTORS + ADMIN_MODULE_VIEW_SELECTORS + ERC4626_MODULE_SELECTORS
@@ -41,14 +41,15 @@ library SelectorLib {
     function getQueueModuleSelectors() internal pure returns (bytes4[] memory selectors) {
         selectors = new bytes4[](QUEUE_MODULE_SELECTORS);
         selectors[0] = EpochedQueueModule.requestEpochWithdrawal.selector;
-        selectors[1] = EpochedQueueModule.cancelEpochWithdrawal.selector;
-        selectors[2] = EpochedQueueModule.closeCurrentEpoch.selector;
-        selectors[3] = EpochedQueueModule.fundEpoch.selector;
-        selectors[4] = EpochedQueueModule.claimEpochAssets.selector;
-        selectors[5] = EpochedQueueModule.batchClaimEpochAssets.selector;
-        selectors[6] = EpochedQueueModule.requestInstantWithdrawal.selector;
-        selectors[7] = EpochedQueueModule.endEpochCrystallize.selector;
-        selectors[8] = EpochedQueueModule.syncOldestUnfundedEpoch.selector;
+        selectors[1] = EpochedQueueModule.closeCurrentEpoch.selector;
+        selectors[2] = EpochedQueueModule.fundEpoch.selector;
+        selectors[3] = EpochedQueueModule.claimEpochAssets.selector;
+        selectors[4] = EpochedQueueModule.batchClaimEpochAssets.selector;
+        selectors[5] = EpochedQueueModule.requestInstantWithdrawal.selector;
+        selectors[6] = EpochedQueueModule.endEpochCrystallize.selector;
+        selectors[7] = EpochedQueueModule.syncOldestUnfundedEpoch.selector;
+        selectors[8] = EpochedQueueModule.syncInsolvencyState.selector;
+        selectors[9] = EpochedQueueModule.rollCapEpochIfNeeded.selector;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -60,14 +61,12 @@ library SelectorLib {
         selectors[1] = EpochedQueueModule.epochData.selector;
         selectors[2] = EpochedQueueModule.epochClaim.selector;
         selectors[3] = EpochedQueueModule.nextClaimIdForEpoch.selector;
-        selectors[4] = EpochedQueueModule.totalEscrowedShares.selector;
-        selectors[5] = EpochedQueueModule.outstandingClaimCount.selector;
-        selectors[6] = EpochedQueueModule.oldestUnfundedEpochId.selector;
-        selectors[7] = EpochedQueueModule.canCloseCurrentEpoch.selector;
-        selectors[8] = EpochedQueueModule.currentEpochClaimCount.selector;
-        selectors[9] = EpochedQueueModule.epochDeficit.selector;
-        selectors[10] = EpochedQueueModule.reservedForClaims.selector;
-        selectors[11] = EpochedQueueModule.closedPendingAssets.selector;
+        selectors[4] = EpochedQueueModule.outstandingClaimCount.selector;
+        selectors[5] = EpochedQueueModule.oldestUnfundedEpochId.selector;
+        selectors[6] = EpochedQueueModule.canCloseCurrentEpoch.selector;
+        selectors[7] = EpochedQueueModule.currentEpochClaimCount.selector;
+        selectors[8] = EpochedQueueModule.epochDeficit.selector;
+        selectors[9] = EpochedQueueModule.reservedForClaims.selector;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════

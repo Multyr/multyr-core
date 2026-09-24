@@ -174,7 +174,7 @@ contract LiquidityOpsModule {
             if (targetBps > 0) {
                 address assetAddr = ICoreVault(address(this)).asset();
                 uint256 currentCash = IERC20(assetAddr).balanceOf(address(this));
-                uint256 tvl = ICoreVault(address(this)).totalAssets();
+                uint256 tvl = ICoreVault(address(this)).grossAssets(); // class A
                 uint256 target = Percentage.mulBpsDown(tvl, targetBps);
                 if (currentCash < target) {
                     uint256 gap = target - currentCash;
@@ -372,12 +372,8 @@ contract LiquidityOpsModule {
                 IStrategyRouter.Allocation[] memory deposits = new IStrategyRouter.Allocation[](depositCount);
                 uint256 dk = 0;
                 uint256 remaining = totalWithdrawn;
-                // Hoisted out of the loop below: asset() is invariant across
-                // iterations, so this replaces what was previously up to
-                // `depositCount` identical self-calls with exactly one. Same
-                // tolerant-failure semantics as before: if the query fails,
-                // assetAddr stays address(0) and every iteration's transfer is
-                // skipped, matching the old per-iteration "ok && length==32" gate.
+                // Resolve the invariant asset address once. If the query fails,
+                // skip transfers that require the address.
                 (bool assetOk, bytes memory assetData) =
                     address(this).staticcall(abi.encodeWithSignature("asset()"));
                 address assetAddr =
@@ -442,12 +438,11 @@ contract LiquidityOpsModule {
     function _buildQueueSafetyContext(uint256 tvl)
         internal view returns (AllocationTypes.QueueSafetyContext memory qs)
     {
-        // escrowedShares → queueReservedUsd approximation (shares currently sitting
-        // in escrow across all epochs, open + closed + funded-unclaimed)
+        // totalOwed → queueReservedUsd: the exact fixed liability to exited users
+        // across all epochs (open + closed + funded-unclaimed), in asset units.
         {
-            uint256 pending = EpochQueueStorage.layout().escrowedShares;
-            // Approx: escrowedShares * pps ≈ reserved USD. We use a crude lower bound.
-            qs.queueReservedUsd = pending; // caller may refine; this is fail-safe upper estimate in shares
+            uint256 pending = ICoreVault(address(this)).totalOwed();
+            qs.queueReservedUsd = pending;
             if (tvl > 0) {
                 uint256 pressure = (pending * 10_000) / (tvl + 1);
                 qs.queuePressureBps = pressure > type(uint16).max ? type(uint16).max : uint16(pressure);

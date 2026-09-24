@@ -28,7 +28,7 @@ interface IQueueVault {
     function canCloseCurrentEpoch() external view returns (bool);
     function currentEpochClaimCount() external view returns (uint256);
     function outstandingClaimCount() external view returns (uint256);
-    function totalEscrowedShares() external view returns (uint256);
+    function totalOwed() external view returns (uint256);
     function oldestUnfundedEpochId() external view returns (uint256);
 }
 
@@ -126,14 +126,6 @@ contract CoreEngine_Integration_Hardening is Test {
         }
     }
 
-    function _cancelClaim(address user, uint256 claimId) internal {
-        require(claimId != type(uint256).max, "test: claim already settled inline");
-        QueuedClaim storage c = _claims[claimId];
-        vm.prank(user);
-        _q().cancelEpochWithdrawal(c.epochId, c.claimId);
-        c.cancelled = true;
-    }
-
     /// @dev Closes + funds the current epoch (warping forward if not yet
     ///      mature), then self-claims (pull-based) up to `maxClaims` of the
     ///      oldest not-yet-settled/cancelled tracked claims -- mirroring the
@@ -178,17 +170,20 @@ contract CoreEngine_Integration_Hardening is Test {
     }
 
     function _pendingShares() internal view returns (uint256) {
-        return _q().totalEscrowedShares();
+        return _q().totalOwed();
     }
 
+    /// @dev PHYSICAL portfolio NAV (class A, grossAssets): what "capital conserved" means.
+    ///      Exits no longer move it at request -- they move totalOwed and the share supply.
+    ///      The shareholder NAV (net of totalOwed) is vault.totalAssets().
     function _totalAssets() internal view returns (uint256) {
-        return vault.totalAssets();
+        return vault.grossAssets();
     }
 
     function _pps() internal view returns (uint256) {
         uint256 ts = vault.totalSupply();
         if (ts == 0) return 1e18;
-        return (_totalAssets() * 1e18) / ts;
+        return (vault.totalAssets() * 1e18) / ts;
     }
 
     // ── helpers: strategy wiring ─────────────────────────────────────────────
@@ -221,14 +216,13 @@ contract CoreEngine_Integration_Hardening is Test {
         uint256 claimShares = shares / 2;
         _requestClaim(user, claimShares, false);
 
-        uint256 pendingAfter = _q().totalEscrowedShares();
-        assertEq(pendingAfter, claimShares, "pendingShares tracked");
+        uint256 pendingAfter = _q().totalOwed();
+        assertApproxEqRel(pendingAfter, claimShares, 0.01e18, "liability tracked (net of the withdraw fee)");
 
         // The pending shares represent ~50% of assets — they must NOT be deployed
         // (deployable idle = idle - reserved_for_pending)
-        uint256 totalS = vault.totalSupply();
-        uint256 totalA = _totalAssets();
-        uint256 reservedAssets = totalS > 0 ? (claimShares * totalA) / totalS : 0;
+        // (the exit is priced and the shares burned at request: the liability IS totalOwed)
+        uint256 reservedAssets = pendingAfter;
         uint256 deployableMax = idleBefore > reservedAssets ? idleBefore - reservedAssets : 0;
 
         // Verify: whatever stays in vault idle after a hypothetical deploy
@@ -271,8 +265,8 @@ contract CoreEngine_Integration_Hardening is Test {
 
         // pendingShares stays non-zero: settle is conservative, claim skipped due to insufficient hot
         // This is the correct behavior: never drain strategy to service queue (idle must be pre-ensured)
-        assertGt(_q().totalEscrowedShares(), 0, "claim skipped: hot < gross, pending shares stay");
-        assertEq(_q().totalEscrowedShares(), shares, "full claim still pending");
+        assertGt(_q().totalOwed(), 0, "claim skipped: hot < gross, pending shares stay");
+        assertEq(_q().totalOwed(), shares, "full claim still pending");
     }
 
     // C4 — Queue pressure change alters guard outcome
@@ -289,15 +283,15 @@ contract CoreEngine_Integration_Hardening is Test {
         uint256 totalA = _totalAssets();
 
         // Measure pressure with zero queue
-        uint256 pendingBefore = _q().totalEscrowedShares();
+        uint256 pendingBefore = _q().totalOwed();
         assertEq(pendingBefore, 0, "no pending initially");
 
         // Both users queue claims → pressure rises
         _requestClaim(userA, sharesA, false);
         _requestClaim(userB, sharesB, false);
 
-        uint256 pendingAfter = _q().totalEscrowedShares();
-        assertEq(pendingAfter, sharesA + sharesB, "both shares pending");
+        uint256 pendingAfter = _q().totalOwed();
+        assertApproxEqRel(pendingAfter, sharesA + sharesB, 0.01e18, "both exits owed (net of the withdraw fee)");
 
         // queuePressureBps = pendingShares * 10000 / (tvl + 1)
         uint256 expectedPressure = (pendingAfter * 10_000) / (totalA + 1);
@@ -341,7 +335,7 @@ contract CoreEngine_Integration_Hardening is Test {
         _settle(10);
 
         // After settle: pendingShares for settled claims must be 0
-        uint256 pendingAfter = _q().totalEscrowedShares();
+        uint256 pendingAfter = _q().totalOwed();
         assertEq(pendingAfter, 0, "all queued claims settled");
 
         // User 4 still holds shares — totalSupply reduced by settled shares
@@ -404,13 +398,10 @@ contract CoreEngine_Integration_Hardening is Test {
         // PPS must not change on request (shares still outstanding, assets unchanged)
         assertEq(ppsAfterRequest, ppsBefore, "PPS unchanged after requestClaim");
 
-        // Cancel restores state
-        _cancelClaim(userA, claimId);
+        // Price is fixed at request and the exit moves nothing for remaining holders
+        claimId;
 
-        uint256 ppsAfterCancel = _pps();
-        assertEq(ppsAfterCancel, ppsBefore, "PPS unchanged after cancel");
-
-        // No arbitrage: depositing right after cancel does not exploit any PPS jump
+        // No arbitrage: depositing right after the request does not exploit any PPS jump
         address userC = address(0xC4);
         _deposit(userC, 100_000e6);
         uint256 ppsAfterDeposit = _pps();
@@ -587,7 +578,7 @@ contract CoreEngine_Integration_Hardening is Test {
         _requestClaim(userA, sharesA, false);
         _requestClaim(userB, sharesB, false);
 
-        uint256 pendingBefore = _q().totalEscrowedShares();
+        uint256 pendingBefore = _q().totalOwed();
         assertGt(pendingBefore, 0, "pending shares exist");
 
         uint256 balABefore = IERC20(USDC).balanceOf(userA);
@@ -610,12 +601,8 @@ contract CoreEngine_Integration_Hardening is Test {
         uint256 idleAfter = IERC20(USDC).balanceOf(address(vault));
         assertGe(idleAfter + totalPaid, idleAvailable - 1, "idle conservation");
 
-        // pendingShares still > 0 if not fully served
-        if (totalPaid < (sharesA + sharesB) * amt / vault.totalSupply() + totalPaid) {
-            // some may remain pending
-            assertGe(_q().totalEscrowedShares() + (paidA > 0 ? sharesA : 0) + (paidB > 0 ? sharesB : 0),
-                pendingBefore * 9 / 10, "pending reduced by served amount");
-        }
+        // Whatever was not served is still a fixed liability of the vault (nothing is forgiven)
+        assertGe(_q().totalOwed() + totalPaid, pendingBefore * 9 / 10, "pending reduced only by what was paid");
     }
 
     // E3 — Strategy failure during liquidity sourcing keeps core safe
@@ -642,11 +629,11 @@ contract CoreEngine_Integration_Hardening is Test {
 
         // Settle — failing strategy should not corrupt state
         // (settle uses idle; if stratFailing is not in path, no issue)
-        uint256 pendingBefore = _q().totalEscrowedShares();
+        uint256 pendingBefore = _q().totalOwed();
         _settle(10);
 
         // Queue state must be coherent (no overflow, no ghost)
-        uint256 pendingAfter = _q().totalEscrowedShares();
+        uint256 pendingAfter = _q().totalOwed();
         assertLe(pendingAfter, pendingBefore, "pendingShares only decreases on settle");
 
         // totalAssets must be >= 0 and coherent
@@ -681,65 +668,13 @@ contract CoreEngine_Integration_Hardening is Test {
         _requestClaim(user, shares, false);
         _settle(10);
 
-        assertEq(_q().totalEscrowedShares(), 0, "exit processed despite deposits paused");
+        assertEq(_q().totalOwed(), 0, "exit processed despite deposits paused");
         assertGt(IERC20(USDC).balanceOf(user), 0, "user received funds on exit");
     }
 
     // ═══════════════════════════════════════════════════════════════════════
     // BLOCCO G — Ghost state / queue compaction
     // ═══════════════════════════════════════════════════════════════════════
-
-    // G1 — Cancelled claims do not leave settlement-blocking ghosts
-    function test_G1_cancelled_claims_do_not_leave_settlement_blocking_ghosts() public {
-        address userA = address(0x6601);
-        address userB = address(0x6602);
-        uint256 amt = 50_000e6;
-
-        uint256 sharesA = _deposit(userA, amt);
-        uint256 sharesB = _deposit(userB, amt);
-
-        // userA queues, then cancels
-        uint256 claimId = _requestClaim(userA, sharesA, false);
-        _cancelClaim(userA, claimId);
-
-        assertEq(_q().totalEscrowedShares(), 0, "pendingShares = 0 after cancel");
-
-        // userB queues and settles
-        _requestClaim(userB, sharesB, false);
-
-        uint256 balBBefore = IERC20(USDC).balanceOf(userB);
-        _settle(10);
-        uint256 balBAfter = IERC20(USDC).balanceOf(userB);
-
-        // userB must have received their assets — cancel of A did not block queue
-        assertGt(balBAfter - balBBefore, 0, "userB settle succeeded despite A cancel ghost");
-        assertEq(_q().totalEscrowedShares(), 0, "queue fully cleared");
-    }
-
-    // G2 — Settle with only ghost (cancelled) entries does not corrupt queue metrics
-    function test_G2_settle_with_only_ghost_entries_does_not_corrupt_queue() public {
-        address user = address(0x6603);
-        uint256 amt = 100_000e6;
-        uint256 shares = _deposit(user, amt);
-
-        // Request then cancel — leaves ghost entry
-        uint256 claimId = _requestClaim(user, shares / 2, false);
-        _cancelClaim(user, claimId);
-
-        uint256 pendingBefore = _q().totalEscrowedShares();
-        uint256 qLenBefore = _q().outstandingClaimCount();
-
-        // Settle with only ghost entries
-        _settle(10);
-
-        uint256 pendingAfter = _q().totalEscrowedShares();
-        uint256 taAfter = _totalAssets();
-
-        // Metrics must not be corrupted
-        assertEq(pendingAfter, pendingBefore, "pendingShares not corrupted by ghost-only settle");
-        assertEq(taAfter, amt, "totalAssets not corrupted by ghost-only settle");
-        assertGe(vault.balanceOf(user), shares / 2, "user still holds remaining shares");
-    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // CROSS-CYCLE INVARIANT CHECKS
@@ -789,7 +724,7 @@ contract CoreEngine_Integration_Hardening is Test {
         // Queue half the shares
         _requestClaim(user, shares / 2, false);
 
-        uint256 pending = _q().totalEscrowedShares();
+        uint256 pending = _q().totalOwed();
         uint256 ts = vault.totalSupply();
         uint256 ta = _totalAssets();
 
@@ -820,9 +755,9 @@ contract CoreEngine_Integration_Hardening is Test {
         uint256 pps1 = _pps();
         assertEq(pps1, pps0, "I6: PPS unchanged by requestClaim");
 
-        _cancelClaim(userA, claimId);
+        claimId;
         uint256 pps2 = _pps();
-        assertEq(pps2, pps0, "I6: PPS unchanged by cancel");
+        assertEq(pps2, pps0, "I6: PPS unchanged after request");
 
         address userC = address(0x9907);
         _deposit(userC, amt);
@@ -952,7 +887,7 @@ contract CoreEngine_Integration_Hardening is Test {
         // User claims full amount — hot(5k) < gross(100k) → skipped
         _requestClaim(user, shares, false);
         _settle(10);
-        assertGt(_q().totalEscrowedShares(), 0, "E4: claim skipped due to shortfall");
+        assertGt(_q().totalOwed(), 0, "E4: claim skipped due to shortfall");
 
         // Strategy returns funds (simulate rebalance/rebalance)
         uint256 stratBal = IERC20(USDC).balanceOf(address(stratA));
@@ -961,7 +896,7 @@ contract CoreEngine_Integration_Hardening is Test {
 
         // Now idle covers the claim — settle again
         _settle(10);
-        assertEq(_q().totalEscrowedShares(), 0, "E4: claim settled after buffer refill");
+        assertEq(_q().totalOwed(), 0, "E4: claim settled after buffer refill");
 
         uint256 net = IERC20(USDC).balanceOf(user);
         assertGt(net, 0, "E4: user received assets after refill settlement");
@@ -1029,7 +964,7 @@ contract CoreEngine_Integration_Hardening is Test {
         // Queue claim during pause — requestClaim is a queue operation, not immediate withdrawal
         uint256 userShares = vault.balanceOf(user);
         _requestClaim(user, userShares, false);
-        assertGt(_q().totalEscrowedShares(), 0, "F2: claim queued while withdrawals paused");
+        assertGt(_q().totalOwed(), 0, "F2: claim queued while withdrawals paused");
 
         // Settlement is the withdrawal — should be blocked or skipped
         // (pauseWithdrawalsOnly blocks the settle path)

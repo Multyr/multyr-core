@@ -129,10 +129,9 @@ contract SelectorRegistry {
         if (selector == AdminModule.isPerfInitialized.selector) return ROLE_PUBLIC;
 
         // ─────────────────────────────────────────────────────────────────────────
-        // EPOCHEDQUEUEMODULE WRITE SELECTORS (9 total) - MUST BE ROLE_PUBLIC
+        // EPOCHEDQUEUEMODULE WRITE SELECTORS (10 total) - MUST BE ROLE_PUBLIC
         // ─────────────────────────────────────────────────────────────────────────
         if (selector == EpochedQueueModule.requestEpochWithdrawal.selector) return ROLE_PUBLIC;
-        if (selector == EpochedQueueModule.cancelEpochWithdrawal.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.closeCurrentEpoch.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.fundEpoch.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.claimEpochAssets.selector) return ROLE_PUBLIC;
@@ -140,6 +139,8 @@ contract SelectorRegistry {
         if (selector == EpochedQueueModule.requestInstantWithdrawal.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.endEpochCrystallize.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.syncOldestUnfundedEpoch.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.syncInsolvencyState.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.rollCapEpochIfNeeded.selector) return ROLE_PUBLIC;
 
         // ─────────────────────────────────────────────────────────────────────────
         // EPOCHEDQUEUEMODULE VIEW SELECTORS (10 total) - MUST BE ROLE_PUBLIC
@@ -148,14 +149,12 @@ contract SelectorRegistry {
         if (selector == EpochedQueueModule.epochData.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.epochClaim.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.nextClaimIdForEpoch.selector) return ROLE_PUBLIC;
-        if (selector == EpochedQueueModule.totalEscrowedShares.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.outstandingClaimCount.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.oldestUnfundedEpochId.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.canCloseCurrentEpoch.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.currentEpochClaimCount.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.epochDeficit.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.reservedForClaims.selector) return ROLE_PUBLIC;
-        if (selector == EpochedQueueModule.closedPendingAssets.selector) return ROLE_PUBLIC;
 
         // ─────────────────────────────────────────────────────────────────────────
         // ERC4626MODULE SELECTORS (10 total) - MUST BE ROLE_PUBLIC

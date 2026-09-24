@@ -1,5 +1,12 @@
 # Multyr Core — Architecture
 
+> **Superseded in part — see [economic-exit.md](economic-exit.md).** This document describes the
+> escrow / `ppsAtClose` withdrawal model. Requests are now priced and their shares burned **at
+> request**; epochs are settlement buckets only; `cancelEpochWithdrawal`, `ppsAtClose`,
+> `escrowedShares` and `closedPendingAssets` are gone; `totalAssets()` is net of `totalOwed`.
+> Everything below about those topics is historical until this file is rewritten.
+
+
 > **Status**: draft | **Audit-scope**: multyr-core@pierdev
 > **Last reviewed by code**: commit `1595a279` on branch `pierdev` (date: 2026-05-15)
 > **Version**: 1.0.0-draft
@@ -780,7 +787,7 @@ All external calls made by the vault system and their safety properties:
 | `inc.onDeposit()` | `ERC4626Module._notifyIncentivesDeposit()` | `IIncentives` | ~50K | try/catch; non-blocking |
 | `eng.onDeposit/onExit()` | `ERC4626Module` | `IIncentivesEngine` | ~50K | try/catch; non-blocking |
 
-[^gas1]: `bm.refill()`/`bm.forceRefill()` (and `bm.rebalance()`'s refill branch, and `realizeForReserveAndOps()`) all share `_withdrawFromAdapters()`, which retries each configured adapter up to `MAX_ADAPTER_WITHDRAW_ATTEMPTS` (8) times on partial fills before moving to the next adapter — an adapter that rations funds per call (a per-call cap or rate limit) is retried rather than abandoned after a single under-filled attempt. Worst-case external-call count is `(legacy adapter + len(_warmAdapters)) × 8`, not the single call per adapter this estimate previously assumed. `_warmAdapters` has no enforced max length (owner-configured), so this scales with adapter count.
+[^gas1]: `bm.refill()`/`bm.forceRefill()` (and `bm.rebalance()`'s refill branch, and `realizeForReserveAndOps()`) all share `_withdrawFromAdapters()`, which retries each configured adapter up to `MAX_ADAPTER_WITHDRAW_ATTEMPTS` (8) times on partial fills before moving to the next adapter — an adapter that rations funds per call (a per-call cap or rate limit) is retried rather than abandoned after a single under-filled attempt. Worst-case external-call count is `(legacy adapter + len(_warmAdapters)) × 8`. `_warmAdapters` has no enforced max length (owner-configured), so this scales with adapter count.
 
 ---
 

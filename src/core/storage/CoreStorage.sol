@@ -20,6 +20,10 @@ library CoreStorage {
     uint64 internal constant MIN_EPOCH_DURATION = 1 days;
     uint64 internal constant MAX_EPOCH_DURATION = 30 days;
 
+    // Single source of truth for warm-NAV cache staleness, used by CoreVault.navStatus(),
+    // ERC4626Module and EpochedQueueModule.
+    uint256 internal constant MAX_WARM_NAV_AGE = 15 minutes;
+
     // Flag constants for _packedFlags
     uint256 internal constant FLAG_PAUSED = 1 << 0;
     uint256 internal constant FLAG_PAUSED_DEPOSITS = 1 << 1;
@@ -125,6 +129,10 @@ library CoreStorage {
         // Emergency Module Recovery gate (appended, set once, immutable) — the
         // sole authorized caller of recoverModuleGroup(). Review §7/§8.
         address recoveryGate;
+
+        // Instant cap base, snapshotted before asset/supply changes at cap rollover.
+        // Zero is backfilled on the next interaction with nonzero shareholder assets.
+        uint256 capBaseSnapshot;
     }
 
     function layout() internal pure returns (Layout storage l) {

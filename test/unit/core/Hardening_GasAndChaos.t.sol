@@ -1,22 +1,23 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { Test } from "forge-std/Test.sol";
-import { console2 } from "forge-std/console2.sol";
-import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import { CoreHarness } from "../../helpers/CoreHarness.sol";
-import { ERC20Mock } from "../../../src/mocks/ERC20Mock.sol";
-import { MockParamsProvider } from "../../helpers/MockParamsProvider.sol";
-import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTests.sol";
-import { StrategyMock } from "../../helpers/StrategyMock.sol";
-import { MockPriceOracleMiddleware } from "../../helpers/MockPriceOracleMiddleware.sol";
+import {Test} from "forge-std/Test.sol";
+import {console2} from "forge-std/console2.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {CoreHarness} from "../../helpers/CoreHarness.sol";
+import {ERC20Mock} from "../../../src/mocks/ERC20Mock.sol";
+import {MockParamsProvider} from "../../helpers/MockParamsProvider.sol";
+import {MockBufferManagerForTests} from "../../helpers/MockBufferManagerForTests.sol";
+import {StrategyMock} from "../../helpers/StrategyMock.sol";
+import {MockPriceOracleMiddleware} from "../../helpers/MockPriceOracleMiddleware.sol";
 
 interface IDeploy {
     function deployToStrategies(uint256 maxAmount) external;
 }
-import { EpochQueueStorage } from "../../../src/core/modules/EpochedQueueModule.sol";
+import {EpochQueueStorage} from "../../../src/core/modules/EpochedQueueModule.sol";
 
 interface IQueueModule {
+    function rollCapEpochIfNeeded() external;
     function requestInstantWithdrawal(uint256 shares)
         external
         returns (bool settledImmediately, uint256 epochId, uint256 claimId);
@@ -32,7 +33,7 @@ interface IQueueModule {
     function canCloseCurrentEpoch() external view returns (bool);
     function currentEpochClaimCount() external view returns (uint256);
     function outstandingClaimCount() external view returns (uint256);
-    function totalEscrowedShares() external view returns (uint256);
+    function totalOwed() external view returns (uint256);
     function endEpochCrystallize() external;
 }
 
@@ -57,9 +58,7 @@ contract Hardening_GasAndChaos is Test {
         params.setCapPerEpochBps(1000);
 
         vault = new CoreHarness(
-            IERC20Metadata(address(usdc)),
-            "Vault", "vUSDC",
-            owner, feeCollector, address(params)
+            IERC20Metadata(address(usdc)), "Vault", "vUSDC", owner, feeCollector, address(params)
         );
         MockBufferManagerForTests mockBM = new MockBufferManagerForTests(address(vault));
         vault.setBufferManagerUnsafe(address(mockBM));
@@ -158,7 +157,7 @@ contract Hardening_GasAndChaos is Test {
 
         vm.warp(block.timestamp + 7 days + 1);
         IQueueModule(address(vault)).closeCurrentEpoch();
-        uint256 owed = IQueueModule(address(vault)).epochData(epochId).totalNetAssets;
+        uint256 owed = IQueueModule(address(vault)).epochData(epochId).totalAssetsOwed;
 
         // Refresh the quote after the warp: the staleness window is an hour and
         // epochs are days long, so at fund time the oracle must have been
@@ -209,6 +208,9 @@ contract Hardening_GasAndChaos is Test {
 
         console2.log("TVL:", vault.totalAssets());
         assertEq(vault.totalAssets(), 1000e6, "TVL = 1000 USDC");
+
+        vm.warp(block.timestamp + 31 days);
+        IQueueModule(address(vault)).rollCapEpochIfNeeded();
 
         // Instant claim — small amount
         uint256 usdcBefore = usdc.balanceOf(user1);
@@ -336,29 +338,6 @@ contract Hardening_GasAndChaos is Test {
     // QUEUE CANCEL + RE-QUEUE STRESS (no zombie, no leak)
     // ═══════════════════════════════════════════════════════════════════════════
 
-    function test_queueCancelRequeue_noLeak() public {
-        address user = address(0xD100);
-        _fundAndDeposit(user, 10_000_000e6);
-
-        uint256 initialShares = vault.balanceOf(user);
-        uint256 initialSupply = vault.totalSupply();
-
-        // 50 cycles of queue → cancel → re-queue
-        for (uint256 i = 0; i < 50; i++) {
-            vm.prank(user);
-            (uint256 epochId, uint256 claimId) =
-                IQueueModule(address(vault)).requestEpochWithdrawal(100_000e6);
-
-            vm.prank(user);
-            IQueueModule(address(vault)).cancelEpochWithdrawal(epochId, claimId);
-        }
-
-        // No leak
-        assertEq(vault.balanceOf(user), initialShares, "no share leak after 50 cancel cycles");
-        assertEq(vault.totalSupply(), initialSupply, "no supply leak");
-        assertEq(IQueueModule(address(vault)).totalEscrowedShares(), 0, "no pending leak");
-    }
-
     // ═══════════════════════════════════════════════════════════════════════════
     // CAP BOUNDARY PRECISION
     // ═══════════════════════════════════════════════════════════════════════════
@@ -376,10 +355,10 @@ contract Hardening_GasAndChaos is Test {
         IQueueModule(address(vault)).requestInstantWithdrawal(999_000e6);
 
         // This should queue (over cap ~1.5M)
-        uint256 pendingBefore = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pendingBefore = IQueueModule(address(vault)).totalOwed();
         vm.prank(user);
         IQueueModule(address(vault)).requestInstantWithdrawal(600_000e6);
-        uint256 pendingAfter = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pendingAfter = IQueueModule(address(vault)).totalOwed();
 
         assertGt(pendingAfter, pendingBefore, "second claim queued at cap boundary");
     }

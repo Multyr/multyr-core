@@ -62,6 +62,7 @@ import { MockUSDC } from "../helpers/MockUSDC.sol";
 import { ERC4626Module } from "../../src/core/modules/ERC4626Module.sol";
 import { EpochedQueueModule } from "../../src/core/modules/EpochedQueueModule.sol";
 import { EpochQueueStorage } from "../../src/core/modules/EpochedQueueModule.sol";
+import { ICoreVault } from "../../src/interfaces/ICoreVault.sol";
 
 /// @dev Standalone IParamsProvider with the knobs these POCs need: lock period,
 ///      static withdrawal cap, dynamic cap, and queue-settlement epoch duration.
@@ -201,25 +202,30 @@ contract QueueEpochModule_WithdrawFlow_POC is Test {
     // own shares) reverted, and the whole requestInstantWithdrawal() call
     // reverted instead of gracefully queueing the claim as documented.
     function test_instantWithdrawalFallback_attributesClaimToRealUser() public {
-        params.setLockPeriod(1 days);
+        // Deposit lock is now a hard revert on BOTH exit paths, so it can no
+        // longer be used to force the fallback branch here -- an exhausted cap does the same
+        // deterministic job without touching lock semantics.
+        params.setCapPerEpochBps(1);
         uint256 shares = _deposit(user, 1_000_000e6);
 
-        // Still within the lock period -> _canInstant() must fail -> fallback.
+        // Cap exhausted -> instantOk is false -> fallback.
         vm.prank(user);
         (bool settledImmediately, uint256 epochId, uint256 claimId) =
             EpochedQueueModule(address(core)).requestInstantWithdrawal(shares);
 
-        assertFalse(settledImmediately, "FIX CONFIRMED: locked withdrawal falls back to queue instead of reverting");
+        assertFalse(settledImmediately, "FIX CONFIRMED: cap-exhausted withdrawal falls back to queue instead of reverting");
 
         EpochQueueStorage.EpochClaim memory claim =
             EpochedQueueModule(address(core)).epochClaim(epochId, claimId);
 
         assertEq(claim.user, user, "FIX CONFIRMED: claim is attributed to the real user, not the vault");
-        assertEq(claim.netShares + claim.feeShares, shares, "FIX CONFIRMED: full gross shares escrowed under the user's claim");
+        assertEq(claim.grossShares, shares, "FIX CONFIRMED: full gross shares recorded under the user's claim");
+        assertGt(claim.assetsOwed, 0, "the fixed liability was priced at request");
 
-        // Shares actually left the user's balance into vault escrow.
-        assertEq(core.balanceOf(user), 0, "user's shares moved into escrow");
-        assertEq(core.balanceOf(address(core)), shares, "escrow holds the user's gross shares");
+        // Economic exit at request: the user's shares are gone (net burned, fee to
+        // the FeeCollector); nothing sits in vault escrow any more.
+        assertEq(core.balanceOf(user), 0, "user's shares left at request");
+        assertEq(core.balanceOf(address(core)), 0, "no shares are escrowed in the vault");
     }
 
     // =========================================================================
@@ -250,7 +256,7 @@ contract QueueEpochModule_WithdrawFlow_POC is Test {
         EpochedQueueModule(address(core)).claimEpochAssets(epochId, claimId);
 
         assertEq(
-            EpochedQueueModule(address(core)).totalEscrowedShares(),
+            ICoreVault(address(core)).totalOwed(),
             0,
             "FIX CONFIRMED: escrowedShares returns to 0 once the only claim is fully settled"
         );
@@ -277,17 +283,17 @@ contract QueueEpochModule_WithdrawFlow_POC is Test {
         EpochedQueueModule(address(core)).closeCurrentEpoch();
         EpochedQueueModule(address(core)).fundEpoch(epochId);
 
-        uint256 escrowBeforeA = EpochedQueueModule(address(core)).totalEscrowedShares();
+        uint256 escrowBeforeA = ICoreVault(address(core)).totalOwed();
         vm.prank(user);
         EpochedQueueModule(address(core)).claimEpochAssets(epochId, claimIdA);
-        uint256 deltaA = escrowBeforeA - EpochedQueueModule(address(core)).totalEscrowedShares();
+        uint256 deltaA = escrowBeforeA - ICoreVault(address(core)).totalOwed();
 
-        uint256 escrowBeforeB = EpochedQueueModule(address(core)).totalEscrowedShares();
+        uint256 escrowBeforeB = ICoreVault(address(core)).totalOwed();
         uint256[] memory ids = new uint256[](1);
         ids[0] = claimIdB;
         vm.prank(userB);
         EpochedQueueModule(address(core)).batchClaimEpochAssets(epochId, ids);
-        uint256 deltaB = escrowBeforeB - EpochedQueueModule(address(core)).totalEscrowedShares();
+        uint256 deltaB = escrowBeforeB - ICoreVault(address(core)).totalOwed();
 
         assertEq(
             deltaA,
@@ -295,7 +301,7 @@ contract QueueEpochModule_WithdrawFlow_POC is Test {
             "FIX CONFIRMED: claimEpochAssets and batchClaimEpochAssets reduce escrowedShares identically"
         );
         assertEq(
-            EpochedQueueModule(address(core)).totalEscrowedShares(),
+            ICoreVault(address(core)).totalOwed(),
             0,
             "FIX CONFIRMED: both equal-fee claims fully settled -> escrow back to 0"
         );
@@ -334,34 +340,26 @@ contract QueueEpochModule_WithdrawFlow_POC is Test {
     }
 
     // =========================================================================
-    // BUG D (MEDIUM) -- instant cap check must honor dynamic cap policy
-    // =========================================================================
-    //
-    // Dynamic cap enabled: min 1% (stressed) / max 20% (empty queue), stress
-    // threshold of 1 pending claim. userB queues one claim first (claimCount
-    // becomes 1 in the open epoch -> "stressed" -> effective cap = 1%).
-    // With the bug, _canInstant() ignored dynamic cap params entirely and used
-    // the (100%, i.e. unlimited) static capPerEpochBps, letting a 5%-of-TVL
-    // instant withdrawal straight through despite queue stress.
-    function test_instantWithdrawal_respectsDynamicCapUnderQueueStress() public {
+    // Standard queue depth and dynamic settings do not affect the static cap.
+    function test_instantWithdrawal_unaffectedByStandardQueueDepth() public {
         params.setDynamicCap(true, 100, 2000, 1); // enabled, min 1%, max 20%, threshold 1
         uint256 sharesA = _deposit(user, 1_000_000e6);
         _deposit(userB, 10_000e6);
 
-        // userB queues a small claim -> current-epoch claimCount = 1 -> stressed.
+        // userB queues a small standard claim -- must have no bearing on userA's
+        // instant-withdrawal cap.
         vm.prank(userB);
         EpochedQueueModule(address(core)).requestEpochWithdrawal(1_000e6);
 
-        // userA requests an instant withdrawal worth ~5% of TVL -- exceeds the
-        // 1%-under-stress dynamic cap, so it must NOT settle immediately.
+        // This request fits the static cap.
         uint256 fivePctShares = sharesA / 20;
         vm.prank(user);
         (bool settledImmediately,,) =
             EpochedQueueModule(address(core)).requestInstantWithdrawal(fivePctShares);
 
-        assertFalse(
+        assertTrue(
             settledImmediately,
-            "FIX CONFIRMED: 5% instant withdrawal correctly rejected under a 1% dynamic cap while queue is stressed"
+            "FIX CONFIRMED: standard queue depth no longer shrinks the instant cap"
         );
     }
 }

@@ -193,12 +193,12 @@ contract FeeCollectorHarvestQueue is Test {
     // DEGRADATION: distribute() must never be the thing that breaks.
     // ═════════════════════════════════════════════════════════════════════════
 
-    /// @notice Fee accruals below the queue's minClaimAmount used to be handled
-    ///         by exempting feeCollector inside the floor check. The exemption
-    ///         is gone; the collector absorbs the refusal instead, leaving the
-    ///         shares in place to accumulate.
-    function test_subFloorHarvest_defersInsteadOfReverting() public {
-        params.setMinClaimAmount(100_000e6); // far above anything accrued here
+    /// @notice Spec §6.4: there is no withdrawal minimum, so a configured
+    ///         minClaimAmount no longer defers a harvest. The collector queues
+    ///         the exit like any other holder; its shares are burned at request
+    ///         and the liability is tracked in the pending-claim list.
+    function test_noWithdrawalMinimum_harvestQueuesRegardlessOfMinClaimAmount() public {
+        params.setMinClaimAmount(100_000e6); // ignored by exits
         params.setCapPerEpochBps(1);         // and no instant route either
 
         vm.prank(alice);
@@ -208,29 +208,12 @@ contract FeeCollectorHarvestQueue is Test {
         uint256 collectorShares = vault.balanceOf(address(collector));
         assertGt(collectorShares, 0, "collector holds fee shares");
 
-        // Does not revert.
         collector.distribute(address(vault));
 
-        assertEq(
-            vault.balanceOf(address(collector)), collectorShares,
-            "shares stay put, ready to be retried with a larger balance"
-        );
-        assertEq(
-            collector.pendingHarvestClaimCount(address(vault)), 0,
-            "nothing queued, so nothing to strand"
-        );
-        assertEq(
-            collector.pendingHarvestShares(address(vault)), 0,
-            "and the collector is not left in a half-queued state"
-        );
-
-        // Once the floor is clearable, the same call goes through.
-        params.setMinClaimAmount(0);
-        collector.distribute(address(vault));
-        assertEq(
-            collector.pendingHarvestClaimCount(address(vault)), 1,
-            "the deferred harvest queues on the next attempt"
-        );
+        // Exit accepted: the shares left at request. What stays is the collector's own exit fee,
+        // which the vault pays to its fee recipient -- the collector itself.
+        assertLt(vault.balanceOf(address(collector)), collectorShares, "the harvested shares left at request");
+        assertEq(collector.pendingHarvestClaimCount(address(vault)), 1, "and the claim is tracked");
     }
 
     /// @notice A full pending list defers too, and the shares are never handed

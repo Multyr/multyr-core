@@ -10,6 +10,8 @@ tags: [fee, withdrawal-fee, performance-fee, timelock, fee-storage]
 
 # Fee Policy
 
+
+
 > **Source of truth**: `src/core/storage/FeeStorage.sol:55` @ `c39f9462`
 > **ADR-015 workflow applied**: full code read before drafting.
 
@@ -225,7 +227,7 @@ newHwm = totalAssets / (totalSupply + 1_980_198e12)  ≈ 1.0078 USDC/share
 
 `_crystallize()` is reached only through `endEpochCrystallize()`, which is permissionless and independent of the queue lifecycle. It is NOT called by `closeCurrentEpoch()`, `fundEpoch()`, instant exits or force exits.
 
-Consequence worth stating plainly: `ppsAtClose` is snapshotted gross of any pending performance fee, and nothing orders `endEpochCrystallize()` against `closeCurrentEpoch()`. Both are public, so whoever calls first decides whether an epoch's claimants exit before or after the crystallization dilutes the price. The keeper schedules CRYSTALLIZE below the queue ops, so under continuous exit flow it can be deferred.
+Requests fix assets owed before shares are burned. Performance-fee crystallization can dilute live shares but cannot reprice existing exit liabilities. The keeper schedules CRYSTALLIZE below queue operations.
 
 Pre-conditions for fee to be minted:
 1. `totalSupply > 0`
@@ -234,13 +236,13 @@ Pre-conditions for fee to be minted:
 4. `feeAssets > 0` (profit is non-zero)
 5. `feeShares > 0` (conversion does not produce zero)
 
-Branch behavior when `pps <= highWaterMark` (no profit): `highWaterMark` is **left unchanged** at its prior peak and `lastCrystallize` is updated; no shares are minted. Previously `highWaterMark` was incorrectly overwritten with the (lower or equal) current `pps`, which broke HWM monotonicity — a subsequent crystallize at a `pps` between the old and new (lower) HWM would wrongly charge a performance fee on assets the vault had already been credited for. This was fixed by writing the prior `old` value back instead of `pps`. `Events.Crystallized(old, pps, 0)` is still emitted with the (unchanged) current `pps` as its second argument for observability, even though storage does not move.
+Branch behavior when `pps <= highWaterMark` (no profit): `highWaterMark` is **left unchanged** at its prior peak and `lastCrystallize` is updated; no shares are minted. `Events.Crystallized(old, pps, 0)` is still emitted with the (unchanged) current `pps` as its second argument for observability, even though storage does not move.
 
 Branch behavior when the interval guard (condition 3) blocks a would-be-profitable crystallize: the call returns early with `(old, 0)` — **neither `highWaterMark` nor `lastCrystallize` is updated** in this case, unlike the no-profit branch above.
 
 ### 5.3 Minimum crystallize interval
 
-`minCrystallizeInterval` (`FeeStorage.Layout.minCrystallizeInterval`) **is now enforced by `_crystallize()`**: if `pps > highWaterMark` (profitable) but `block.timestamp < lastCrystallize + minCrystallizeInterval`, the call returns without minting a fee or advancing `highWaterMark`/`lastCrystallize`, deferring fee extraction to a later settle. The guard is skipped on the very first ever crystallize (`highWaterMark == 0`). Previously this parameter was accepted by governance (`submitPerfParams`/`acceptPerfParams`) but had no runtime effect — `_crystallize()` never read it, so `settleFeesAndProcessQueue` could crystallize performance fees on every call regardless of the configured minimum interval.
+`minCrystallizeInterval` (`FeeStorage.Layout.minCrystallizeInterval`) **is enforced by `_crystallize()`**: if `pps > highWaterMark` (profitable) but `block.timestamp < lastCrystallize + minCrystallizeInterval`, the call returns without minting a fee or advancing `highWaterMark`/`lastCrystallize`, deferring fee extraction to a later settle. The guard is skipped on the very first ever crystallize (`highWaterMark == 0`).
 
 ### 5.4 PerfFeeMixin (legacy)
 
@@ -294,7 +296,7 @@ totalForceBps = witBps + forceExitPenaltyBps + preMaturityForceExitPenaltyBps
 | `FeeParamsRevoked()` | AdminModule | `revokeFeeParams` |
 | `PerfParamsSubmitted(rateX, minInterval, eta)` | AdminModule | `submitPerfParams` |
 | `PerfParamsAccepted(rateX, minInterval)` | AdminModule | `acceptPerfParams` |
-| `FeePaid(user, feeCollector, feeShares)` | EpochedQueueModule | Batch fee transfer at epoch close, and on the instant exit path |
+| `FeePaid(user, feeCollector, feeShares)` | EpochedQueueModule | Fee-share transfer at request on both queued and instant exit paths |
 | `Crystallized(oldHwm, newHwm, feeAssets)` | EpochedQueueModule | Crystallization (fee or not) |
 | `PerfFeeMinted(oldHwm, ppsBefore, feeShares, ppsAfter)` | EpochedQueueModule | When perf fee > 0 |
 

@@ -80,7 +80,7 @@ contract CoreVaultPerfFeeMixinTest is Test {
         // Wire EpochedQueueModule selectors (PUBLIC) - includes endEpochCrystallize
         bytes4[] memory queueSelectors = new bytes4[](8);
         queueSelectors[0] = EpochedQueueModule.requestEpochWithdrawal.selector;
-        queueSelectors[1] = EpochedQueueModule.cancelEpochWithdrawal.selector;
+        queueSelectors[1] = EpochedQueueModule.syncInsolvencyState.selector;
         queueSelectors[2] = EpochedQueueModule.closeCurrentEpoch.selector;
         queueSelectors[3] = EpochedQueueModule.fundEpoch.selector;
         queueSelectors[4] = EpochedQueueModule.claimEpochAssets.selector;
@@ -289,7 +289,7 @@ contract CoreVaultPerfFeeMixinTest is Test {
 
         bytes4[] memory queueSelectors = new bytes4[](8);
         queueSelectors[0] = EpochedQueueModule.requestEpochWithdrawal.selector;
-        queueSelectors[1] = EpochedQueueModule.cancelEpochWithdrawal.selector;
+        queueSelectors[1] = EpochedQueueModule.syncInsolvencyState.selector;
         queueSelectors[2] = EpochedQueueModule.closeCurrentEpoch.selector;
         queueSelectors[3] = EpochedQueueModule.fundEpoch.selector;
         queueSelectors[4] = EpochedQueueModule.claimEpochAssets.selector;

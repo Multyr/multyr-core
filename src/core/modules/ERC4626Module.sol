@@ -1,27 +1,30 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { IERC4626 } from "@openzeppelin/contracts/interfaces/IERC4626.sol";
-import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import { CoreStorage } from "../storage/CoreStorage.sol";
-import { FeeStorage } from "../storage/FeeStorage.sol";
-import { Events } from "../libraries/Events.sol";
-import { Percentage } from "../../libs/Percentage.sol";
-import { RevertClassifier } from "../libraries/RevertClassifier.sol";
-import { IParamsProvider } from "../../interfaces/IParamsProvider.sol";
-import { IBufferManager } from "../../interfaces/IBufferManager.sol";
-import { IStrategyRouter } from "../../interfaces/IStrategyRouter.sol";
-import { IIncentives } from "../../interfaces/IIncentives.sol";
-import { IIncentivesEngine } from "../../interfaces/IIncentivesEngine.sol";
-import { ICoreVault } from "../../interfaces/ICoreVault.sol";
-import { ExitEngineLib } from "../libraries/ExitEngineLib.sol";
-import { EpochQueueStorage } from "./EpochedQueueModule.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {CoreStorage} from "../storage/CoreStorage.sol";
+import {FeeStorage} from "../storage/FeeStorage.sol";
+import {Events} from "../libraries/Events.sol";
+import {Percentage} from "../../libs/Percentage.sol";
+import {RevertClassifier} from "../libraries/RevertClassifier.sol";
+import {IParamsProvider} from "../../interfaces/IParamsProvider.sol";
+import {IBufferManager} from "../../interfaces/IBufferManager.sol";
+import {IStrategyRouter} from "../../interfaces/IStrategyRouter.sol";
+import {IIncentives} from "../../interfaces/IIncentives.sol";
+import {IIncentivesEngine} from "../../interfaces/IIncentivesEngine.sol";
+import {ICoreVault} from "../../interfaces/ICoreVault.sol";
+import {ExitEngineLib} from "../libraries/ExitEngineLib.sol";
+import {EpochQueueStorage} from "./EpochedQueueModule.sol";
 import {
-    FixedMaturityStorage, VaultMode, VaultState,
-    _checkDepositsAllowed, _checkForceExitAllowed
+    FixedMaturityStorage,
+    VaultMode,
+    VaultState,
+    _checkDepositsAllowed,
+    _checkForceExitAllowed
 } from "../storage/FixedMaturityStorage.sol";
-import { FixedMaturityLogicLib } from "../libraries/FixedMaturityLogicLib.sol";
+import {FixedMaturityLogicLib} from "../libraries/FixedMaturityLogicLib.sol";
 
 /// @dev Minimal interface for the best-effort self-call in _triggerAutoClose().
 interface IFixedMaturityAutoClose {
@@ -73,6 +76,11 @@ contract ERC4626Module {
     error ReentrancyGuardLocked();
     error NavStale();
     error NavInvalid();
+    /// @notice grossAssets < totalOwed: totalAssets() == 0, so share pricing is meaningless.
+    error VaultInsolvent();
+    /// @notice forceWithdraw() values at totalAssets() == 0 (insolvency mode, or no shareholder equity):
+    ///         there is nothing to withdraw. (forceWithdrawAll() returns 0 instead of reverting.)
+    error NothingToWithdraw();
     error InsufficientLiquidity();
     error SharesLocked();
     error WithdrawalLimitExceeded();
@@ -86,7 +94,9 @@ contract ERC4626Module {
     // ═══════════════════════════════════════════════════════════════════════════════
     // CONSTANTS
     // ═══════════════════════════════════════════════════════════════════════════════
-    uint256 public constant MAX_WARM_NAV_AGE = 15 minutes;
+    /// @dev Kept as a public constant for ABI compatibility; sourced from CoreStorage so
+    ///      there is exactly one literal value across the vault.
+    uint256 public constant MAX_WARM_NAV_AGE = CoreStorage.MAX_WARM_NAV_AGE;
     uint256 public constant MAX_FORCE_LEGS = 10;
 
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -104,10 +114,7 @@ contract ERC4626Module {
     ///      so the router is both msg.sender and the token source. This eliminates
     ///      the unauthorized-payer attack where any caller could drain any address
     ///      with a standing vault approval.
-    function depositFor(uint256 assets, address receiver)
-        external
-        returns (uint256 shares)
-    {
+    function depositFor(uint256 assets, address receiver) external returns (uint256 shares) {
         if (receiver == address(0)) revert ZeroAddress();
         return _depositInternal(assets, receiver, msg.sender);
     }
@@ -196,8 +203,12 @@ contract ERC4626Module {
 
         _notPausedForceExit();
         _enterNonReentrant();
+        ExitEngineLib.rollCapEpochIfNeeded(CoreStorage.layout());
 
         if (assets == 0) revert ZeroAmount();
+        // Force exit values at totalAssets(). With no shareholder equity (insolvency mode, or
+        // grossAssets == totalOwed) an exact-amount exit has nothing to draw on.
+        if (IERC4626(address(this)).totalAssets() == 0) revert NothingToWithdraw();
         if (receiver == address(0)) revert ZeroAddress();
         if (owner_ == address(0)) revert ZeroAddress();
 
@@ -309,6 +320,7 @@ contract ERC4626Module {
 
         _notPausedForceExit();
         _enterNonReentrant();
+        ExitEngineLib.rollCapEpochIfNeeded(CoreStorage.layout());
 
         if (receiver == address(0)) revert ZeroAddress();
 
@@ -321,6 +333,15 @@ contract ERC4626Module {
         // Read all shares
         uint256 shares = _balanceOf(msg.sender);
         if (shares == 0) revert ZeroAmount();
+        // No shareholder equity (insolvency mode, or grossAssets == totalOwed): shares value at
+        // totalAssets() == 0, there is nothing to withdraw, and burning them for a zero fill would
+        // destroy the caller's residual claim for nothing. Return 0 untouched -- no burn, no fee,
+        // no revert -- unless the caller demanded a non-zero minimum.
+        if (IERC4626(address(this)).totalAssets() == 0) {
+            if (minAssetsOut > 0) revert SlippageExceeded();
+            _exitNonReentrant();
+            return 0;
+        }
 
         // Fee via ExitEngineLib (FORCE mode)
         (uint256 totalFeeShares, uint256 netShares) =
@@ -363,7 +384,8 @@ contract ERC4626Module {
         // dust-sized netShares; treat that degenerate case as fully filled so we
         // don't divide by zero (there is nothing to under-fill).
         bool fullyFilled = targetAssets == 0 || assetsReceived >= targetAssets;
-        uint256 netSharesToBurn = fullyFilled ? netShares : (netShares * assetsReceived) / targetAssets;
+        uint256 netSharesToBurn =
+            fullyFilled ? netShares : (netShares * assetsReceived) / targetAssets;
         uint256 feeSharesToTransfer =
             fullyFilled ? totalFeeShares : (totalFeeShares * assetsReceived) / targetAssets;
 
@@ -383,7 +405,9 @@ contract ERC4626Module {
             }
             if (forceBps > 0) {
                 uint256 forcePenaltyShares = Percentage.mulBpsUp(shares, forceBps);
-                if (!fullyFilled) forcePenaltyShares = (forcePenaltyShares * assetsReceived) / targetAssets;
+                if (!fullyFilled) {
+                    forcePenaltyShares = (forcePenaltyShares * assetsReceived) / targetAssets;
+                }
                 emit Events.ForceExitPenaltyTaken(
                     msg.sender, _convertToAssets(forcePenaltyShares), forcePenaltyShares
                 );
@@ -459,8 +483,7 @@ contract ERC4626Module {
     ) internal {
         if (address(core.params) == address(0)) return;
 
-        IParamsProvider.WithdrawalParams memory wp =
-            core.params.getWithdrawalParams(address(this));
+        IParamsProvider.WithdrawalParams memory wp = core.params.getWithdrawalParams(address(this));
 
         // Per-transaction limit (anti-abuse)
         if (wp.maxWithdrawalPerTx > 0 && gross > wp.maxWithdrawalPerTx) {
@@ -549,8 +572,10 @@ contract ERC4626Module {
 
         _notPausedDeposits();
         _enterNonReentrant();
+        ExitEngineLib.rollCapEpochIfNeeded(CoreStorage.layout());
 
         if (assets == 0) revert ZeroAmount();
+        _requireSolvent();
         _ensureFreshWarmNav();
 
         CoreStorage.Layout storage core = CoreStorage.layout();
@@ -568,7 +593,6 @@ contract ERC4626Module {
         // Mint GROSS shares to receiver, then TRANSFER fee to feeCollector.
         // This is NON-DILUTIVE: totalSupply increases by convertToShares(assets),
         // which is proportional to totalAssets increase. PPS stays unchanged.
-        // (Previously: separate mint to feeCollector was DILUTIVE.)
         _processorMint(receiver, shares + sharesFee);
         core.lastDepositTs[receiver] = uint64(block.timestamp);
 
@@ -589,12 +613,9 @@ contract ERC4626Module {
         {
             FixedMaturityStorage.Layout storage _fm = FixedMaturityStorage.layout();
             if (
-                _fm.vaultMode == VaultMode.FixedMaturity
-                    && _fm.vaultState == VaultState.Funding
-                    && _fm.fixedTermConfigured
-                    && _fm.autoCloseFundingOnTarget
-                    && _fm.startingTs == 0
-                    && FixedMaturityLogicLib.isFundingTargetReached(_fm, net)
+                _fm.vaultMode == VaultMode.FixedMaturity && _fm.vaultState == VaultState.Funding
+                    && _fm.fixedTermConfigured && _fm.autoCloseFundingOnTarget
+                    && _fm.startingTs == 0 && FixedMaturityLogicLib.isFundingTargetReached(_fm, net)
             ) {
                 _triggerAutoClose();
             }
@@ -610,7 +631,7 @@ contract ERC4626Module {
         // same best-effort/ignore-failure semantics (catch swallows exactly like
         // the old unchecked `.call()` did), but the compiler resolves the
         // selector at compile time instead of hashing "autoCloseFunding()" at runtime.
-        try IFixedMaturityAutoClose(address(this)).autoCloseFunding() { } catch { }
+        try IFixedMaturityAutoClose(address(this)).autoCloseFunding() {} catch {}
     }
 
     /// @dev Mint exact shares. Gross-up: user pays grossAssets = ceil(netAssets * 10000 / (10000 - depBps)).
@@ -624,8 +645,10 @@ contract ERC4626Module {
         _checkDepositsAllowed(FixedMaturityStorage.layout());
         _notPausedDeposits();
         _enterNonReentrant();
+        ExitEngineLib.rollCapEpochIfNeeded(CoreStorage.layout());
 
         if (shares == 0) revert ZeroAmount();
+        _requireSolvent();
         _ensureFreshWarmNav();
 
         CoreStorage.Layout storage core = CoreStorage.layout();
@@ -692,8 +715,7 @@ contract ERC4626Module {
     ) internal view {
         if (address(core.params) == address(0)) return;
 
-        IParamsProvider.DepositLimits memory limits =
-            core.params.getDepositLimits(address(this));
+        IParamsProvider.DepositLimits memory limits = core.params.getDepositLimits(address(this));
 
         if (limits.minDepositAmount > 0 && grossAssets < limits.minDepositAmount) {
             revert DepositBelowMinimum(grossAssets, limits.minDepositAmount);
@@ -707,9 +729,8 @@ contract ERC4626Module {
         }
 
         if (limits.userDepositCap > 0) {
-            uint256 userAssetsAfter =
-                IERC4626(address(this)).convertToAssets(IERC20(address(this)).balanceOf(receiver))
-                + creditedAssets;
+            uint256 userAssetsAfter = IERC4626(address(this))
+                .convertToAssets(IERC20(address(this)).balanceOf(receiver)) + creditedAssets;
             if (userAssetsAfter > limits.userDepositCap) {
                 revert UserDepositCapExceeded(userAssetsAfter, limits.userDepositCap);
             }
@@ -789,6 +810,17 @@ contract ERC4626Module {
 
     function _asset() internal view returns (address) {
         return IERC4626(address(this)).asset();
+    }
+
+    /// @dev Insolvency mode (grossAssets < totalOwed) makes totalAssets() == 0, and so does
+    ///      grossAssets == totalOwed (no shareholder equity). With totalSupply > 0 either one
+    ///      makes deposit/mint pricing divide by zero or mint unbounded shares. Read through the
+    ///      vault -- never reconstructed here.
+    function _requireSolvent() internal view {
+        (uint256 gross, uint256 owed,) = ICoreVault(address(this)).liabilityState();
+        if (gross < owed || (gross == owed && IERC20(address(this)).totalSupply() > 0)) {
+            revert VaultInsolvent();
+        }
     }
 
     /// @dev Hot balance net of assets earmarked for FUNDED-but-unclaimed epoch

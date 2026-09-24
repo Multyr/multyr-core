@@ -267,16 +267,14 @@ contract FeeCollector is ReentrancyGuard, Pausable {
 
                 // requestInstantWithdrawal settles inline if cap+liquidity OK;
                 // falls back to the epoch queue (no revert) when the cap is
-                // exhausted. FeeCollector is exempt from the queue's
-                // minClaimAmount floor precisely so this contract holds: small
-                // fee accruals queue instead of reverting the distribution.
+                // exhausted. The exit is priced and the shares burned at
+                // request either way (economic exit); only settlement differs.
                 // try/catch, not a bare call: the vault can legitimately refuse
-                // this exit -- the queue's minClaimAmount floor rejects fee
-                // accruals below it, and withdrawals can be paused -- and a fee
-                // distribution must never be the thing that breaks. The floor
-                // applies to every caller with no address carve-out, so the
+                // this exit -- a stale warm NAV, insolvency mode or a paused
+                // withdrawal path all revert the request -- and a fee
+                // distribution must never be the thing that breaks. The
                 // handling belongs here, on the side that cannot tolerate the
-                // revert, rather than as an exemption inside the check itself.
+                // revert.
                 bool settledImmediately;
                 uint256 epochId;
                 uint256 claimId;
@@ -312,7 +310,7 @@ contract FeeCollector is ReentrancyGuard, Pausable {
                         emit HarvestDustBurned(token, bal);
                     }
                 } else {
-                    // FALLBACK: shares moved to vault epoch escrow; underlying not yet delivered.
+                    // FALLBACK: shares already burned, the fixed assetsOwed is a queued claim; underlying not yet delivered.
                     // Call harvestQueued(token) once the epoch is FUNDED to pull the claim.
                     pendingHarvestShares[token] += bal;
                     _pendingHarvestClaims[token].push(
@@ -345,7 +343,6 @@ contract FeeCollector is ReentrancyGuard, Pausable {
         emit Distributed(token, bal, toTreasury, toOps, toSafetyReserve);
     }
 
-    /// @notice Pull underlying for a previously-queued AUTO_HARVEST fallback claim.
     /// @notice Pull underlying for every queued AUTO_HARVEST claim that is ready.
     /// @dev Iterates the token's pending claims and settles the ones whose epoch
     ///      has been funded, leaving the rest queued. One epoch that never funds

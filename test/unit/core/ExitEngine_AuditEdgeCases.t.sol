@@ -1,20 +1,21 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { Test } from "forge-std/Test.sol";
-import { console2 } from "forge-std/console2.sol";
-import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { CoreHarness } from "../../helpers/CoreHarness.sol";
-import { ERC20Mock } from "../../../src/mocks/ERC20Mock.sol";
-import { MockParamsProvider } from "../../helpers/MockParamsProvider.sol";
-import { MockBufferManagerForTests } from "../../helpers/MockBufferManagerForTests.sol";
-import { ExitEngineLib } from "../../../src/core/libraries/ExitEngineLib.sol";
-import { ExitFeeLib } from "../../../src/core/libraries/ExitFeeLib.sol";
-import { FeeStorage } from "../../../src/core/storage/FeeStorage.sol";
-import { Percentage } from "../../../src/libs/Percentage.sol";
+import {Test} from "forge-std/Test.sol";
+import {console2} from "forge-std/console2.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {CoreHarness} from "../../helpers/CoreHarness.sol";
+import {ERC20Mock} from "../../../src/mocks/ERC20Mock.sol";
+import {MockParamsProvider} from "../../helpers/MockParamsProvider.sol";
+import {MockBufferManagerForTests} from "../../helpers/MockBufferManagerForTests.sol";
+import {ExitEngineLib} from "../../../src/core/libraries/ExitEngineLib.sol";
+import {ExitFeeLib} from "../../../src/core/libraries/ExitFeeLib.sol";
+import {FeeStorage} from "../../../src/core/storage/FeeStorage.sol";
+import {Percentage} from "../../../src/libs/Percentage.sol";
 
 interface IQueueModule {
+    function rollCapEpochIfNeeded() external;
     function requestInstantWithdrawal(uint256 shares)
         external
         returns (bool settledImmediately, uint256 epochId, uint256 claimId);
@@ -29,7 +30,7 @@ interface IQueueModule {
     function canCloseCurrentEpoch() external view returns (bool);
     function currentEpochClaimCount() external view returns (uint256);
     function outstandingClaimCount() external view returns (uint256);
-    function totalEscrowedShares() external view returns (uint256);
+    function totalOwed() external view returns (uint256);
 }
 
 interface IForceWithdrawAll {
@@ -53,8 +54,8 @@ contract ExitEngine_AuditEdgeCases is Test {
     address public feeCollector = address(0xFEE);
     address[5] public users;
 
-    uint16 constant WIT_BPS = 25;        // 0.25%
-    uint16 constant IMM_PEN_BPS = 50;    // 0.5%
+    uint16 constant WIT_BPS = 25; // 0.25%
+    uint16 constant IMM_PEN_BPS = 50; // 0.5%
     uint16 constant FORCE_PEN_BPS = 150; // 1.5%
 
     function setUp() public {
@@ -66,12 +67,7 @@ contract ExitEngine_AuditEdgeCases is Test {
         params.setCapPerEpochBps(1000); // 10% per epoch
 
         vault = new CoreHarness(
-            IERC20Metadata(address(usdc)),
-            "Vault",
-            "vUSDC",
-            owner,
-            feeCollector,
-            address(params)
+            IERC20Metadata(address(usdc)), "Vault", "vUSDC", owner, feeCollector, address(params)
         );
 
         mockBM = new MockBufferManagerForTests(address(vault));
@@ -92,6 +88,8 @@ contract ExitEngine_AuditEdgeCases is Test {
             vm.prank(users[i]);
             vault.deposit(10_000_000e6, users[i]);
         }
+        vm.warp(block.timestamp + 31 days);
+        IQueueModule(address(vault)).rollCapEpochIfNeeded();
     }
 
     // =====================================================================
@@ -127,7 +125,9 @@ contract ExitEngine_AuditEdgeCases is Test {
     }
 
     function test_A1_navDrift_queueSettle() public {
-        // Queue claim with fresh NAV
+        uint256 supplyBefore = vault.totalSupply();
+
+        // Queue claim with fresh NAV: economic exit, the shares are burned NOW
         vm.prank(users[0]);
         (uint256 epochId, uint256 claimId) =
             IQueueModule(address(vault)).requestEpochWithdrawal(1_000_000e6);
@@ -136,7 +136,6 @@ contract ExitEngine_AuditEdgeCases is Test {
         vm.warp(block.timestamp + 7 days + 1);
 
         uint256 usdcBefore = usdc.balanceOf(users[0]);
-        uint256 supplyBefore = vault.totalSupply();
 
         // Settle with stale NAV - should work (W2)
         IQueueModule(address(vault)).closeCurrentEpoch();
@@ -192,38 +191,19 @@ contract ExitEngine_AuditEdgeCases is Test {
     // Risk: claims never executed, queue blocked silently
     // =====================================================================
 
-    function test_A2_cancelClaim_returnsShares() public {
-        uint256 sharesBefore = vault.balanceOf(users[0]);
-
-        // Queue a claim
-        vm.prank(users[0]);
-        (uint256 epochId, uint256 claimId) =
-            IQueueModule(address(vault)).requestEpochWithdrawal(2_000_000e6);
-
-        uint256 sharesAfterQueue = vault.balanceOf(users[0]);
-        assertEq(sharesBefore - sharesAfterQueue, 2_000_000e6, "A2: shares moved to escrow");
-
-        // Cancel
-        vm.prank(users[0]);
-        IQueueModule(address(vault)).cancelEpochWithdrawal(epochId, claimId);
-
-        uint256 sharesAfterCancel = vault.balanceOf(users[0]);
-        assertEq(sharesAfterCancel, sharesBefore, "A2: shares returned on cancel");
-        assertEq(IQueueModule(address(vault)).totalEscrowedShares(), 0, "A2: pending cleared");
-    }
-
     function test_A2_multiUserQueueAndSettle_noZombie() public {
         // 5 users queue claims into the same epoch
         uint256[5] memory claimIds;
         uint256 epochId;
         for (uint256 i = 0; i < 5; i++) {
             vm.prank(users[i]);
-            (epochId, claimIds[i]) =
-                IQueueModule(address(vault)).requestEpochWithdrawal(500_000e6);
+            (epochId, claimIds[i]) = IQueueModule(address(vault)).requestEpochWithdrawal(500_000e6);
         }
 
         assertEq(IQueueModule(address(vault)).outstandingClaimCount(), 5, "A2: 5 claims queued");
-        assertEq(IQueueModule(address(vault)).totalEscrowedShares(), 2_500_000e6, "A2: 2.5M pending");
+        // Liability is the NET (post withdraw-fee) amount priced at request.
+        assertLe(IQueueModule(address(vault)).totalOwed(), 2_500_000e6, "A2: <= 2.5M pending");
+        assertGt(IQueueModule(address(vault)).totalOwed(), 2_490_000e6, "A2: ~2.5M pending");
 
         // Settle all: close + fund the epoch, then each user self-claims
         vm.warp(block.timestamp + 7 days + 1);
@@ -236,7 +216,7 @@ contract ExitEngine_AuditEdgeCases is Test {
 
         // Verify no zombies
         uint256 remaining = IQueueModule(address(vault)).outstandingClaimCount();
-        uint256 pending = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pending = IQueueModule(address(vault)).totalOwed();
         console2.log("A2: remaining queue:", remaining, "pending:", pending);
 
         assertEq(pending, 0, "A2: no pending shares after full settle");
@@ -246,70 +226,13 @@ contract ExitEngine_AuditEdgeCases is Test {
         }
     }
 
-    function test_A2_cancelMidQueue_noStarvation() public {
-        // User0 queues, user1 queues, user0 cancels, user2 queues
-        vm.prank(users[0]);
-        (uint256 epochId0, uint256 claimId0) =
-            IQueueModule(address(vault)).requestEpochWithdrawal(1_000_000e6);
-
-        vm.prank(users[1]);
-        (uint256 epochId1, uint256 claimId1) =
-            IQueueModule(address(vault)).requestEpochWithdrawal(1_000_000e6);
-
-        // User0 cancels mid-queue
-        vm.prank(users[0]);
-        IQueueModule(address(vault)).cancelEpochWithdrawal(epochId0, claimId0);
-
-        vm.prank(users[2]);
-        (uint256 epochId2, uint256 claimId2) =
-            IQueueModule(address(vault)).requestEpochWithdrawal(1_000_000e6);
-
-        // Settle — user1 and user2 should get settled, user0's cancel should not block
-        uint256 user1Before = usdc.balanceOf(users[1]);
-        uint256 user2Before = usdc.balanceOf(users[2]);
-
-        vm.warp(block.timestamp + 7 days + 1);
-        IQueueModule(address(vault)).closeCurrentEpoch();
-        IQueueModule(address(vault)).fundEpoch(epochId1);
-        vm.prank(users[1]);
-        IQueueModule(address(vault)).claimEpochAssets(epochId1, claimId1);
-        vm.prank(users[2]);
-        IQueueModule(address(vault)).claimEpochAssets(epochId2, claimId2);
-
-        assertGt(usdc.balanceOf(users[1]), user1Before, "A2: user1 settled after cancel");
-        assertGt(usdc.balanceOf(users[2]), user2Before, "A2: user2 settled after cancel");
-    }
-
-    function test_A2_repeatedQueueCancel_noLeak() public {
-        uint256 initialShares = vault.balanceOf(users[0]);
-        uint256 initialSupply = vault.totalSupply();
-
-        // Queue and cancel 10 times
-        for (uint256 i = 0; i < 10; i++) {
-            vm.prank(users[0]);
-            (uint256 epochId, uint256 claimId) =
-                IQueueModule(address(vault)).requestEpochWithdrawal(100_000e6);
-
-            vm.prank(users[0]);
-            IQueueModule(address(vault)).cancelEpochWithdrawal(epochId, claimId);
-        }
-
-        // Shares should be exactly the same (no leak)
-        assertEq(vault.balanceOf(users[0]), initialShares, "A2: no share leak on queue/cancel");
-        assertEq(vault.totalSupply(), initialSupply, "A2: no supply leak");
-        assertEq(IQueueModule(address(vault)).totalEscrowedShares(), 0, "A2: no pending leak");
-    }
-
     // =====================================================================
     // A3: DYNAMIC CAP - deposit+claim timing, TVL manipulation
     // Risk: cap changes DURING tx, attacker manipulates TVL
     // =====================================================================
 
     function test_A3_depositThenInstantClaim_capCoherent() public {
-        // TVL = 50M, cap = 10% = 5M
-        // User deposits 50M more (TVL -> 100M, cap -> 10M)
-        // Then immediately claims 8M instant (should succeed: within new cap)
-
+        // A deposit during the cap epoch cannot enlarge its snapshot.
         vm.startPrank(users[0]);
         vault.deposit(50_000_000e6, users[0]);
 
@@ -318,32 +241,26 @@ contract ExitEngine_AuditEdgeCases is Test {
         uint256 usdcAfter = usdc.balanceOf(users[0]);
         vm.stopPrank();
 
-        // Should succeed: new TVL ~100M, cap = 10M, claim = 8M < cap
-        assertGt(usdcAfter, usdcBefore, "A3: instant claim succeeded with larger cap");
+        assertEq(usdcAfter, usdcBefore, "deposit cannot enlarge the epoch cap");
+        assertGt(IQueueModule(address(vault)).totalOwed(), 0);
     }
 
-    function test_A3_capReflectsLiveTotalAssets() public {
+    function test_A3_capRetainsEpochSnapshot() public {
         // TVL = 50M, cap = 5M
         // Claim 4M instant (leaves 1M cap)
         vm.prank(users[0]);
         IQueueModule(address(vault)).requestInstantWithdrawal(4_000_000e6);
 
-        // TVL decreased (~46M), cap = 10% of 46M = ~4.6M
-        // Already used 4M, remaining = ~0.6M
-        // Try 2M instant — should queue (exceeds remaining)
-        uint256 pendingBefore = IQueueModule(address(vault)).totalEscrowedShares();
+        // The second request exceeds the remaining snapshot allowance.
+        uint256 pendingBefore = IQueueModule(address(vault)).totalOwed();
 
         vm.prank(users[1]);
         IQueueModule(address(vault)).requestInstantWithdrawal(2_000_000e6);
 
-        uint256 pendingAfter = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pendingAfter = IQueueModule(address(vault)).totalOwed();
 
-        // The cap decreased because totalAssets decreased
-        // This may or may not queue depending on exact math
-        // The key invariant: epochWithdrawn is tracked correctly
-        console2.log("A3: pending before:", pendingBefore, "after:", pendingAfter);
-        // Either queued or settled — both valid depending on live cap
-        assertTrue(true, "A3: cap calculation used live totalAssets");
+        assertGt(pendingAfter, pendingBefore, "second request queues");
+        assertEq(vault.capBaseSnapshot(), 50_000_000e6);
     }
 
     function test_A3_flashDeposit_noCapExploit() public {
@@ -370,12 +287,8 @@ contract ExitEngine_AuditEdgeCases is Test {
         uint256 expectedSharesLost = 20_000_000e6; // exact shares requested
         assertLt(attackerShares, 200_000_000e6, "A3: attacker lost shares");
 
-        // Verify: attacker paid fee on instant claim
-        // witBps(25) + immPenBps(50) = 75 bps = 0.75%
-        uint256 grossExpected = 20_000_000e6; // 1:1 PPS approximately
-        uint256 feeExpected = grossExpected * 75 / 10000;
-        assertLt(received, grossExpected, "A3: fee deducted from attacker");
-        assertGt(received, grossExpected - feeExpected - 1e6, "A3: fee is reasonable");
+        assertEq(received, 0, "flash deposit cannot enlarge the snapshot cap");
+        assertGt(IQueueModule(address(vault)).totalOwed(), 0, "exit queues at the standard tier");
 
         vm.stopPrank();
 
@@ -422,10 +335,10 @@ contract ExitEngine_AuditEdgeCases is Test {
         IQueueModule(address(vault)).requestInstantWithdrawal(4_000_000e6);
 
         // Next instant queues (cap ~exhausted)
-        uint256 pendingBefore = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pendingBefore = IQueueModule(address(vault)).totalOwed();
         vm.prank(users[1]);
         IQueueModule(address(vault)).requestInstantWithdrawal(3_000_000e6);
-        uint256 pendingAfterInstant = IQueueModule(address(vault)).totalEscrowedShares();
+        uint256 pendingAfterInstant = IQueueModule(address(vault)).totalOwed();
 
         bool instantQueued = pendingAfterInstant > pendingBefore;
 
@@ -490,6 +403,7 @@ contract ExitEngine_AuditEdgeCases is Test {
         witBps = uint16(bound(witBps, 0, 500));
         immPenBps = uint16(bound(immPenBps, 0, 300));
 
+        params.setCapPerEpochBps(0); // Match the simulation's unlimited cap.
         vault.setExitFeesUnsafe(witBps, immPenBps, FORCE_PEN_BPS);
 
         // Read state BEFORE exit
@@ -541,10 +455,7 @@ contract ExitEngine_AuditEdgeCases is Test {
         assertEq(simResult.feeShares + simResult.userShares, shares, "A5: shares sum invariant");
     }
 
-    function testFuzz_A5_simulateExit_queuedSemantics(
-        uint256 shares,
-        uint16 witBps
-    ) public {
+    function testFuzz_A5_simulateExit_queuedSemantics(uint256 shares, uint16 witBps) public {
         shares = bound(shares, 100_000e6, 3_000_000e6);
         witBps = uint16(bound(witBps, 0, 500));
 
@@ -579,17 +490,20 @@ contract ExitEngine_AuditEdgeCases is Test {
 
         // INVARIANT 3: feeShares are exact (same formula used at queue and settle)
         // Verify by queueing and checking fee at settlement
+        uint256 feeCollectorBefore = vault.balanceOf(feeCollector);
         vm.prank(users[0]);
         (uint256 epochId, uint256 claimId) =
             IQueueModule(address(vault)).requestEpochWithdrawal(shares);
+        // Economic exit at request: the fee shares reach the FeeCollector NOW, not at close/claim.
+        uint256 feeAtRequest = vault.balanceOf(feeCollector) - feeCollectorBefore;
 
-        uint256 feeCollectorBefore = vault.balanceOf(feeCollector);
         vm.warp(block.timestamp + 7 days + 1);
         IQueueModule(address(vault)).closeCurrentEpoch();
         IQueueModule(address(vault)).fundEpoch(epochId);
         vm.prank(users[0]);
         IQueueModule(address(vault)).claimEpochAssets(epochId, claimId);
         uint256 actualFeeShares = vault.balanceOf(feeCollector) - feeCollectorBefore;
+        assertEq(actualFeeShares, feeAtRequest, "A5: nothing further is charged at close/claim");
 
         // feeShares must match exactly (allow 1 unit rounding)
         assertApproxEqAbs(actualFeeShares, simResult.feeShares, 1, "A5: queued feeShares exact");
@@ -623,17 +537,14 @@ contract ExitEngine_AuditEdgeCases is Test {
             treasury: address(0)
         });
 
-        (uint256 feeShares, uint256 userShares) =
-            ExitEngineLib.computeFeeShares(shares, mode, fee);
+        (uint256 feeShares, uint256 userShares) = ExitEngineLib.computeFeeShares(shares, mode, fee);
 
         // INVARIANT: sum == total
         assertEq(feeShares + userShares, shares, "A5: shares sum");
 
         // INVARIANT: feeShares >= floor (mulBpsDown)
         uint16 totalBps = ExitFeeLib.exitFeeBps(
-            mode == ExitEngineLib.ExitMode.INSTANT,
-            mode == ExitEngineLib.ExitMode.FORCE,
-            fee
+            mode == ExitEngineLib.ExitMode.INSTANT, mode == ExitEngineLib.ExitMode.FORCE, fee
         );
         uint256 feeFloor = Percentage.mulBpsDown(shares, totalBps);
         assertGe(feeShares, feeFloor, "A5: feeShares >= mulBpsDown (rounded UP)");

@@ -1,21 +1,25 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { IStrategyRouter, IStrategy } from "../interfaces/IStrategyRouter.sol";
-import { IStrategyHealthRegistry } from "../interfaces/IStrategyHealthRegistry.sol";
-import { IBufferManager } from "../interfaces/IBufferManager.sol";
-import { IIncentives } from "../interfaces/IIncentives.sol";
-import { IParamsProvider } from "../interfaces/IParamsProvider.sol";
-import { Percentage } from "../libs/Percentage.sol";
-import { FixedPoint } from "../libs/FixedPoint.sol";
-import { WithdrawalCapLib } from "../core/libraries/WithdrawalCapLib.sol";
-import { EpochQueueStorage } from "../core/modules/EpochedQueueModule.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IStrategyRouter, IStrategy} from "../interfaces/IStrategyRouter.sol";
+import {IStrategyHealthRegistry} from "../interfaces/IStrategyHealthRegistry.sol";
+import {IBufferManager} from "../interfaces/IBufferManager.sol";
+import {IIncentives} from "../interfaces/IIncentives.sol";
+import {IParamsProvider} from "../interfaces/IParamsProvider.sol";
+import {Percentage} from "../libs/Percentage.sol";
+import {FixedPoint} from "../libs/FixedPoint.sol";
+import {EpochQueueStorage} from "../core/modules/EpochedQueueModule.sol";
 
 interface ICoreVaultLensTarget {
     function asset() external view returns (address);
     function totalSupply() external view returns (uint256);
     function totalAssets() external view returns (uint256);
+    function capBaseSnapshot() external view returns (uint256);
+    function grossAssets() external view returns (uint256);
+    function totalOwed() external view returns (uint256);
+    function liabilityIndex() external view returns (uint256);
+    function isInsolvent() external view returns (bool);
     function balanceOf(address) external view returns (uint256);
     function convertToAssets(uint256 shares) external view returns (uint256);
     function convertToShares(uint256 assets) external view returns (uint256);
@@ -45,9 +49,7 @@ interface ICoreVaultLensTarget {
     function oldestUnfundedEpochId() external view returns (uint256);
     function outstandingClaimCount() external view returns (uint256);
     function nextClaimIdForEpoch(uint256 epochId) external view returns (uint256);
-    function totalEscrowedShares() external view returns (uint256);
     function reservedForClaims() external view returns (uint256);
-    function closedPendingAssets() external view returns (uint256);
     function epochData(uint256 epochId) external view returns (EpochQueueStorage.EpochData memory);
     function epochClaim(uint256 epochId, uint256 claimId)
         external
@@ -108,7 +110,7 @@ contract CoreVaultLens {
             IStrategyRouter.StrategyInfo[] memory L = r.list();
             for (uint256 i = 0; i < L.length; ++i) {
                 if (!L[i].enabled) continue;
-                try IStrategy(L[i].strat).totalAssets{ gas: 2000000 }() returns (uint256 ta) {
+                try IStrategy(L[i].strat).totalAssets{gas: 2000000}() returns (uint256 ta) {
                     strat += ta;
                 } catch {
                     if (address(hr) != address(0)) {
@@ -120,9 +122,9 @@ contract CoreVaultLens {
         uint256 warm = 0;
         IBufferManager bm = v.bufferManager();
         if (address(bm) != address(0)) {
-            try bm.warmBalance{ gas: 100000 }() returns (uint256 wb) {
+            try bm.warmBalance{gas: 100000}() returns (uint256 wb) {
                 warm = wb;
-            } catch { }
+            } catch {}
         }
         return hot + strat + warm;
     }
@@ -142,7 +144,7 @@ contract CoreVaultLens {
                         && hr.getStrategyState(L[i].strat)
                             == IStrategyHealthRegistry.StrategyState.BROKEN
                 ) continue;
-                try IStrategy(L[i].strat).totalAssets{ gas: 2000000 }() returns (uint256 ta) {
+                try IStrategy(L[i].strat).totalAssets{gas: 2000000}() returns (uint256 ta) {
                     strat += ta;
                 } catch {
                     if (address(hr) != address(0)) {
@@ -154,9 +156,9 @@ contract CoreVaultLens {
         uint256 warm = 0;
         IBufferManager bm = v.bufferManager();
         if (address(bm) != address(0)) {
-            try bm.warmBalance{ gas: 100000 }() returns (uint256 wb) {
+            try bm.warmBalance{gas: 100000}() returns (uint256 wb) {
                 warm = wb;
-            } catch { }
+            } catch {}
         }
         return hot + strat + warm;
     }
@@ -170,36 +172,24 @@ contract CoreVaultLens {
     function getEffectiveCapBps(address vault) external view returns (uint16) {
         ICoreVaultLensTarget v = ICoreVaultLensTarget(vault);
         IParamsProvider pp = v.params();
-        IParamsProvider.DynamicCapParams memory d = pp.getDynamicCapParams(vault);
-        if (!d.enabled) return pp.getWithdrawalParams(vault).capPerEpochBps;
-        return _calculateDynamicCapBps(vault);
-    }
-
-    function _calculateDynamicCapBps(address vault) internal view returns (uint16) {
-        ICoreVaultLensTarget v = ICoreVaultLensTarget(vault);
-        IParamsProvider pp = v.params();
-        IParamsProvider.DynamicCapParams memory d = pp.getDynamicCapParams(vault);
-        if (d.minBps == 0 || d.maxBps == 0) return pp.getWithdrawalParams(vault).capPerEpochBps;
-        // Must match EpochedQueueModule._epochCapRemaining()'s signal exactly —
-        // outstandingClaimCount (cross-epoch total), not a per-epoch count —
-        // otherwise this preview would show a different cap than the vault enforces.
-        uint256 queueDepth = v.outstandingClaimCount();
-        return
-            WithdrawalCapLib.calculateDynamicCapBps(
-                d.minBps, d.maxBps, d.queueStressThreshold, queueDepth
-            );
+        return pp.getWithdrawalParams(vault).capPerEpochBps;
     }
 
     function calculateCapImmediateRemaining(address vault) external view returns (uint256) {
         ICoreVaultLensTarget v = ICoreVaultLensTarget(vault);
         IParamsProvider pp = v.params();
         IParamsProvider.WithdrawalParams memory wp = pp.getWithdrawalParams(vault);
-        IParamsProvider.DynamicCapParams memory dcp = pp.getDynamicCapParams(vault);
-        uint16 cap = dcp.enabled
-            ? _calculateDynamicCapBps(vault)
-            : (wp.capPerEpochBps == 0 ? type(uint16).max : wp.capPerEpochBps);
-        if (cap == type(uint16).max) return type(uint256).max;
-        uint256 m = Percentage.mulBpsDown(v.totalAssets(), cap);
+        uint16 cap = wp.capPerEpochBps;
+        // A zero static cap means unlimited withdrawals.
+        if (cap == 0) return type(uint256).max;
+        // Match enforcement exactly: the vault sizes the instant bucket off a
+        // snapshot taken at cap-epoch rollover, not live totalAssets(), so standard-queue
+        // activity mid-epoch cannot silently shrink it here either. Falls back to live
+        // totalAssets() only when nothing has been snapshotted yet (before the vault's first
+        // instant/rollover call) -- the module backfills identically at that point.
+        uint256 base = v.capBaseSnapshot();
+        if (base == 0) base = v.totalAssets();
+        uint256 m = Percentage.mulBpsDown(base, cap);
         uint256 ew = v.epochWithdrawn();
         return m > ew ? m - ew : 0;
     }
@@ -227,7 +217,8 @@ contract CoreVaultLens {
         if (address(bm) == address(0)) return false;
         uint16 t = bm.getConfig().opsReserveTargetBps;
         if (t == 0 || address(r) == address(0)) return false;
-        return IERC20(v.asset()).balanceOf(vault) < Percentage.mulBpsDown(v.totalAssets(), t);
+        // class A: physical liquidity vs the physical portfolio (mirrors CoreVault.canRealize)
+        return IERC20(v.asset()).balanceOf(vault) < Percentage.mulBpsDown(v.grossAssets(), t);
     }
 
     /// @notice Fetch a single claim within a specific epoch (claim IDs restart
@@ -235,10 +226,11 @@ contract CoreVaultLens {
     function getEpochClaim(address vault, uint256 epochId, uint256 claimId)
         external
         view
-        returns (address user, uint256 netShares, bool claimed)
+        returns (address user, uint256 assetsOwed, bool claimed)
     {
-        EpochQueueStorage.EpochClaim memory c = ICoreVaultLensTarget(vault).epochClaim(epochId, claimId);
-        return (c.user, c.netShares, c.claimed);
+        EpochQueueStorage.EpochClaim memory c =
+            ICoreVaultLensTarget(vault).epochClaim(epochId, claimId);
+        return (c.user, c.assetsOwed, c.claimed);
     }
 
     /// @notice Scan a caller-supplied epoch range for a user's claims. Bounded
@@ -312,15 +304,19 @@ contract CoreVaultLens {
     }
 
     struct VaultReport {
-        uint256 totalAssets;
+        uint256 totalAssets; // class B: active shareholder NAV, net of totalOwed
         uint256 totalSupply;
         uint256 pricePerShare;
         uint256 availableLiquidity;
-        uint256 pendingWithdrawals;
+        uint256 pendingWithdrawals; // == totalOwed: fixed liabilities to exited users
         uint256 capRemaining;
         uint256 outstandingClaims;
         bool canSettleNow;
         bool canCrystallizeNow;
+        uint256 grossAssets; // class A: physical portfolio value
+        uint256 totalOwed;
+        uint256 liabilityIndex; // 1e18 when solvent
+        bool insolvent; // grossAssets < totalOwed
     }
 
     function getVaultReport(address vault) external view returns (VaultReport memory r) {
@@ -329,17 +325,13 @@ contract CoreVaultLens {
         r.totalSupply = v.totalSupply();
         r.pricePerShare = pps(vault);
         r.availableLiquidity = IERC20(v.asset()).balanceOf(vault);
-        // Exact, O(1): the still-open epoch's shares haven't locked a pps yet
-        // (valued live), while closed/funded epochs' liabilities are already
-        // locked-pps-correct by construction (see EpochQueueStorage.Layout).
-        // Replaces the old convertToAssets(totalEscrowedShares()) approximation,
-        // which priced ALL escrowed shares (including already-locked ones) at
-        // the CURRENT live pps -- wrong whenever pps moved since a closed
-        // epoch's ppsAtClose.
-        EpochQueueStorage.EpochData memory openEpoch = v.epochData(v.currentEpochId());
-        r.pendingWithdrawals = v.convertToAssets(openEpoch.totalNetShares)
-            + v.closedPendingAssets()
-            + v.reservedForClaims();
+        // Exact, O(1): every pending withdrawal is a fixed liability priced at
+        // request, already summed in totalOwed (funded or not).
+        r.grossAssets = v.grossAssets();
+        r.totalOwed = v.totalOwed();
+        r.pendingWithdrawals = r.totalOwed;
+        r.liabilityIndex = v.liabilityIndex();
+        r.insolvent = r.grossAssets < r.totalOwed;
         r.capRemaining = this.calculateCapImmediateRemaining(vault);
         r.outstandingClaims = v.outstandingClaimCount();
         r.canSettleNow = this.canSettle(vault);
@@ -348,13 +340,19 @@ contract CoreVaultLens {
 
     struct UserReport {
         uint256 shares;
-        uint256 assetsValue;
-        uint256 pendingClaims;
+        uint256 assetsValue; // class B: live value of the user's remaining shares
+        uint256 pendingClaims; // nominal, fixed assetsOwed of unclaimed claims
+        uint256 pendingClaimsPayable; // see getUserReport
         uint256 pendingBonus;
     }
 
     /// @param fromEpoch/toEpoch bounds the epoch scan for pendingClaims — see
     ///        getUserEpochClaims() for why this isn't a full-history scan.
+    /// @dev pendingClaimsPayable is computed PER CLAIM, not by scaling the nominal sum by one
+    ///      global index (immutable cohort index): a FUNDED epoch's
+    ///      cohort recoveryIndex is crystallized and immutable, so its claims use that exact
+    ///      value; a claim still in an Open/Closed (not yet crystallized) epoch has no final
+    ///      ratio yet, so it is shown at the live liabilityIndex() as a not-yet-final estimate.
     function getUserReport(address vault, address user, uint256 fromEpoch, uint256 toEpoch)
         external
         view
@@ -365,23 +363,16 @@ contract CoreVaultLens {
         r.assetsValue = v.convertToAssets(r.shares);
         (uint256[] memory epochIds, uint256[] memory claimIds) =
             this.getUserEpochClaims(vault, user, fromEpoch, toEpoch);
-        // A closed/funded epoch pays at its own locked ppsAtClose, not live
-        // pps -- cache the last epoch fetched since claims are usually
-        // grouped by epoch, to avoid refetching per claim.
-        uint256 cachedEpochId;
-        EpochQueueStorage.EpochData memory cachedEpoch;
-        bool haveCached;
+        uint256 liveIndex = v.liabilityIndex();
         for (uint256 i = 0; i < claimIds.length; ++i) {
             EpochQueueStorage.EpochClaim memory c = v.epochClaim(epochIds[i], claimIds[i]);
             if (c.claimed) continue;
-            if (!haveCached || cachedEpochId != epochIds[i]) {
-                cachedEpoch = v.epochData(epochIds[i]);
-                cachedEpochId = epochIds[i];
-                haveCached = true;
-            }
-            r.pendingClaims += cachedEpoch.state == EpochQueueStorage.EpochState.Open
-                ? v.convertToAssets(c.netShares)
-                : FixedPoint.mulWadDown(c.netShares, cachedEpoch.ppsAtClose);
+            r.pendingClaims += c.assetsOwed;
+
+            EpochQueueStorage.EpochData memory e = v.epochData(epochIds[i]);
+            uint256 index =
+                e.state == EpochQueueStorage.EpochState.Funded ? e.recoveryIndex : liveIndex;
+            r.pendingClaimsPayable += FixedPoint.mulWadDown(c.assetsOwed, index);
         }
         r.pendingBonus = this.pendingLoyaltyBonus(vault, user);
     }
