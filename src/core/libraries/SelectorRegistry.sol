@@ -129,7 +129,7 @@ contract SelectorRegistry {
         if (selector == AdminModule.isPerfInitialized.selector) return ROLE_PUBLIC;
 
         // ─────────────────────────────────────────────────────────────────────────
-        // EPOCHEDQUEUEMODULE WRITE SELECTORS (10 total) - MUST BE ROLE_PUBLIC
+        // EPOCHEDQUEUEMODULE WRITE SELECTORS (11 total) - MUST BE ROLE_PUBLIC
         // ─────────────────────────────────────────────────────────────────────────
         if (selector == EpochedQueueModule.requestEpochWithdrawal.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.closeCurrentEpoch.selector) return ROLE_PUBLIC;
@@ -141,6 +141,7 @@ contract SelectorRegistry {
         if (selector == EpochedQueueModule.syncOldestUnfundedEpoch.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.syncInsolvencyState.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.rollCapEpochIfNeeded.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.keeperSettleClaims.selector) return ROLE_PUBLIC;
 
         // ─────────────────────────────────────────────────────────────────────────
         // EPOCHEDQUEUEMODULE VIEW SELECTORS (10 total) - MUST BE ROLE_PUBLIC

@@ -805,6 +805,63 @@ contract EpochedQueueModule {
         _exitNonReentrant();
     }
 
+    /// @notice Permissionlessly settle funded claims directly to their recorded owners.
+    /// @dev Already-settled and nonexistent claims are skipped. Self-claim remains available
+    ///      and reverts if the claim has already been settled. This batch is atomic: a failed
+    ///      transfer rolls back accounting and all transfers. Automation can retry claims
+    ///      individually to isolate failures without marking an unpaid claim as settled.
+    /// @return totalSettled Sum of underlying assets paid across the batch.
+    function keeperSettleClaims(uint256 epochId, uint256[] calldata claimIds)
+        external
+        returns (uint256 totalSettled)
+    {
+        _notPausedFundedClaim();
+        _enterNonReentrant();
+        _rollCapEpochIfNeeded(CoreStorage.layout());
+
+        EpochQueueStorage.Layout storage eq = EpochQueueStorage.layout();
+        EpochQueueStorage.EpochData storage epoch = eq.epochs[epochId];
+        if (epoch.state != EpochQueueStorage.EpochState.Funded) revert EpochNotFunded();
+
+        (uint256 gross, uint256 owed, uint256 index) = _navState();
+        _syncInsolvencyLatch(eq, gross, owed, index);
+
+        uint256 recoveryIndex = epoch.recoveryIndex;
+        address assetAddr = _asset();
+
+        for (uint256 i = 0; i < claimIds.length;) {
+            EpochQueueStorage.EpochClaim storage claim = eq.claims[epochId][claimIds[i]];
+            address user = claim.user;
+            // user == address(0): claimId was never created for this epoch -- skip, rather
+            // than let a bogus ID corrupt outstandingClaimCount/reservedForClaims bookkeeping.
+            if (user != address(0) && !claim.claimed) {
+                uint256 assetsOwed = claim.assetsOwed;
+                uint256 assets = _payoutAt(assetsOwed, recoveryIndex);
+                claim.claimed = true;
+                uint256 reservedBefore = eq.reservedForClaims;
+                uint256 released = _settleClaimAccounting(eq, epoch, assetsOwed);
+                // Each claim pays a DIFFERENT recipient, so the transfer happens immediately
+                // below rather than summed into one final transfer (unlike
+                // batchClaimEpochAssets) -- paidSoFar is 0 every iteration because the hot
+                // balance _coverPayout reads already reflects every prior transfer in this loop.
+                assets = _coverPayout(assets, released, reservedBefore, 0);
+
+                if (assets > 0) {
+                    IERC20(assetAddr).safeTransfer(user, assets);
+                }
+                totalSettled += assets;
+
+                emit EpochAssetsClaimed(epochId, claimIds[i], user, assets, assetsOwed);
+                emit IERC4626.Withdraw(address(this), user, user, assets, claim.grossShares);
+            }
+            unchecked {
+                ++i;
+            }
+        }
+
+        _exitNonReentrant();
+    }
+
     /// @dev Bookkeeping for one claim leaving the books. The claim releases its proportional
     ///      share of ITS OWN epoch's earmark (`reservedRemaining`), never another epoch's: the
     ///      earmark was crystallized at fund time (Option A) as exactly what was reserved for
