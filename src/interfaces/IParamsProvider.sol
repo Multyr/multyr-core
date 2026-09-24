@@ -28,12 +28,8 @@ interface IParamsProvider {
         uint16 capPerEpochBps; // Max immediate withdrawals per epoch (e.g., 1000 = 10%)
         uint256 maxWithdrawalPerBlock; // Max total withdrawals per block
         uint256 maxWithdrawalPerTx; // Max single transaction withdrawal
-        // @dev DEAD for withdrawals under the economic-exit model (spec §6.4: no withdrawal
-        // minimum, deposits only). No code path reads this for a request any more. Left in the
-        // struct/storage rather than removed -- 16 deploy/ops scripts (including a dedicated
-        // SetMinClaimAmount.s.sol) read and assert on it, and governance-managed GlobalConfig
-        // storage would need a coordinated migration. remove in a
-        // follow-up alongside those scripts, not here.
+        // Retained for storage, ABI and deployment-script compatibility.
+        // Economic exits have no minimum claim amount; deposit limits are separate.
         uint256 minClaimAmount; // DEPRECATED, unused for exits -- see @dev above
         uint64 lockPeriod; // Deposit lock period in seconds
     }

@@ -391,7 +391,6 @@ contract BufferManager_MultiAdapter_POC is Test {
 
     // =========================================================================
     // ISSUE 1 — executeDeploy()/rebalance() must support more than 2 adapters.
-    // Previously: len==3 unconditionally reverted InvalidWarmAdapters().
     // =========================================================================
     function test_executeDeploy_generalizesToThreeAdapters() public {
         _deployBufferManager();
@@ -421,7 +420,7 @@ contract BufferManager_MultiAdapter_POC is Test {
         // increment too (EVM revert semantics) — so only a3's persisted counter is
         // observable here. The trace (forge test -vvv) shows both a1.deposit() and
         // a2.deposit() were attempted and reverted before a3 succeeded, which is the
-        // actual behavior under test: previously len==3 reverted InvalidWarmAdapters()
+        // Three configured adapters must remain deployable.
         // before ever trying any adapter.
         assertEq(a3.depositCallCount(), 1, "a3 tried and succeeded");
         assertEq(usdc.balanceOf(address(a3)), 400e6, "funds landed in the 3rd adapter");

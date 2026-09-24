@@ -165,11 +165,8 @@ Source: `src/core/modules/ERC4626Module.sol:163-250`.
 **Delegatecall**: yes
 **Storage namespaces**: `CoreStorage`, `EpochQueueStorage`, `FeeStorage`, `FixedMaturityStorage`
 
-> **History**: this module replaced `QueueModule.sol` (a FIFO array with a keeper-scanned
-> settle loop) as the sole production queue-settlement mechanism. `QueueModule.sol` has been
-> deleted; see `docs/queue-mechanics.md` for the full behavioral writeup and migration notes.
-> The retired `QueueStorage.sol` layout is kept only as a permanently-reserved EIP-7201 slot —
-> no live code reads or writes it.
+`EpochQueueStorage` holds active queue state. The `QueueStorage.sol` EIP-7201 slot
+is reserved; no live code reads or writes it.
 
 ### 3.1 Role
 

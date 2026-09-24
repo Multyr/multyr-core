@@ -1,7 +1,5 @@
 # audit-scope.md — Multyr Core: Audit Scope & Security Profile
 
-
-
 **Version**: 1.0.0 | **Branch**: reorg/runbook-docs-consolidate-01a.4 | **Commit**: see footer
 
 ---
@@ -174,8 +172,8 @@ Total: 51 `.sol` files in `src/core/`.
 | L1 | **Owner key is single point of control** | Design choice | No on-chain DAO. Mitigated by vetoer + timelock. Deployment to multi-sig (Safe) is recommended. |
 | L2 | **`FLAG_SYSTEM_SEALED` does not freeze `roleOf[selector]`** | Known gap (AC8) | Owner can change per-function roles post-seal. Timelock provides recourse window. |
 | L3 | **`forceWithdrawAll` is best-effort (F-03: resolved)** | Design choice, mitigated | Delivers `min(hot, targetAssets)` — still no guarantee of full liquidity. A mandatory `minAssetsOut` parameter reverts the whole call (`SlippageExceeded`, no state change) if the fill falls short. See `test/sprint-test/ForceWithdrawAll_SlippagePOC.t.sol`. |
-| L4 | **Settlement is epoch-wide, pull-based** | Design choice (superseded L4) | `EpochedQueueModule` replaced the retired per-claim FIFO settle loop (gas-bounded `_settleLoop`) with `closeCurrentEpoch()`/`fundEpoch()` (epoch-wide, O(1) in claim count) and `claimEpochAssets()` (pull-based, per user). No gas-safety partial-exit is needed since no single call iterates over claims. |
-| L5 | **INSTANT fallback always becomes a standard epoch claim** | Design choice | `requestInstantWithdrawal` requests that fail `_canInstant()` fall back to the exact same code path as `requestEpochWithdrawal` — there is no `immediate` flag on `EpochClaim` to mis-set (the BUG 6 class in the retired `QueueModule` is eliminated by construction, not by a fix). |
+| L4 | **Epoch funding and per-claim settlement** | Design choice | `closeCurrentEpoch()` and `fundEpoch()` operate on epoch aggregates. Owners can claim individually; `keeperSettleClaims()` pays recorded owners in an atomic batch. Automation bounds batch size and isolates failures with individual retries. |
+| L5 | **INSTANT fallback always becomes a standard epoch claim** | Design choice | `requestInstantWithdrawal` requests that fail `_canInstant()` fall back to the exact same code path as `requestEpochWithdrawal` — fallback claims use the standard fee tier and fixed request-time pricing. |
 | L6 | **`preMaturityForceExitPenaltyBps` max 50%** | Design constraint | Hard cap at 5000 bps validated in `configureFixedMaturity`. |
 | L7 | **`BatchGuardrails.sol` is peripheral** | Design choice | Not part of CoreVault module dispatch. Separate validation layer, not enforced at core level. |
 | L8 | **`Roles.sol` and `Ownable2StepMixin.sol` are legacy** | Legacy artifact | pragma 0.8.24, NOT imported by active modules. Present in codebase but not deployed. |
@@ -282,7 +280,7 @@ Cross-referenced to test files for auditor traceability:
 
 Priority ranking based on value at risk and complexity:
 
-1. **Settlement and share accounting** (CRITICAL): `EpochedQueueModule.closeCurrentEpoch`, `fundEpoch`, `claimEpochAssets`, `_crystallize`. This is a substantially rewritten implementation (epoch-batched, not per-claim FIFO) that replaced the retired `QueueModule` post-first-audit — it has NOT yet been through the same shadow-report fork-replay process that found the four HIGH bugs listed in §5.1 for the old module. `_crystallize` was ported verbatim and inherits BUG-4-equivalent regression coverage; the epoch close/fund/claim path is new and should be treated as fresh audit surface, not a regression check. PPS must remain exact — locked once at `closeCurrentEpoch()`, applied identically to every claim in that epoch.
+1. **Settlement and share accounting** (CRITICAL): review request-time pricing and share burns, `closeCurrentEpoch`, `fundEpoch`, owner and keeper claims, and performance fee crystallization. Requests fix nominal liabilities; funding fixes each cohort’s recovery index after reconciling liquidity and validating NAV for haircuts. Check reserve isolation, free-asset funding across cohorts, rounding, and permissionless settlement. Closing an epoch does not price its claims.
 
 2. **ERC-4626 compliance at boundaries** (HIGH): `previewDeposit`, `previewWithdraw`, `mint` fee symmetry with `deposit`. Boundary conditions (totalAssets=0, totalSupply=0) and mint/deposit equivalence.
 

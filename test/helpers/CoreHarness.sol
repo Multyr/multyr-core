@@ -73,13 +73,15 @@ contract CoreHarness is CoreVault {
         _setModuleUnsafe(EpochedQueueModule.epochClaim.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.nextClaimIdForEpoch.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.outstandingClaimCount.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.fundedOutstandingClaimCount.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.fundedEpochCount.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.oldestUnfundedEpochId.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.epochDeficit.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.canCloseCurrentEpoch.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.reservedForClaims.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.syncInsolvencyState.selector, address(queueModule), ROLE_PUBLIC);
-
         _setModuleUnsafe(EpochedQueueModule.rollCapEpochIfNeeded.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.keeperSettleClaims.selector, address(queueModule), ROLE_PUBLIC);
 
         // Wire up admin module owner selectors (OWNER)
         _setModuleUnsafe(AdminModule.submitFeeParams.selector, address(adminModule), ROLE_OWNER);

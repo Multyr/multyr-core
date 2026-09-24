@@ -44,6 +44,14 @@ interface IQueueModule {
     ///         withdrawal happens to be first after rollover.
     function rollCapEpochIfNeeded() external;
 
+    /// @notice Permissionless: settle a batch of FUNDED, unclaimed claims, paying each one
+    ///         directly to its owner regardless of caller -- lets a keeper sweep claims without
+    ///         every user submitting their own transaction. claimEpochAssets/
+    ///         batchClaimEpochAssets remain the self-claim fallback if no keeper is run.
+    function keeperSettleClaims(uint256 epochId, uint256[] calldata claimIds)
+        external
+        returns (uint256 totalSettled);
+
     /// @notice End epoch and crystallize performance fee
     /// @dev Calls performance fee crystallization and updates NAV smoothing
     function endEpochCrystallize() external;
@@ -75,6 +83,12 @@ interface IQueueModule {
     ///         signal (standard queue depth has zero effect on the instant bucket); still the
     ///         FixedMaturityModule Matured->Closed gate (== 0 required).
     function outstandingClaimCount() external view returns (uint256);
+
+    /// @notice Unclaimed claims in Funded epochs, including zero-recovery claims.
+    function fundedOutstandingClaimCount() external view returns (uint256);
+
+    /// @notice Number of epochs that have transitioned to Funded. Monotonically increasing.
+    function fundedEpochCount() external view returns (uint256);
 
     /// @notice Oldest epoch that is CLOSED but not yet FUNDED
     function oldestUnfundedEpochId() external view returns (uint256);

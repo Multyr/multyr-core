@@ -71,10 +71,10 @@ audit's subject; they are listed last for completeness.
 |---|---|---|
 | `_crystallizeExit` — insolvency / zero-equity check (`liabilityState`) | A | |
 | `_crystallizeExit` — `convertToAssets(netShares)` | B | **the one pricing call** for a request |
-| `_epochCapRemaining(…, _totalAssets())` (`capPerEpochBps`) | B | read **before** the request moves the NAV |
+| `_epochCapRemaining` (`capPerEpochBps`) | B | cap-epoch NAV snapshot, fixed before assets or supply change |
 | `_canInstant` — free liquidity | A | hot − reserved, saturating |
-| `fundEpoch` — need (`nominal × index`), `reservedForClaims`, hot | A | saturating |
-| `claimEpochAssets` / `batchClaimEpochAssets` — index | A | via `liabilityState()` |
+| `fundEpoch` — free-asset recovery ratio, `reservedForClaims`, hot | A | reserves excluded from both assets and liabilities; saturating |
+| `claimEpochAssets` / `batchClaimEpochAssets` / `keeperSettleClaims` — payout | A | immutable cohort `recoveryIndex` |
 | `_crystallize`, `_pps` (perf fee, HWM) | B | crystallisation uses NAV net of `totalOwed` |
 | `_updateNavSmooth` | B | |
 | `syncInsolvencyState` | A | |
@@ -124,7 +124,8 @@ audit's subject; they are listed last for completeness.
 3. Successful instant exits consume their net payout from the cap. The cap uses
    `capPerEpochBps` and the cap-epoch NAV snapshot; `DynamicCapParams` has no effect.
 4. Requests refresh warm NAV, then require `navStatus()` to be valid before pricing.
-   Invalid or stale inputs reject the request. Funding requires valid NAV whenever
+   Invalid or stale inputs reject the request. Funding attempts a soft refresh of stale warm NAV when a haircut is indicated,
+   recomputes the funding requirement, and requires valid NAV whenever
    crystallization would produce a recovery index below `1e18`; invalid attempts emit
    `EpochFundingNavInvalid` and leave the epoch Closed. Governance can disable an affected
    strategy to explicitly recognize its write-down.
@@ -160,7 +161,7 @@ does not have, and the old ones would read a net-of-liabilities NAV from the new
    `FixedMaturityModule`, `BufferManager`, `StrategyRouter`, `VaultUpkeep`, `CoreVaultLens`.
    Contract size check: `CoreVault` runtime is 22,137 B (limit 24,576).
 4. **Wire and verify** the selectors (`SelectorLib.TOTAL_SELECTORS`), `approveWarmAdapters`,
-   the fee params (note deviation 2 for `immediateExitPenaltyBps`), then seal.
+   the fee params, including `immediateExitPenaltyBps` for successful instant exits, then seal.
 5. **Move depositors** with the existing Arbitrum migration tooling (old vault → underlying → new vault).
    Open item: the tooling predates this PR and has not been re-run against it.
 6. **Downstream (out of scope here, in this order after approval):** subgraph (`assetsOwed` on
@@ -200,3 +201,21 @@ of 50, preserving a recovery index of 0.6 without requiring the first cohort to 
 Each funded cohort retains its index regardless of later asset recovery or claim order.
 NAV must be valid before any haircut is crystallized. A transient invalid valuation cannot
 transfer value from exiting creditors to remaining shareholders through funding.
+
+### 8.3 Permissionless claim settlement
+
+`keeperSettleClaims` pays recorded claim owners and skips nonexistent or settled claims.
+`ClaimSettlementUpkeep` computes its own bounded circular scan, ignoring caller-supplied
+cursors. It revisits unfunded epochs, stops while funded claims are paused, and retries
+a failed batch one claim at a time. Failed claims have a one-hour retry delay; empty
+scan pages advance with a one-minute cooldown only while funded claims remain unsettled.
+An empty outstanding count or funded outstanding count disables upkeep without scanning history.
+
+`FeeCollector.harvestQueued` removes claims already settled by a keeper and distributes
+available underlying. It also clears settled entries if that underlying was distributed
+through the token distribution entrypoint before harvest.
+
+## 9. Operational runbooks
+
+- [Insolvency governance: recover, reconcile, then recognize loss](insolvency-runbook.md).
+- [Required automatic settlement, LINK budgeting and manual fallback](claim-settlement-operations.md).

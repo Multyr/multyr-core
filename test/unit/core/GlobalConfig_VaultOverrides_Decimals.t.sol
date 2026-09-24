@@ -5,7 +5,7 @@ import { Test } from "forge-std/Test.sol";
 import { GlobalConfig } from "../../../src/core/config/GlobalConfig.sol";
 import { IParamsProvider } from "../../../src/interfaces/IParamsProvider.sol";
 
-/// @notice Proves the two previously-dead per-vault override paths now work: withdrawal
+/// @notice Verifies asset-denominated per-vault overrides: withdrawal
 ///         config (minClaimAmount) and the GOV_CAPS family (minDeployAmount, among others).
 ///         Both are asset-unit denominated and needed per-vault for non-USDC deployments
 ///         since GlobalConfig is shared across vaults with potentially different decimals.

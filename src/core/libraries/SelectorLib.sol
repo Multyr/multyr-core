@@ -23,8 +23,8 @@ library SelectorLib {
     // SELECTOR COUNTS (for validation)
     // ═══════════════════════════════════════════════════════════════════════════════
     // "Queue module" = EpochedQueueModule (the sole queue-settlement mechanism).
-    uint256 internal constant QUEUE_MODULE_SELECTORS = 10; // -1: cancelEpochWithdrawal (removed), +1: syncInsolvencyState, +1: rollCapEpochIfNeeded
-    uint256 internal constant QUEUE_MODULE_VIEW_SELECTORS = 10; // reservedForClaims; closedPendingAssets + totalEscrowedShares removed (economic-exit model)
+    uint256 internal constant QUEUE_MODULE_SELECTORS = 11; // -1: cancelEpochWithdrawal (removed), +1: syncInsolvencyState, +1: rollCapEpochIfNeeded, +1: keeperSettleClaims
+    uint256 internal constant QUEUE_MODULE_VIEW_SELECTORS = 12; // Includes funding counters
     uint256 internal constant ADMIN_MODULE_OWNER_SELECTORS = 35; // +1: setRewardsTreasury
     uint256 internal constant ADMIN_MODULE_VIEW_SELECTORS = 15; // +1: getForceExitPenalty, +1: isPerfInitialized
     uint256 internal constant ERC4626_MODULE_SELECTORS = 11; // +1: forceWithdraw, +1: forceWithdrawAll
@@ -50,6 +50,7 @@ library SelectorLib {
         selectors[7] = EpochedQueueModule.syncOldestUnfundedEpoch.selector;
         selectors[8] = EpochedQueueModule.syncInsolvencyState.selector;
         selectors[9] = EpochedQueueModule.rollCapEpochIfNeeded.selector;
+        selectors[10] = EpochedQueueModule.keeperSettleClaims.selector;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -67,6 +68,8 @@ library SelectorLib {
         selectors[7] = EpochedQueueModule.currentEpochClaimCount.selector;
         selectors[8] = EpochedQueueModule.epochDeficit.selector;
         selectors[9] = EpochedQueueModule.reservedForClaims.selector;
+        selectors[10] = EpochedQueueModule.fundedOutstandingClaimCount.selector;
+        selectors[11] = EpochedQueueModule.fundedEpochCount.selector;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════

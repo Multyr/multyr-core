@@ -1,12 +1,5 @@
 # Multyr Core — Storage Layout
 
-> **Superseded in part — see [economic-exit.md](economic-exit.md).** This document describes the
-> escrow / `ppsAtClose` withdrawal model. Requests are now priced and their shares burned **at
-> request**; epochs are settlement buckets only; `cancelEpochWithdrawal`, `ppsAtClose`,
-> `escrowedShares` and `closedPendingAssets` are gone; `totalAssets()` is net of `totalOwed`.
-> Everything below about those topics is historical until this file is rewritten.
-
-
 > **Status**: draft | **Audit-scope**: multyr-core@pierdev
 > **Last reviewed by code**: commit `1595a279` on branch `pierdev` (date: 2026-05-15)
 > **Version**: 1.0.0-draft
@@ -249,6 +242,12 @@ Source: `src/core/storage/CoreStorage.sol:97-118`. These fields were appended to
 
 ---
 
+### 3.9 Cap snapshot and recovery fields
+
+`rewardsTreasury`, `recoveryGate` and `capBaseSnapshot` follow the allocation-engine fields
+in declaration order. The snapshot is active shareholder NAV at cap rollover. Check
+`CoreStorage.sol` for packing and use compiler storage output before constructing raw slots.
+
 ## 4. FeeStorage.Layout — EIP-7201 (dsf.core.fee.storage.v1)
 
 ```solidity
@@ -346,69 +345,65 @@ whether its owning contract still exists.
 
 ### 5.1 EpochData
 
-One record per epoch, keyed by `epochId`.
+Fields are declared in this order in `EpochedQueueModule.sol`; Solidity packing rules apply.
 
 | Field | Type | Purpose |
 |---|---|---|
-| `state` | `EpochState` | `Open` -> `Closed` -> `Funded` |
-| `openedAt` / `closedAt` / `fundedAt` | `uint64` | Lifecycle timestamps |
-| `totalGrossShares` | `uint256` | Sum of submitted shares, fee included |
-| `totalNetShares` | `uint256` | Sum after fee deduction |
-| `totalFeeShares` | `uint256` | Fee portion, batch-transferred at close |
-| `ppsAtClose` | `uint256` | WAD price locked once, at `closeCurrentEpoch()` |
-| `totalNetAssets` | `uint256` | `totalNetShares * ppsAtClose`, the epoch's liability |
-| `claimedAssets` | `uint256` | Running total paid out |
-| `claimCount` | `uint256` | Claims submitted to this epoch |
+| `state` | `EpochState` | Open, Closed or Funded |
+| `openedAt`, `closedAt`, `fundedAt` | `uint64` each | Lifecycle timestamps |
+| `totalGrossShares`, `totalNetShares`, `totalFeeShares` | `uint256` each | Request-time informational totals; fee shares already transferred |
+| `totalAssetsOwed` | `uint256` | Sum of fixed nominal request liabilities |
+| `claimedAssets` | `uint256` | Nominal liabilities of settled claims |
+| `claimCount` | `uint256` | Number of requests in this epoch |
+| `reservedRemaining` | `uint256` | Cash reserved for this cohort's unclaimed liabilities |
+| `recoveryIndex` | `uint256` | Immutable WAD ratio fixed at funding |
 
 ### 5.2 EpochClaim
 
-One record per claim, keyed by `(epochId, claimId)`. Claim IDs restart at 1 in
-each epoch; there is no global claim ID.
+Keys are `(epochId, claimId)`; IDs begin at one per epoch. In declaration order:
 
 | Field | Type | Purpose |
 |---|---|---|
-| `user` | `address` | Claim owner, the only address that can claim or cancel |
-| `netShares` | `uint256` | Burned from escrow at claim time |
-| `feeShares` | `uint256` | Already sent to `feeCollector` at epoch close |
-| `claimed` | `bool` | Set on payout, and reused to mark a cancellation |
-
-There is no `immediate` flag. An instant request that cannot settle falls back
-to the identical queue path, so the class of bug where a fallback claim was
-stored as `immediate = true` and re-checked against the cap at settlement is
-eliminated by construction rather than by a fix.
+| `user` | `address` | Recorded payout recipient and authorized self-claim caller |
+| `requestedAt` | `uint64` | Request timestamp |
+| `claimed` | `bool` | True only after successful settlement, including zero recovery |
+| `assetsOwed` | `uint256` | Fixed nominal liability priced at request |
+| `grossShares` | `uint256` | Submitted shares; net shares burned and fee shares transferred at request |
 
 ### 5.3 Layout Fields
 
 | Field | Type | Purpose |
 |---|---|---|
-| `currentEpochId` | `uint256` | The single `Open` epoch |
-| `epochs` | `mapping(uint256 => EpochData)` | Per-epoch aggregate |
-| `claims` | `mapping(uint256 => mapping(uint256 => EpochClaim))` | Per-claim data |
-| `nextClaimId` | `mapping(uint256 => uint256)` | Per-epoch claim counter, starts at 1 |
-| `escrowedShares` | `uint256` | Shares held in vault escrow across all epochs |
-| `outstandingClaimCount` | `uint256` | Unclaimed claims across all epochs; the dynamic-cap queue-depth signal |
-| `oldestUnfundedEpochId` | `uint256` | Keeper cursor: the oldest `Closed` epoch |
-| `reservedForClaims` | `uint256` | Assets earmarked for `Funded`-but-unclaimed claims |
-| `closedPendingAssets` | `uint256` | Locked-price liability of `Closed`-not-yet-`Funded` epochs |
+| `currentEpochId` | `uint256` | Current settlement bucket |
+| `epochs` | mapping | Epoch aggregates |
+| `claims` | nested mapping | Claim records |
+| `nextClaimId` | mapping | Last assigned ID per epoch |
+| `outstandingClaimCount` | `uint256` | All unclaimed claims across all states |
+| `oldestUnfundedEpochId` | `uint256` | Funding cursor |
+| `reservedForClaims` | `uint256` | Sum of funded cohorts' remaining reserves |
+| `totalOwed` | `uint256` | Unfunded nominal liabilities plus funded reserves |
+| `insolvencyLatched` | `bool` | Event de-duplication only |
+| `fundedOutstandingClaimCount` | `uint256` | Appended counter: unclaimed claims in Funded epochs |
+| `fundedEpochCount` | `uint256` | Appended counter: Closed-to-Funded transitions, only increases |
 
-### 5.4 Escrow and Reservation Invariants
+Funding adds `epoch.claimCount` to the funded counter once and increments `fundedEpochCount`. Every successful manual,
+batch or keeper claim decrements both outstanding counters. Reverts roll all accounting
+back. Zero-recovery claims count even when `reservedForClaims == 0`.
 
-Two invariants hold at all times, both asserted by the stateful suites:
+The funded counters are initialized by the full lifecycle on a new deployment. Merely
+appending these fields to a deployed vault with funded claims does not backfill them: such an
+upgrade requires a separately reviewed initialization/migration before enabling claims or
+automation. The economic-exit deployment plan uses a new CoreVault.
 
-- `vault.balanceOf(vault) == escrowedShares` — every escrowed share is
-  accounted for. Fee shares leave escrow at epoch close, not at claim time.
-- `assetBalanceOf(vault) >= reservedForClaims` — the vault always holds what it
-  has already promised to funded claimants. Every consumer of the hot balance
-  (instant exits, force exits, strategy deploys, warm-buffer deploys, funding a
-  later epoch) must treat `hot - reservedForClaims` as the only spendable
-  amount.
+### 5.4 Liability and Reservation Invariants
 
-`reservedForClaims` is not an exact round trip. It is taken on the epoch total
-and released per claim, so per-claim truncation leaves under one asset unit
-behind once an epoch fully drains — measured at 1 wei per multi-claim epoch.
-Never assert `reservedForClaims == 0`.
-
----
+- Requests burn net shares and create nominal liabilities at the same price.
+- Funding reduces `totalOwed` by the cohort haircut and fixes its payout ratio.
+- Settlement releases the cohort's proportionate reserve; its last claim releases all dust.
+- `reservedForClaims` equals the sum of `reservedRemaining` across funded epochs.
+- Free hot is `max(0, hot - reservedForClaims)` for every liquidity consumer.
+- Reserves are already represented in `totalOwed`; do not subtract them again from NAV.
+- `fundedOutstandingClaimCount <= outstandingClaimCount`; both reach zero when all claims settle.
 
 ## 6. FixedMaturityStorage.Layout — EIP-7201 (dsf.core.fixedmaturity.storage.v1)
 
@@ -512,7 +507,7 @@ Which modules read/write which namespaces:
 | Direct (slots 0-6) | R/W (opsNavCache) | — | — | — | — | — |
 | `CoreStorage` | R/W (init, routing) | R (params, flags) | R/W (epoch, user ts) | R/W (components) | R (bm, router) | R (mode flags) |
 | `FeeStorage` | R (previewDeposit) | R/W (deposit fee) | R/W (perf fee, crystallize) | R/W (timelock) | — | — |
-| `EpochQueueStorage` | R (canSettle, via routed views) | R (reservedForClaims) | R/W (epochs, claims, counters) | — | R (reservedForClaims, escrowedShares) | R (outstandingClaimCount) |
+| `EpochQueueStorage` | R (canSettle, via routed views) | R (reservedForClaims) | R/W (epochs, claims, counters) | — | R (reservedForClaims, totalOwed) | R (outstandingClaimCount) |
 | `FixedMaturityStorage` | — | R (gating) | R (gating) | — | R (gating) | R/W (lifecycle) |
 
 ---
@@ -613,9 +608,10 @@ Both `_opsNavCacheTs` (uint64) and `opsNavCacheTtl` (uint32) share slot 6. The t
 
 Fields in `CoreStorage.Layout` are NOT packed by size (each address occupies its own slot for simplicity, as documented in `src/core/storage/CoreStorage.sol:39`). This is intentional for readability and simplicity — gas cost of per-address reads is considered acceptable given the call patterns. Any optimization attempt that reorders fields would break slot alignment.
 
-### 11.4 Claim `immediate = false` on fallback
+### 11.4 Claim settlement flags
 
-When an INSTANT request cannot settle (cap exhausted, lock period not passed, or free liquidity below the ask), it falls back to the identical queue path used by `requestEpochWithdrawal`. The standard fee tier applies (witBps only, no immediateExitPenaltyBps) and no epoch cap is consumed. There is no flag distinguishing the two, so the two paths cannot diverge.
+`EpochClaim.claimed` changes only on settlement; claims cannot be cancelled. Instant
+fallback records a standard fixed liability. Cap eligibility is not rechecked at claim time.
 
 ### 11.5 fundingFailedPPS immutability
 
@@ -631,31 +627,28 @@ This section documents which functions within each module read or write each sto
 
 | Function | CoreStorage | FeeStorage | EpochQueueStorage | FixedMaturityStorage |
 |---|---|---|---|---|
-| `deposit()` | R (packedFlags, paramMinDelay, bufferManager) | R (fee.depBps) | — | R (_checkDepositsAllowed) |
-| `mint()` | R (packedFlags, bufferManager) | R (fee.depBps) | — | R (_checkDepositsAllowed) |
+| `deposit()` | R/W (flags, deposit timestamp, cap epoch/snapshot) | R (fee.depBps) | R (liabilities via NAV) | R (_checkDepositsAllowed) |
+| `mint()` | R/W (flags, deposit timestamp, cap epoch/snapshot) | R (fee.depBps) | R (liabilities via NAV) | R (_checkDepositsAllowed) |
 | `withdraw() / redeem()` | — | — | — | — |
-| `forceWithdraw()` | R/W (lastDepositTs, epochStart, packedFlags) | R/W (witBps, forceExitPenaltyBps) | R (reservedForClaims) | R (_checkForceExitAllowed) |
+| `forceWithdraw()` | R/W (lastDepositTs, epochStart, packedFlags) | R (witBps, forceExitPenaltyBps) | R (reservedForClaims) | R (_checkForceExitAllowed) |
 | `forceWithdrawAll()` | R/W (same as forceWithdraw) | R/W (same) | R (reservedForClaims) | R (_checkForceExitAllowed) |
-| `_depositInternal()` | R/W (lastDepositTs, packedFlags, navSmooth) | R (depBps) | — | R (gating) |
+| `_depositInternal()` | R/W (lastDepositTs, packedFlags, cap epoch/snapshot) | R (depBps) | R (liabilities via NAV) | R (gating) |
 | `_ensureFreshWarmNav()` | R (bufferManager) | — | — | — |
 
 Source: `src/core/modules/ERC4626Module.sol:81-332`.
 
 ### 12.2 EpochedQueueModule
 
-| Function | CoreStorage | FeeStorage | EpochQueueStorage | FixedMaturityStorage |
-|---|---|---|---|---|
-| `requestEpochWithdrawal(shares)` | R (params, incentivesEngine) | R (witBps) | R/W (new claim, escrowedShares, outstandingClaimCount) | R (_checkStandardExitAllowed) |
-| `requestInstantWithdrawal(shares)` | R/W (lastDepositTs, epochWithdrawn, epochStart) | R (witBps, immediateExitPenaltyBps) | R (reservedForClaims); R/W on fallback | R (_checkStandardExitAllowed) |
-| `cancelEpochWithdrawal(epochId, claimId)` | R/W (packedFlags guard) | — | R/W (claim.claimed, escrowedShares, outstandingClaimCount) | — |
-| `closeCurrentEpoch()` | R/W (packedFlags guard, bufferManager) | R (feeCollector) | R/W (ppsAtClose, state, closedPendingAssets, escrowedShares) | R (_checkSettlementAllowed) |
-| `fundEpoch(epochId)` | R/W (packedFlags guard, bufferManager, router) | — | R/W (state, reservedForClaims, closedPendingAssets, oldestUnfundedEpochId) | — |
-| `claimEpochAssets(epochId, claimId)` | R/W (packedFlags guard) | — | R/W (claim.claimed, escrowedShares, outstandingClaimCount, reservedForClaims) | — |
-| `batchClaimEpochAssets(epochId, ids)` | R/W (packedFlags guard) | — | R/W (same as claimEpochAssets, per id) | — |
-| `syncOldestUnfundedEpoch()` | — | — | R/W (oldestUnfundedEpochId) | — |
-| `endEpochCrystallize()` | R/W (navSmooth, lastNavSmoothUpdate) | R/W (highWaterMark, perfRateX, lastCrystallize) | — | — |
+| Operation | Queue writes |
+|---|---|
+| Standard request / instant fallback | Fixed claim, epoch totals, `totalOwed`, outstanding count |
+| Successful instant | Creates and immediately discharges liability; no queued claim |
+| Close | Epoch state/timestamps and next open bucket |
+| Fund | State, recovery index, reserve, write-down, funded count and funding cursor |
+| Manual/batch/keeper claim | Claimed flag, nominal settled total, reserves, liabilities and both counters |
 
-Source: `src/core/modules/EpochedQueueModule.sol`.
+All asset-moving paths also use CoreStorage's reentrancy lock. Cap rollover snapshots
+shareholder NAV before asset/supply changes. Performance fee state lives in FeeStorage.
 
 ### 12.3 AdminModule
 
@@ -800,13 +793,12 @@ CoreStorage.Layout storage core = CoreStorage.layout();
 
 **Why dangerous**: `packedFlags` contains 13 active bits. A low-level write that masks out unknown bits can silently clear the REENTRANCY_LOCKED or SYSTEM_SEALED flags. Always use the high-level `CoreStorage.layout().packedFlags |= (1 << FLAG_*);` pattern.
 
-### 14.5 Treating `pendingShares` as Share Count for NAV
+### 14.5 Double-counting exit liabilities
 
-**Anti-pattern**: Including `EpochQueueStorage.layout().escrowedShares` in totalSupply or totalAssets computations.
-
-**Why dangerous**: Shares held in escrow (pending queue claims) are already counted in `_totalSupply` (slot 2) and `_balances[address(this)]`. Including them again would double-count, artificially increasing share supply and deflating PPS.
-
----
+Net shares leave supply at request and `totalOwed` removes the corresponding assets from
+shareholder NAV. Do not add request shares back to supply or subtract `reservedForClaims`
+from shareholder NAV a second time. The nominal amount in an individual claim is retained
+for recovery-ratio arithmetic; funded aggregate liability is its remaining reserve.
 
 ## 15. Storage Namespace Cross-Reference
 
@@ -823,7 +815,7 @@ Quick reference for auditors navigating the codebase:
 | Pending fee change | `FeeStorage.layout().pendingFee.exists` | `src/core/storage/FeeStorage.sol:56` |
 | HWM for perf fee | `FeeStorage.layout().highWaterMark` | `src/core/storage/FeeStorage.sol:63` |
 | Oldest unfunded epoch | `EpochQueueStorage.layout().oldestUnfundedEpochId` | `src/core/modules/EpochedQueueModule.sol` |
-| Total escrowed shares | `EpochQueueStorage.layout().escrowedShares` | `src/core/modules/EpochedQueueModule.sol` |
+| Outstanding exit liabilities | `EpochQueueStorage.layout().totalOwed` | `src/core/modules/EpochedQueueModule.sol` |
 | Vault mode (OE vs FM) | `FixedMaturityStorage.layout().vaultMode` | `src/core/storage/FixedMaturityStorage.sol:31` |
 | FM lifecycle state | `FixedMaturityStorage.layout().vaultState` | `src/core/storage/FixedMaturityStorage.sol:32` |
 | Funding deadline | `FixedMaturityStorage.layout().fundingDeadlineTs` | `src/core/storage/FixedMaturityStorage.sol:37` |

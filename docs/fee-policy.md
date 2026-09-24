@@ -10,8 +10,6 @@ tags: [fee, withdrawal-fee, performance-fee, timelock, fee-storage]
 
 # Fee Policy
 
-
-
 > **Source of truth**: `src/core/storage/FeeStorage.sol:55` @ `c39f9462`
 > **ADR-015 workflow applied**: full code read before drafting.
 

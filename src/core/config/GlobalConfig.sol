@@ -541,10 +541,8 @@ contract GlobalConfig is IParamsProvider {
         emit VaultOracleOverrideSet(vault, oracle, maxStaleness_);
     }
 
-    /// @notice Per-vault withdrawal config override — configures the
-    ///         WITHDRAWAL override path (vaultWithdrawalOverrides/DefaultWithdrawalUpdated
-    ///         existed but nothing ever wrote them). minClaimAmount is denominated in
-    ///         asset units; zero disables the exit floor independently of deposit limits.
+    /// @notice Configure the per-vault withdrawal cap and lock period.
+    /// @dev minClaimAmount is retained for compatibility and ignored by economic exits.
     function setVaultWithdrawalOverride(address vault, WithdrawalConfig calldata cfg)
         external
         onlyGovernor
