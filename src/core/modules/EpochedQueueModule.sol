@@ -114,6 +114,8 @@ library EpochQueueStorage {
         // was the last insolvency event emitted. Insolvency itself is derived
         // (grossAssets < totalOwed) and never read from here.
         bool insolvencyLatched;
+        // Count of unclaimed claims in Funded epochs, including zero-recovery claims.
+        uint256 fundedOutstandingClaimCount;
     }
 
     function layout() internal pure returns (Layout storage l) {
@@ -542,6 +544,8 @@ contract EpochedQueueModule {
         uint256 unclaimed = epoch.totalAssetsOwed - epoch.claimedAssets;
         uint256 gapNeeded = _scaledByIndex(unclaimed);
         if (gapNeeded < unclaimed) {
+            _trySoftRefreshWarmNav();
+            gapNeeded = _scaledByIndex(unclaimed);
             (bool valid, uint8 reason) = ICoreVault(address(this)).navStatus();
             if (!valid) {
                 emit EpochFundingNavInvalid(epochId, reason);
@@ -632,6 +636,7 @@ contract EpochedQueueModule {
             epoch.reservedRemaining = filled; // currentReserve is always 0 here
 
             epoch.state = EpochQueueStorage.EpochState.Funded;
+            eq.fundedOutstandingClaimCount += epoch.claimCount;
             epoch.fundedAt = uint64(block.timestamp);
 
             // --- Option A: crystallize this cohort's recovery ratio, exactly once ------
@@ -882,6 +887,7 @@ contract EpochedQueueModule {
 
         epoch.claimedAssets += assetsOwed;
         eq.outstandingClaimCount -= 1;
+        eq.fundedOutstandingClaimCount -= 1;
         eq.totalOwed -= released;
         uint256 reserved = eq.reservedForClaims;
         eq.reservedForClaims = reserved - (released < reserved ? released : reserved);
@@ -1215,6 +1221,11 @@ contract EpochedQueueModule {
     ///         "queue depth" signal. See _epochCapRemaining().
     function outstandingClaimCount() external view returns (uint256) {
         return EpochQueueStorage.layout().outstandingClaimCount;
+    }
+
+    /// @notice Unclaimed claims in Funded epochs, including claims with zero recovery.
+    function fundedOutstandingClaimCount() external view returns (uint256) {
+        return EpochQueueStorage.layout().fundedOutstandingClaimCount;
     }
 
     /// @notice Oldest epoch that is CLOSED but not yet FUNDED — what a keeper

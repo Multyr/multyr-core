@@ -8,6 +8,8 @@ import {EpochQueueStorage} from "../core/modules/EpochedQueueModule.sol";
 
 /// @notice Minimal interface for CoreVault + EpochedQueueModule (epoch-model queue) settlement.
 interface IClaimSettlementTarget {
+    function outstandingClaimCount() external view returns (uint256);
+    function fundedOutstandingClaimCount() external view returns (uint256);
     function pausedFundedClaim() external view returns (bool);
     function currentEpochId() external view returns (uint256);
     function nextClaimIdForEpoch(uint256 epochId) external view returns (uint256);
@@ -69,7 +71,10 @@ contract ClaimSettlementUpkeep is AutomationCompatibleInterface, Ownable, Reentr
         override
         returns (bool upkeepNeeded, bytes memory performData)
     {
-        if (target.pausedFundedClaim() || block.timestamp < nextAttemptAt) {
+        if (
+            target.outstandingClaimCount() == 0 || target.fundedOutstandingClaimCount() == 0
+                || target.pausedFundedClaim() || block.timestamp < nextAttemptAt
+        ) {
             return (false, bytes(""));
         }
         (
@@ -83,7 +88,10 @@ contract ClaimSettlementUpkeep is AutomationCompatibleInterface, Ownable, Reentr
     }
 
     function performUpkeep(bytes calldata) external override nonReentrant {
-        if (target.pausedFundedClaim() || block.timestamp < nextAttemptAt) return;
+        if (
+            target.outstandingClaimCount() == 0 || target.fundedOutstandingClaimCount() == 0
+                || target.pausedFundedClaim() || block.timestamp < nextAttemptAt
+        ) return;
         (
             uint256 epochId,
             uint256[] memory ids,
@@ -155,7 +163,10 @@ contract ClaimSettlementUpkeep is AutomationCompatibleInterface, Ownable, Reentr
             ++scanned;
             EpochQueueStorage.EpochData memory epoch = target.epochData(e);
             uint256 last = target.nextClaimIdForEpoch(e);
-            if (epoch.state != EpochQueueStorage.EpochState.Funded || c > last) {
+            if (
+                epoch.state != EpochQueueStorage.EpochState.Funded
+                    || epoch.claimedAssets == epoch.totalAssetsOwed || c > last
+            ) {
                 if (found != 0) break;
                 if (wrapped && e == startEpoch) break;
                 ++e;

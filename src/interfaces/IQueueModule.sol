@@ -84,6 +84,9 @@ interface IQueueModule {
     ///         FixedMaturityModule Matured->Closed gate (== 0 required).
     function outstandingClaimCount() external view returns (uint256);
 
+    /// @notice Unclaimed claims in Funded epochs, including zero-recovery claims.
+    function fundedOutstandingClaimCount() external view returns (uint256);
+
     /// @notice Oldest epoch that is CLOSED but not yet FUNDED
     function oldestUnfundedEpochId() external view returns (uint256);
 

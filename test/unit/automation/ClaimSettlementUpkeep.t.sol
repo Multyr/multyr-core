@@ -357,6 +357,7 @@ contract ClaimSettlementUpkeep_Test is Test {
         upkeep.performUpkeep("");
         assertFalse(_q().epochClaim(e, ca).claimed);
         assertTrue(_q().epochClaim(e, cb).claimed);
+        assertEq(_q().fundedOutstandingClaimCount(), 1, "failed batch rolls counter back");
         assertGt(upkeep.retryAfter(e, ca), block.timestamp);
         (bool needed,) = upkeep.checkUpkeep("");
         assertFalse(needed);
@@ -383,5 +384,77 @@ contract ClaimSettlementUpkeep_Test is Test {
         vm.warp(block.timestamp + 1 minutes);
         upkeep.performUpkeep("");
         assertTrue(_q().epochClaim(e, cb).claimed);
+    }
+
+    function _settledHistory() internal {
+        _deposit(alice, 1_000e6);
+        uint256 count = upkeep.maxScanPerUpkeep() + 1;
+        uint256[] memory ids = new uint256[](count);
+        uint256 e;
+        for (uint256 i; i < count; ++i) {
+            (e, ids[i]) = _request(alice, 1e6);
+        }
+        _close();
+        _q().fundEpoch(e);
+        assertEq(_q().fundedOutstandingClaimCount(), count);
+        vm.prank(alice);
+        _q().batchClaimEpochAssets(e, ids);
+        assertEq(_q().fundedOutstandingClaimCount(), 0);
+    }
+
+    function test_v2_maintenanceWithNothingToDo() public {
+        _settledHistory();
+        assertEq(_q().outstandingClaimCount(), 0);
+        uint256 cursor = upkeep.cursorClaimId();
+        uint256 epoch = upkeep.cursorEpochId();
+        for (uint256 i; i < 60; ++i) {
+            vm.warp(block.timestamp + 1 minutes);
+            (bool needed,) = upkeep.checkUpkeep("");
+            assertFalse(needed, "settled history must not spend LINK");
+            upkeep.performUpkeep("");
+        }
+        assertEq(upkeep.cursorClaimId(), cursor);
+        assertEq(upkeep.cursorEpochId(), epoch);
+        assertEq(upkeep.nextAttemptAt(), 0);
+    }
+
+    function test_v2_unfundedClaimsDoNotTriggerMaintenance() public {
+        _settledHistory();
+        (uint256 e,) = _request(alice, 1e6);
+        assertEq(_q().outstandingClaimCount(), 1);
+        (bool needed,) = upkeep.checkUpkeep("");
+        assertFalse(needed, "open claims cannot be paid");
+        _close();
+        (needed,) = upkeep.checkUpkeep("");
+        assertFalse(needed, "closed unfunded claims cannot be paid");
+        _q().fundEpoch(e);
+        (needed,) = upkeep.checkUpkeep("");
+        assertTrue(needed);
+        upkeep.performUpkeep("");
+        assertEq(_q().fundedOutstandingClaimCount(), 0);
+    }
+
+    function test_v2_counterTracksZeroRecoveryAndIdempotentFunding() public {
+        uint256 a = _deposit(alice, 100e6);
+        uint256 b = _deposit(bob, 100e6);
+        (uint256 e, uint256 ca) = _request(alice, a);
+        (, uint256 cb) = _request(bob, b);
+        _close();
+        vm.prank(address(core));
+        IERC20(USDC).transfer(address(0xdead), 200e6);
+        _q().fundEpoch(e);
+        _q().fundEpoch(e);
+        assertEq(_q().epochData(e).recoveryIndex, 0);
+        assertEq(_q().fundedOutstandingClaimCount(), 2);
+        vm.prank(alice);
+        _q().claimEpochAssets(e, ca);
+        assertEq(_q().fundedOutstandingClaimCount(), 1);
+        (bool needed,) = upkeep.checkUpkeep("");
+        assertTrue(needed, "zero payouts still need accounting settlement");
+        upkeep.performUpkeep("");
+        assertTrue(_q().epochClaim(e, cb).claimed);
+        assertEq(_q().fundedOutstandingClaimCount(), 0);
+        (needed,) = upkeep.checkUpkeep("");
+        assertFalse(needed);
     }
 }

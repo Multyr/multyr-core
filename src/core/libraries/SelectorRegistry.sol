@@ -144,13 +144,14 @@ contract SelectorRegistry {
         if (selector == EpochedQueueModule.keeperSettleClaims.selector) return ROLE_PUBLIC;
 
         // ─────────────────────────────────────────────────────────────────────────
-        // EPOCHEDQUEUEMODULE VIEW SELECTORS (10 total) - MUST BE ROLE_PUBLIC
+        // EPOCHEDQUEUEMODULE VIEW SELECTORS (11 total) - MUST BE ROLE_PUBLIC
         // ─────────────────────────────────────────────────────────────────────────
         if (selector == EpochedQueueModule.currentEpochId.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.epochData.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.epochClaim.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.nextClaimIdForEpoch.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.outstandingClaimCount.selector) return ROLE_PUBLIC;
+        if (selector == EpochedQueueModule.fundedOutstandingClaimCount.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.oldestUnfundedEpochId.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.canCloseCurrentEpoch.selector) return ROLE_PUBLIC;
         if (selector == EpochedQueueModule.currentEpochClaimCount.selector) return ROLE_PUBLIC;

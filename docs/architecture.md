@@ -1,12 +1,5 @@
 # Multyr Core — Architecture
 
-> **Superseded in part — see [economic-exit.md](economic-exit.md).** This document describes the
-> escrow / `ppsAtClose` withdrawal model. Requests are now priced and their shares burned **at
-> request**; epochs are settlement buckets only; `cancelEpochWithdrawal`, `ppsAtClose`,
-> `escrowedShares` and `closedPendingAssets` are gone; `totalAssets()` is net of `totalOwed`.
-> Everything below about those topics is historical until this file is rewritten.
-
-
 > **Status**: draft | **Audit-scope**: multyr-core@pierdev
 > **Last reviewed by code**: commit `1595a279` on branch `pierdev` (date: 2026-05-15)
 > **Version**: 1.0.0-draft
@@ -195,7 +188,7 @@ The routing table is populated during deployment by `setModulesBatch()`. Typical
 | Selector Group | Module | Role |
 |---|---|---|
 | `deposit`, `mint`, `redeem`, `withdraw`, `forceWithdraw` | ERC4626Module | ROLE_PUBLIC |
-| `requestEpochWithdrawal`, `cancelEpochWithdrawal`, `closeCurrentEpoch`, `fundEpoch`, `claimEpochAssets`, `requestInstantWithdrawal` | EpochedQueueModule | ROLE_PUBLIC |
+| `requestEpochWithdrawal`, `keeperSettleClaims`, `closeCurrentEpoch`, `fundEpoch`, `claimEpochAssets`, `requestInstantWithdrawal` | EpochedQueueModule | ROLE_PUBLIC |
 | `submitFeeParams`, `acceptFeeParams`, `setParams`, `setRouter`, ... | AdminModule | ROLE_OWNER |
 | `setVaultModeFixedMaturity`, `configureFixedMaturity`, `startFixedMaturityCycle` | FixedMaturityModule | ROLE_OWNER |
 | `markMatured`, `refundClaim`, `autoCloseFunding` | FixedMaturityModule | ROLE_PUBLIC |
@@ -269,22 +262,18 @@ Bits 13-17 (review §20/§21, "Recommended Withdrawal Circuit Breakers" / "Requi
 
 ### 5.1 Live NAV (Canonical)
 
-`totalAssets()` is the canonical NAV function used for all ERC-4626 computations (PPS, `convertToAssets`, `convertToShares`, fee crystallization, deposit/withdrawal math):
+`CoreVault.grossAssets()` sums hot asset balance, cached warm NAV and enabled strategy
+assets. `totalOwed()` is unfunded nominal liabilities plus funded cohorts' remaining
+reserves. The ERC-4626 shell computes `totalAssets() = max(0, grossAssets() - totalOwed())`.
+Share conversions, deposit/mint pricing and performance fees use this shareholder NAV.
+Liquidity planning uses gross assets and must preserve `reservedForClaims`.
 
-```solidity
-// CoreVault.sol:500-527
-function totalAssets() public view override returns (uint256) {
-    (uint256 hot, uint256 strat, uint256 warm) = _totalAssetsBreakdown();
-    return hot + strat + warm;
-}
-```
-
-NAV consists of three components:
-- **Hot** (`hot`): USDC held directly in `CoreVault` (`IERC20(asset()).balanceOf(address(this))`).
-- **Strategy** (`strat`): `IStrategyRouter.totalStrategyAssetsSafe()` — sum of all enabled strategies' reported NAV.
-- **Warm** (`warm`): `IBufferManager.warmNavState()` — NAV held by warm adapters (Aave, Morpho, etc., used for short-term buffer). Returns the cached warm NAV; validity checked separately.
-
-The `totalAssetsBreakdown()` external function returns `(nav, hot, warm)` — note `strat` is included in `nav` but not returned separately.
+`totalAssetsBreakdown()` returns gross portfolio NAV, hot and warm components. The live
+`liabilityIndex()` is diagnostic; funded claims use their immutable cohort recovery index.
+`navStatus()` validates the warm cache (including its 15-minute age limit), enabled strategy
+readability/health and configured oracle inputs. Ordinary requests require valid NAV.
+Funding refreshes stale warm NAV when a haircut is indicated and refuses to crystallize
+an invalid valuation. See the [insolvency runbook](insolvency-runbook.md).
 
 ### 5.2 Ops NAV Cache (Non-Canonical)
 
@@ -352,48 +341,37 @@ enum ExitMode {
 
 ### 6.3 requestInstantWithdrawal() / requestEpochWithdrawal() — INSTANT vs QUEUED
 
-`requestInstantWithdrawal(uint256 shares)` (`src/core/modules/EpochedQueueModule.sol:698-749`) is the fast-path exit function; `requestEpochWithdrawal(uint256 shares)` (`:212-289`) is the explicit queued path. Instant settlement depends on three conditions checked by `_canInstant()`:
+Both ordinary request paths enforce deposit locks, refresh warm NAV and require valid NAV.
+They compute fee shares rounded up, price net shares before burning them, transfer the fee
+shares to `feeCollector`, and record a fixed `assetsOwed` liability. Zero-value requests
+revert; there is no configured withdrawal minimum and requests cannot be cancelled.
 
-**INSTANT settlement conditions** (`src/core/modules/EpochedQueueModule.sol:917-945`):
-1. Lock period has passed: `block.timestamp >= lastDepositTs[user] + lockPeriod`
-2. Epoch cap not exhausted: `grossAssets <= _epochCapRemaining()`
-3. Sufficient hot liquidity: `hot >= grossAssets`
-
-If all three conditions are met, `requestInstantWithdrawal` settles atomically in the same transaction:
-1. Fee shares transferred to `feeCollector` (TRANSFER, not mint — no dilution).
-2. User shares burned.
-3. Net assets transferred to user.
-4. Epoch cap consumed via `ExitEngineLib.consumeEpochCap()`.
-5. Returns `(settledImmediately=true, epochId=0, claimId=0)`.
-
-If any condition fails, `requestInstantWithdrawal` falls back to the exact same path as
-`requestEpochWithdrawal` — the claim is queued into the current open epoch:
-1. ALL gross shares transferred to the vault as escrow (not just the net portion).
-2. An `EpochClaim` is recorded under `(currentEpochId, claimId)`, `claimed = false`.
-3. Returns `(settledImmediately=false, epochId, claimId)` — the caller needs this pair to
-   later cancel (`cancelEpochWithdrawal`) or claim (`claimEpochAssets`) it.
+Instant eligibility uses refreshed gross share value against the fixed cap-epoch allowance
+and free hot/warm liquidity. Success pays the fixed net liability immediately and consumes
+that payout from the cap. Insufficient cap/liquidity or an instant pause selects the standard
+fee tier and records a queued claim. Invalid NAV and active deposit locks revert; they do
+not select a queued fallback.
 
 ### 6.4 Queue Processing — Epoch Close, Fund, Claim
 
-The queue is epoch-bucketed, not a flat FIFO array: claims submitted while an epoch is open
-share one locked price and one liquidity pull. Settlement is a three-step, epoch-wide process
-(`src/core/modules/EpochedQueueModule.sol:327-513`) — see `docs/queue-mechanics.md` for the
-full state machine:
+1. `closeCurrentEpoch()` closes a settlement bucket and opens the next one. Prices, fee
+   transfers and share burns are already fixed by each request.
+2. `fundEpoch(epochId)` sizes the cohort using free assets and unfunded liabilities,
+   excluding funded reserves from both. It pulls warm liquidity, then strategies, and
+   recomputes requirements. A haircut requires valid NAV. Funding reserves cash, fixes
+   `recoveryIndex`, writes the haircut out of liabilities and marks the epoch Funded.
+3. `claimEpochAssets` and `batchClaimEpochAssets` let owners receive their fixed recovery
+   payout. Permissionless `keeperSettleClaims` pays the same recorded owners automatically.
+   Neither path burns shares or charges another exit fee. Settlement of each claim occurs once.
 
-1. **`closeCurrentEpoch()`** (permissionless, gated on a minimum epoch duration): locks
-   `ppsAtClose = totalAssets/totalSupply` for every claim in the epoch, batch-transfers
-   accumulated fee shares to `feeCollector`, and opens the next epoch immediately.
-2. **`fundEpoch(epochId)`** (permissionless, repeatable): pulls liquidity for the epoch's
-   *entire* net liability in one call — warm refill first, then strategy redeem for any
-   remaining gap. Transitions to `Funded` only once `hot >= totalNetAssets`.
-3. **`claimEpochAssets(epochId, claimId)`** (pull-based, per claimant): once `Funded`, each
-   user calls in to receive their `netShares * ppsAtClose` — no keeper required.
+Automatic settlement is a required deployment service. `ClaimSettlementUpkeep` uses a
+bounded circular scan and batch-to-individual fallback. Idle or unfunded-only queues do
+not request upkeep. `fundedOutstandingClaimCount()` provides this constant-time check
+without scanning the vault's history. A zero-recovery claim still needs settlement.
+Manual claims remain available if automation is unfunded, delayed or excludes a claim.
+Recipient transfer failures cannot be bypassed by either caller; claims remain retryable.
 
-Deterministic pricing: `ppsAtClose` is snapshotted once per epoch at `closeCurrentEpoch()` —
-every claim in that epoch, whenever it's actually claimed, uses that same price. This removes
-the live-PPS MEV window that existed in the old per-batch-snapshot design (a batch's price
-could still be influenced by transactions between batches; an epoch's price is fixed the
-moment it closes and never revisited).
+See [queue mechanics](queue-mechanics.md) and the [settlement operations runbook](claim-settlement-operations.md).
 
 ### 6.5 forceWithdraw — Guaranteed Exit
 
@@ -506,7 +484,7 @@ User deposits/exits
 `BufferManager` (`src/core/modules/BufferManager.sol`) is a standalone contract (not a module, not called via delegatecall). It manages:
 - **Deploy**: push excess hot funds into warm adapters.
 - **Refill**: pull from warm adapters back to hot buffer when needed for queue settlement.
-- **Warm NAV cache**: maintains `cachedWarmNav`, updated by keeper's `rebalance()` call.
+- **Warm NAV cache**: maintains `cachedWarmNav`, updated by `rebalance()` and permissionless `refreshWarmNav()`.
 
 **Critical invariant**: BufferManager must NEVER hold idle asset balance. All assets flow directly between CoreVault (hot) and WarmAdapters. Source: `src/core/modules/BufferManager.sol:16-20`.
 
@@ -516,11 +494,14 @@ User deposits/exits
 
 `valid = false` if any adapter failed during the last NAV cache update. When `valid = false`:
 - Deposits are rejected (`_depositsAreCurrentlyAllowed()` returns false).
-- Exits proceed regardless (W2 policy: never block exits).
+- Ordinary requests reject invalid NAV after their refresh attempt.
+- Haircut funding stays Closed until NAV is valid.
+- Funded claims use their immutable recovery index and remain subject to their own breaker.
 
 The warm NAV timestamp expires after `MAX_WARM_NAV_AGE = 15 minutes` (`src/core/modules/ERC4626Module.sol:73`). `ERC4626Module._ensureFreshWarmNav()` attempts a soft refresh on deposit and reverts if the result is still invalid or stale.
 
-For exits, `_trySoftRefreshWarmNav()` is best-effort (try/catch, never blocking). Source: `src/core/modules/ERC4626Module.sol:636-664`.
+For ordinary requests and haircut funding, `_trySoftRefreshWarmNav()` catches refresh errors;
+the following NAV validity check determines whether pricing or funding may proceed.
 
 ### 8.4 Buffer Config
 
@@ -722,7 +703,6 @@ This table covers the 30 most important functions. For the complete selector reg
 | `forceWithdrawAll(address,uint256)` | ERC4626Module | PUBLIC | `ForceWithdrawAllExecuted`, `ForceExit` | `Paused`, `ZeroAmount`, `SlippageExceeded` (F-03) |
 | `requestInstantWithdrawal(uint256)` | EpochedQueueModule | PUBLIC | `InstantExit` or `EpochWithdrawalRequested` | `ZeroAmount` |
 | `requestEpochWithdrawal(uint256)` | EpochedQueueModule | PUBLIC | `EpochWithdrawalRequested` | `ZeroAmount`, `EpochNotOpen` |
-| `cancelEpochWithdrawal(uint256,uint256)` | EpochedQueueModule | PUBLIC | `EpochWithdrawalCancelled` | `NotClaimOwner`, `ClaimAlreadySettled` |
 | `closeCurrentEpoch()` | EpochedQueueModule | PUBLIC | `EpochClosed`, `EpochOpened`, `FeePaid` | `EpochNotOpen`, `EpochTooYoung` |
 | `fundEpoch(uint256)` | EpochedQueueModule | PUBLIC | `EpochFundAttempt`, `EpochFunded` | `EpochNotClosed`, `EpochAlreadyFunded` |
 | `claimEpochAssets(uint256,uint256)` | EpochedQueueModule | PUBLIC | `EpochAssetsClaimed` | `EpochNotFunded`, `NotClaimOwner`, `ClaimAlreadySettled` |
@@ -751,7 +731,7 @@ This table covers the 30 most important functions. For the complete selector reg
 
 ## 14. Invariants
 
-Invariants enforced by the protocol. For formal verification results see `docs/invariants.md`.
+Invariants enforced by the protocol. For the invariant inventory and test coverage see [audit-scope.md](audit-scope.md).
 
 | ID | Statement | Enforcement location | Verified by test |
 |---|---|---|---|
@@ -760,7 +740,7 @@ Invariants enforced by the protocol. For formal verification results see `docs/i
 | I3 | `epochWithdrawn <= cap` (INSTANT only) | `ExitEngineLib.consumeEpochCap()`, cap check before settle | `test/unit/ExitEngine*.t.sol` |
 | I4 | `simulateExit == runtime execution` | `ExitEngineLib.simulateExit()` mirrors production formulas | `test/unit/ExitEngine*.t.sol` (parity assertions) |
 | I5 | `forceWithdraw` does NOT consume epoch cap | `src/core/modules/ERC4626Module.sol:325` (no cap consumption) | `test/unit/ERC4626Module.t.sol` |
-| I6 | Fee shares always from owner/escrow via TRANSFER (not mint) | `processorTransfer` in all exit paths | `test/unit/ERC4626Module.t.sol` + `test/unit/core/EpochedQueueModule.t.sol` |
+| I6 | Exit fee shares always from owner via TRANSFER (not mint) | `processorTransfer` in all exit paths | `test/unit/ERC4626Module.t.sol` + `test/unit/core/EpochedQueueModule.t.sol` |
 | I7 | `maxWithdraw(address) == 0` always | `src/core/CoreVault.sol:544-547` (pure) | `test/unit/CoreVault*.t.sol` |
 | I8 | `maxRedeem(address) == 0` always | `src/core/CoreVault.sol:549-553` (pure) | `test/unit/CoreVault*.t.sol` |
 | I9 | Deposits blocked when warmNavValid=false | `_depositsAreCurrentlyAllowed()` checks `warmNavState()` | `test/unit/ERC4626Module.t.sol` (warmNav gate) |
@@ -832,7 +812,7 @@ In `FixedMaturity/Active` state, `markMatured()` is callable by anyone once `blo
 | Sealer | SystemSealer contract authorized to call `sealBySealer()` (via `verifyAndSeal()`). |
 | Dead deposit | A "dead" share minted by owner at genesis to prevent the ERC-4626 inflation attack. |
 | Lock period | Minimum time between deposit and claim eligibility (anti-MEV). |
-| W2 policy | "Never block exits": all exit paths continue on error, never revert due to NAV staleness. |
+| NAV validity | Ordinary requests and haircut crystallization require valid NAV. Funded claims use their fixed recovery index. |
 
 ### 17.1 Protocol-Level Sequence Examples
 
@@ -848,23 +828,22 @@ In `FixedMaturity/Active` state, `markMatured()` is callable by anyone once `blo
 9. `safeTransferFrom(caller, address(this), assets)` — USDC pulled
 10. Update `lastDepositTs[receiver]` and `_opsNavCache`
 
-**Canonical exit flow** (INSTANT path, cap-eligible):
-1. User calls `requestInstantWithdrawal(shares)` → EpochedQueueModule
-2. Lock period check: `block.timestamp >= lastDepositTs[user] + lockPeriod`
-3. Cap-epoch rollover: `ExitEngineLib.rollEpochIfNeeded()` if `block.timestamp >= epochStart + epochDuration` (the CAP epoch — distinct from the settlement epoch, see `docs/queue-mechanics.md` §6)
-4. Cap check: `_epochCapRemaining()` — cap-epoch cap still available
-5. Fee shares computed: `ExitEngineLib.computeFeeShares(INSTANT, ...)` — rounded UP
-6. Fee shares transferred to feeCollector (not escrowed — paid immediately), user shares burned
-7. USDC transferred to user in the same transaction; `consumeEpochCap()` updates the cap epoch
-8. If any of steps 2-4 fail instead: ALL gross shares are escrowed and a standard `EpochClaim` is recorded — settled later via `closeCurrentEpoch()` → `fundEpoch()` → `claimEpochAssets()` (pull, by the user)
+**Canonical exit flow** (INSTANT path):
+
+1. Acquire the reentrancy guard and roll the cap epoch before asset/supply mutations.
+2. Enforce the deposit lock, refresh warm NAV and validate NAV.
+3. Compare gross share value with the static cap allowance and free hot/warm liquidity.
+4. Select instant or standard fees, transfer fee shares and burn net shares at the fixed price.
+5. An eligible instant request pays the liability and consumes the net payout from the cap.
+6. A fallback records a fixed claim for close, funding and automatic or manual settlement.
 
 ### Cross-Links
 
 - Storage layout details → field offsets, EIP-7201 slot computation, forge inspect: [storage-layout.md](storage-layout.md)
 - Module-by-module spec → per-function access control, storage access patterns, error codes: [modules.md](modules.md)
 - Access control matrix → all selector→role assignments: [access-control.md](access-control.md)
-- Invariants (formal): [invariants.md](invariants.md)
-- Threat model: [threat-model.md](threat-model.md)
+- Invariant inventory: [audit-scope.md](audit-scope.md)
+- Threat model: [audit-scope.md](audit-scope.md)
 - Exit engine + fee policy: cluster 01a.2 (pending)
 - Queue mechanics: cluster 01a.2 (pending)
 - Deployment guide: [deployment.md](deployment.md)

@@ -569,4 +569,43 @@ contract EconomicExit_Gaps_Test is Test {
         (bool immediate,,) = _q().requestInstantWithdrawal(a * 8 / 100);
         assertFalse(immediate, "refreshed 16 exceeds the cap of 10");
     }
+
+    function test_fundingSoftRefreshesStaleWarmNavAfterSixHours() public {
+        uint256 a = _deposit(alice, 100e6);
+        (uint256 e,) = _request(alice, a);
+        _close();
+        _lose(40e6);
+        bm.setWarmNav(0, uint40(block.timestamp), true);
+        vm.warp(block.timestamp + 6 hours);
+        _q().fundEpoch(e);
+        assertEq(uint256(_q().epochData(e).state), uint256(EpochQueueStorage.EpochState.Funded));
+        assertEq(_q().epochData(e).recoveryIndex, 0.6e18);
+    }
+
+    function test_fundingRefreshFailureLeavesHaircutUncrystallized() public {
+        uint256 a = _deposit(alice, 100e6);
+        (uint256 e,) = _request(alice, a);
+        _close();
+        _lose(40e6);
+        bm.setWarmNav(0, uint40(block.timestamp), true);
+        bm.setRefreshShouldRevert(true);
+        vm.warp(block.timestamp + 6 hours);
+        _q().fundEpoch(e);
+        assertEq(uint256(_q().epochData(e).state), uint256(EpochQueueStorage.EpochState.Closed));
+        assertEq(core.totalOwed(), 100e6);
+        assertEq(_q().fundedOutstandingClaimCount(), 0);
+    }
+
+    function test_fundingRefreshRecomputesNeedBeforeHaircut() public {
+        uint256 a = _deposit(alice, 100e6);
+        (uint256 e,) = _request(alice, a);
+        _close();
+        _lose(40e6);
+        bm.setWarmNav(0, uint40(block.timestamp), true);
+        vm.warp(block.timestamp + 6 hours);
+        bm.setRefreshResult(40e6, uint40(block.timestamp), true);
+        _q().fundEpoch(e);
+        assertEq(uint256(_q().epochData(e).state), uint256(EpochQueueStorage.EpochState.Closed));
+        assertEq(core.totalOwed(), 100e6, "restored NAV must not crystallize the stale 0.6 ratio");
+    }
 }

@@ -1,12 +1,5 @@
 # access-control.md — Multyr Core: Access Control System
 
-> **Superseded in part — see [economic-exit.md](economic-exit.md).** This document describes the
-> escrow / `ppsAtClose` withdrawal model. Requests are now priced and their shares burned **at
-> request**; epochs are settlement buckets only; `cancelEpochWithdrawal`, `ppsAtClose`,
-> `escrowedShares` and `closedPendingAssets` are gone; `totalAssets()` is net of `totalOwed`.
-> Everything below about those topics is historical until this file is rewritten.
-
-
 **Version**: 1.0.0 | **Branch**: reorg/runbook-docs-consolidate-01a.3 | **Commit**: see footer
 
 ---
@@ -186,12 +179,14 @@ Key permissionless functions:
 | Function | Module | Notes |
 |----------|--------|-------|
 | `deposit` | ERC4626Module | Subject to pause checks |
-| `requestEpochWithdrawal` | EpochedQueueModule | Subject to `FLAG_QUEUED_REQUEST_PAUSED` (new-request breaker, owner-only) + `minClaimAmount` floor |
-| `requestInstantWithdrawal` | EpochedQueueModule | Same floor; falls back to the queue (subject to the same `FLAG_QUEUED_REQUEST_PAUSED` breaker) when the cap, free liquidity, or `FLAG_INSTANT_WITHDRAWAL_PAUSED` blocks instant settlement — never reverts outright for a paused instant breaker alone |
-| `cancelEpochWithdrawal` | EpochedQueueModule | Claim owner only, and only while the epoch is `Open` — never pause-gated, by design (review §20) |
+| `requestEpochWithdrawal` | EpochedQueueModule | Subject to `FLAG_QUEUED_REQUEST_PAUSED` (new-request breaker, owner-only); deposit lock and valid NAV required; no withdrawal minimum |
+| `requestInstantWithdrawal` | EpochedQueueModule | Requires deposit lock and valid NAV; falls back to the queue (subject to the same `FLAG_QUEUED_REQUEST_PAUSED` breaker) when the cap, free liquidity, or `FLAG_INSTANT_WITHDRAWAL_PAUSED` blocks instant settlement — never reverts outright for a paused instant breaker alone |
 | `closeCurrentEpoch` | EpochedQueueModule | Callable by anyone once the epoch duration has elapsed (keeper pattern); subject to `FLAG_EPOCH_CLOSE_FUND_PAUSED` |
 | `fundEpoch` | EpochedQueueModule | Callable by anyone; no-op when the epoch is already funded; subject to `FLAG_EPOCH_CLOSE_FUND_PAUSED` |
-| `claimEpochAssets` / `batchClaimEpochAssets` | EpochedQueueModule | Claim owner only, self-service, no keeper required; subject to `FLAG_FUNDED_CLAIM_PAUSED` (owner-only breaker, never Guardian — review §20) |
+| `claimEpochAssets` / `batchClaimEpochAssets` | EpochedQueueModule | Claim owner only, self-service, no keeper required; subject to `FLAG_FUNDED_CLAIM_PAUSED` (owner-only breaker, never Guardian) |
+| `keeperSettleClaims` | EpochedQueueModule | Permissionless batch payment to recorded claim owners; subject to the funded-claim breaker. Automatic settlement supplements owner self-claim. |
+| `rollCapEpochIfNeeded` | EpochedQueueModule | Permissionless cap rollover; state-changing entrypoints also roll before asset/supply mutations. |
+| `fundedOutstandingClaimCount` | EpochedQueueModule | Public view for outstanding claims in Funded epochs, including zero recovery. |
 | `syncOldestUnfundedEpoch` | EpochedQueueModule | Cursor maintenance; subject to `FLAG_EPOCH_CLOSE_FUND_PAUSED` |
 | `acceptOwnership` | AdminModule | Must be `pendingOwner` (checked internally) |
 | `markMatured` | FixedMaturityModule | Any address, once maturityTs reached |
@@ -204,7 +199,7 @@ Key permissionless functions:
 | `realizeForQueue` | LiquidityOpsModule | Realize liquidity for queue settle |
 | `realizeForReserveAndOps` | LiquidityOpsModule | Realize for hot buffer reserve |
 | `rebalanceStrategies` | LiquidityOpsModule | V10 rebalance execution |
-| `totalAssets` | ERC4626Module | Standard ERC-4626 view |
+| `totalAssets` | CoreVault shell | Shareholder NAV: saturating gross assets minus outstanding liabilities |
 
 ---
 
@@ -251,7 +246,7 @@ struct Layout {
 
 These functions bypass normal ERC-20 transfer logic and directly adjust share balances. They are used by:
 
-- **EpochedQueueModule** — burns escrowed shares as each claim is paid, transfers fee shares to `feeCollector` in one batch at epoch close, mints perf-fee shares on crystallization
+- **EpochedQueueModule** — burns net shares and transfers exit fee shares at request, records and settles liabilities, and mints performance fee shares on crystallization
 - **FixedMaturityModule** — mints/burns during lifecycle transitions (e.g., `_applyFinalPerformanceFee`)
 
 Access check:
@@ -462,3 +457,10 @@ Owner can update any entry via the selectorRegistry (no timelock on role changes
 ---
 
 *Generated from code — not from existing documentation. Authoritative source: `.sol` files listed above.*
+
+## Insolvency governance
+
+Haircut funding requires valid NAV. Recovery and any deliberate write-down follow the
+[insolvency runbook](insolvency-runbook.md): extract recoverable assets before disabling
+a strategy or removing an adapter. Router/buffer ownership and GlobalConfig governance
+are separate from the permissionless funding and claim entrypoints.

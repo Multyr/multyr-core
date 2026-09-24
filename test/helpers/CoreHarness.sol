@@ -73,6 +73,7 @@ contract CoreHarness is CoreVault {
         _setModuleUnsafe(EpochedQueueModule.epochClaim.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.nextClaimIdForEpoch.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.outstandingClaimCount.selector, address(queueModule), ROLE_PUBLIC);
+        _setModuleUnsafe(EpochedQueueModule.fundedOutstandingClaimCount.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.oldestUnfundedEpochId.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.epochDeficit.selector, address(queueModule), ROLE_PUBLIC);
         _setModuleUnsafe(EpochedQueueModule.canCloseCurrentEpoch.selector, address(queueModule), ROLE_PUBLIC);
