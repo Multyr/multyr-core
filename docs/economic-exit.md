@@ -74,7 +74,7 @@ audit's subject; they are listed last for completeness.
 | `_epochCapRemaining(…, _totalAssets())` (`capPerEpochBps`) | B | read **before** the request moves the NAV |
 | `_canInstant` — free liquidity | A | hot − reserved, saturating |
 | `fundEpoch` — need (`nominal × index`), `reservedForClaims`, hot | A | saturating |
-| `claimEpochAssets` / `batchClaimEpochAssets` — index | A | via `liabilityState()` |
+| `claimEpochAssets` / `batchClaimEpochAssets` — index | A | immutable `epoch.recoveryIndex`; live `liabilityState()` is only used for insolvency events |
 | `_crystallize`, `_pps` (perf fee, HWM) | B | crystallisation uses NAV net of `totalOwed` |
 | `_updateNavSmooth` | B | |
 | `syncInsolvencyState` | A | |
@@ -125,7 +125,9 @@ audit's subject; they are listed last for completeness.
    `capPerEpochBps` and the cap-epoch NAV snapshot; `DynamicCapParams` has no effect.
 4. Requests refresh warm NAV, then require `navStatus()` to be valid before pricing.
    Invalid or stale inputs reject the request. Funding requires valid NAV whenever
-   crystallization would produce a recovery index below `1e18`; invalid attempts emit
+   crystallization would produce a recovery index below `1e18`. Funding first attempts a
+   soft warm NAV refresh when its initial target is below nominal, then recomputes that
+   target. Invalid attempts emit
    `EpochFundingNavInvalid` and leave the epoch Closed. Governance can disable an affected
    strategy to explicitly recognize its write-down.
 5. Unfunded cohorts use `min(1, (grossAssets - reservedForClaims) /
@@ -152,15 +154,19 @@ does not have, and the old ones would read a net-of-liabilities NAV from the new
    empty: `fundEpoch` realises from the strategy), and let all four pending claims be collected
    under the current model. Verify `outstandingClaimCount == 0` and `reservedForClaims` is dust.
    Two pricing models must never coexist on live claims. The new vault starts with `totalOwed == 0`.
-2. **Fix I-10 and confirm the keeper.** `warmNavValid` must be genuinely refreshed; the keeper must call
-   `refreshWarmNav()` at least every `MAX_WARM_NAV_AGE` (15 min, and `navRefreshInterval` must stay
-   below it). Requests revert `NavStale` otherwise.
+2. **Confirm NAV refresh behavior.** Requests attempt a soft warm NAV refresh before pricing.
+   Insolvent funding also attempts it before validating NAV, so a six-hour keeper cadence
+   does not require a separate refresh transaction for each funding attempt. The cache must
+   still pass `MAX_WARM_NAV_AGE` (15 minutes) and validity checks; a failed refresh does not
+   bypass them. `refreshWarmNav()` remains permissionless. Monitor deferred funding and
+   configure regular refreshes to keep keeper checks and other NAV consumers current.
 3. **Deploy**, through `DeployCoreSystem` / `SelectorLib` (the selector table is the source of truth):
    `CoreVault`, `EpochedQueueModule`, `ERC4626Module`, `LiquidityOpsModule`, `AdminModule`,
    `FixedMaturityModule`, `BufferManager`, `StrategyRouter`, `VaultUpkeep`, `CoreVaultLens`.
-   Contract size check: `CoreVault` runtime is 22,137 B (limit 24,576).
+   Verify deployed runtime sizes against the 24,576-byte limit with the deployment build.
 4. **Wire and verify** the selectors (`SelectorLib.TOTAL_SELECTORS`), `approveWarmAdapters`,
-   the fee params (note deviation 2 for `immediateExitPenaltyBps`), then seal.
+   the fee params (`witBps` for standard requests and queued fallbacks; `witBps +
+   immediateExitPenaltyBps` for eligible instant settlement), then seal.
 5. **Move depositors** with the existing Arbitrum migration tooling (old vault → underlying → new vault).
    Open item: the tooling predates this PR and has not been re-run against it.
 6. **Downstream (out of scope here, in this order after approval):** subgraph (`assetsOwed` on
@@ -181,6 +187,49 @@ Fork tests require the configured archive RPC endpoint.
 Keep NAV inputs fresh. Invalid inputs block new ordinary requests and haircut crystallization.
 Monitor `EpochFundingNavInvalid` and `EpochFundingShortfall`. A funded cohort's reserve must
 remain available for claims. Recovery after funding accrues to active shareholder equity.
+
+### 7.1 Insolvency governance runbook
+
+**Recover value first, then disable.** An enabled DEGRADED strategy makes NAV invalid.
+If funding would crystallize a haircut, `fundEpoch` emits `EpochFundingNavInvalid` and
+leaves the cohort Closed. There is no timeout or automatic write-down: repeated keeper
+calls cannot resolve a persistent health/oracle/adapter fault. A stale warm cache reports
+reason 3; funding attempts a soft refresh, but refresh failure preserves the gate.
+
+1. Inspect `navStatus()`, strategy health/oracle configuration, warm adapter reports,
+   `grossAssets()`, `totalOwed()` and existing funded reserves. Identify the invalid input
+   and record the estimated recoverable value and expected cohort payout. Keep existing
+   funded reserves protected. If necessary, use the authorized epoch close/fund breaker
+   while coordinating recovery and valuation changes.
+2. **Extract everything recoverable before excluding the position from NAV.** The
+   StrategyRouter owner can call `withdrawAllToCore(strat)` or use
+   `emergencyRedeemBatch(plan)` as appropriate; health downgrades do not prohibit these
+   recovery paths. Recover warm assets through the available adapter/buffer withdrawal
+   path before removing an adapter. Verify actual underlying received by the vault and
+   residual balances; a successful transaction alone does not establish full recovery.
+3. Repair the valuation source if possible and restore health only when justified.
+   Otherwise governance must explicitly recognize the residual loss: the router owner
+   calls `toggle(strat, false)` for an affected strategy, the responsible owner changes
+   faulty oracle configuration, or the BufferManager owner removes the affected warm
+   adapter from the configured NAV sources. These address different invalid inputs;
+   an oracle change alone does not clear a DEGRADED health flag. Observe the deployed
+   Safe/timelock and component configuration restrictions for the chosen action.
+4. Refresh warm NAV and verify `navStatus()` is valid and gross NAV reflects the recovered
+   cash plus the remaining recognized positions. Before allowing funding, compare the
+   expected ratio `min(1, max(grossAssets - reservedForClaims, 0) /
+   max(totalOwed - reservedForClaims, 0))` for nonzero unfunded liabilities with the
+   proposed loss. Clear the close/fund breaker if it was set and call `fundEpoch`.
+5. Verify `EpochRecoveryCrystallized`, `EpochFunded`, the immutable `recoveryIndex`,
+   `reservedRemaining` and the reduction in `totalOwed`. Claimants can then call
+   `claimEpochAssets` or `batchClaimEpochAssets`. Monitor liquidity shortfalls separately
+   from NAV validity failures.
+
+**Disabling a strategy that still holds value excludes that value from gross NAV.**
+Funding after that action can lock a lower recovery ratio for the exiting cohort. Restoring
+or recovering the value later does not reopen that cohort's ratio; it benefits remaining
+shareholders. Do not disable first merely to make `navStatus()` pass. Document any residual
+write-down explicitly, including recoveries attempted, balances left behind, authorization
+and the effect on exiting creditors.
 
 ## 8. Settlement and instant-cap guarantees
 

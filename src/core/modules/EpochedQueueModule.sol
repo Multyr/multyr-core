@@ -544,6 +544,7 @@ contract EpochedQueueModule {
         // (an underfunded attempt below leaves reservedRemaining untouched, so a Closed
         // epoch never carries a partial earmark across retries).
         uint256 unclaimed = epoch.totalAssetsOwed - epoch.claimedAssets;
+        if (_scaledByIndex(unclaimed) < unclaimed) _trySoftRefreshWarmNav();
         uint256 gapNeeded = _scaledByIndex(unclaimed);
         if (gapNeeded < unclaimed) {
             (bool valid, uint8 reason) = ICoreVault(address(this)).navStatus();

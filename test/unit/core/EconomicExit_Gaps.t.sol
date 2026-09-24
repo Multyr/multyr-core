@@ -488,6 +488,59 @@ contract EconomicExit_Gaps_Test is Test {
         assertEq(_claim(alice, e, c), 50e6);
     }
 
+    function test_insolventFundingRefreshesStaleWarmNav() public {
+        uint256 a = _deposit(alice, 50e6);
+        _deposit(bob, 50e6);
+        (uint256 e, uint256 c) = _request(alice, a);
+        _close();
+        _lose(70e6);
+        bm.setWarmNav(0, uint40(block.timestamp - 6 hours), true);
+
+        _q().fundEpoch(e);
+
+        assertEq(uint256(_q().epochData(e).state), uint256(EpochQueueStorage.EpochState.Funded));
+        assertEq(_q().epochData(e).recoveryIndex, 0.6e18);
+        (, uint40 refreshedAt,) = bm.warmNavState();
+        assertEq(refreshedAt, block.timestamp);
+        assertEq(_claim(alice, e, c), 30e6);
+    }
+
+    function test_insolventFundingFailedRefreshLeavesCohortClosed() public {
+        uint256 a = _deposit(alice, 50e6);
+        _deposit(bob, 50e6);
+        (uint256 e,) = _request(alice, a);
+        _close();
+        _lose(70e6);
+        bm.setWarmNav(0, uint40(block.timestamp - 6 hours), true);
+        bm.setRefreshShouldRevert(true);
+
+        vm.expectEmit(true, false, false, true, address(core));
+        emit EpochedQueueModule.EpochFundingNavInvalid(e, 3);
+        _q().fundEpoch(e);
+
+        assertEq(uint256(_q().epochData(e).state), uint256(EpochQueueStorage.EpochState.Closed));
+        assertEq(core.totalOwed(), 50e6);
+        assertEq(_q().reservedForClaims(), 0);
+    }
+
+    function test_insolventFundingRecomputesTargetAfterRefresh() public {
+        uint256 a = _deposit(alice, 50e6);
+        _deposit(bob, 50e6);
+        (uint256 e,) = _request(alice, a);
+        _close();
+        _moveHotToWarm(70e6);
+        bm.setWarmNav(0, uint40(block.timestamp - 6 hours), true);
+        bm.setRefreshResult(70e6, uint40(block.timestamp), true);
+
+        _q().fundEpoch(e);
+
+        // Refreshed NAV is solvent but only 30 USDC is hot. The mock refill is a no-op:
+        // funding must wait for liquidity, not lock the stale 0.6 recovery ratio.
+        assertEq(uint256(_q().epochData(e).state), uint256(EpochQueueStorage.EpochState.Closed));
+        assertEq(core.totalOwed(), 50e6);
+        assertEq(_q().reservedForClaims(), 0);
+    }
+
     function test_invalidStrategyCannotCrystallizeHaircut() public {
         uint256 a = _deposit(alice, 50e6);
         _deposit(bob, 50e6);
