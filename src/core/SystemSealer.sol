@@ -62,7 +62,7 @@ import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/I
  * [x] CoreVault.feeCollector == config.feeCollector (live-wiring bind — a
  *     correctly governed FeeCollector the vault does not read from must not
  *     satisfy the seal)
- * [x] FeeCollector.governor == ROOT_TIMELOCK (immutable)
+ * [x] FeeCollector.governor == ROOT_TIMELOCK (accepted governance)
  * [x] GlobalConfig.governor == ROOT_TIMELOCK
  * [x] CoreVault.router() == config.strategyRouter (live-wiring bind)
  * [x] StrategyRouter.owner == ROOT_TIMELOCK

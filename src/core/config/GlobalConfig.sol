@@ -484,7 +484,7 @@ contract GlobalConfig is IParamsProvider {
 
     function _validateQueueConfig(QueueConfig calldata cfg) internal pure {
         if (cfg.maxClaimsPerUserPerEpoch == 0) revert InvalidMaxActions();
-        if (cfg.epochDuration < 1 hours || cfg.epochDuration > 30 days) revert InvalidDelay();
+        if (cfg.epochDuration < 2 minutes || cfg.epochDuration > 30 days) revert InvalidDelay();
         if (cfg.cooldownPerClaim > cfg.epochDuration) revert InvalidDelay();
     }
 

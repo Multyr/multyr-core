@@ -1,7 +1,7 @@
 {
   "aaveWarmAdapter": "0xD9A47bda143819bc01962BF43ACD928789A90B66",
   "adminModule": "0x0693Ffe87Ee54494c4Ead1da679BB01aF765938b",
-  "blockNumber": 513029914,
+  "blockNumber": 26151009,
   "bufferManager": "0x9b3fE5c76e0C10de254Ee2153f71DF6a96020D96",
   "chainId": 42161,
   "deferredHandover": true,
@@ -22,7 +22,7 @@
   "safetyReserve": "0x8c85B299ab189F2F88776D21AA94057a457b4f2B",
   "securityApprover": "0xA5Cfa1d11a7C77201dD78CC0413d4b2fc132a69B",
   "selectorRegistry": "0x57719e54f531D49F73A49d453b594fC857247fEE",
-  "state": "HANDOVER_PENDING_SAFE_ACCEPTANCE",
+  "state": "SETUP_PENDING_HANDOVER",
   "strategyRouter": "0x37847D2e12892e3298DEE695e7E971fba0Ca3e24",
   "systemSealer": "0x6C259f1D143fc6de138A26624038819342756AF9",
   "timelock": "0x70ef444799D6FBbE0865bA598Bee6795e064a326",
@@ -31,34 +31,5 @@
   "upkeep": "0xCD31634F472Fcc1D0b64FAE3ed72Bb7C0792B55f",
   "vault": "0x5e0cdb76487BD96Ff069Ef7F78eaDF5b5909C8cb",
   "vaultFactory": "0xfDE16c52e89ba078E9F71Cc64C2256c8E66CbB01",
-  "vetoer": "0xF0c1A33d6741EB2dc174a0977095587a0648f1D7",
-  "owner": "0x908756f36954f2853134259B8846c49F90E84ECe",
-  "pendingOwner": "0x70ef444799D6FBbE0865bA598Bee6795e064a326",
-  "handoverAcceptanceRequired": [
-    "CoreVault",
-    "FeeCollector",
-    "VaultFactory",
-    "RecoveryGate"
-  ],
-  "solidityBlockNumber": 26151009,
-  "startBlocks": {
-    "aaveWarmAdapter": 513029994,
-    "adminModule": 513029941,
-    "bufferManager": 513029974,
-    "erc4626Module": 513029952,
-    "feeCollector": 513029863,
-    "globalConfig": 513029857,
-    "healthRegistry": 513029880,
-    "liquidityOpsModule": 513029962,
-    "morphoWarmAdapter": 513030006,
-    "priceOracle": 513029869,
-    "queueModule": 513029929,
-    "recoveryGate": 513030281,
-    "selectorRegistry": 513029892,
-    "strategyRouter": 513029981,
-    "systemSealer": 513029902,
-    "upkeep": 513030022,
-    "vault": 513029914,
-    "vaultFactory": 513029843
-  }
+  "vetoer": "0xF0c1A33d6741EB2dc174a0977095587a0648f1D7"
 }

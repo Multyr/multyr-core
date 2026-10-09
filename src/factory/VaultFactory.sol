@@ -17,7 +17,11 @@ contract VaultFactory {
     error VaultNotFound();
     error VaultAlreadyRegistered();
 
-    address public immutable owner;
+    address public owner;
+    address public pendingOwner;
+    error NotPendingOwner();
+    event OwnershipTransferStarted(address indexed previousOwner, address indexed pendingOwner);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     address[] public deployedVaults;
     mapping(address vault => uint256 indexPlusOne) public vaultIndexPlusOne;
 
@@ -32,6 +36,22 @@ contract VaultFactory {
 
     constructor() {
         owner = msg.sender;
+    }
+
+    /// @notice Nominate a successor without immediately surrendering control.
+    function transferOwnership(address newOwner) external {
+        if (msg.sender != owner) revert NotOwner();
+        if (newOwner == address(0)) revert ZeroAddress();
+        pendingOwner = newOwner;
+        emit OwnershipTransferStarted(owner, newOwner);
+    }
+
+    function acceptOwnership() external {
+        if (msg.sender != pendingOwner) revert NotPendingOwner();
+        address previous = owner;
+        owner = msg.sender;
+        pendingOwner = address(0);
+        emit OwnershipTransferred(previous, msg.sender);
     }
 
     /// @notice Legacy entrypoint now disabled to enforce off-chain deployment

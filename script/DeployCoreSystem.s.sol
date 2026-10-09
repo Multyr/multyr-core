@@ -140,6 +140,7 @@ contract DeployCoreSystem is Script {
         bool deployUpkeep;
         bool deployWarmAdapters;
         bool configureOracle;
+        bool deferHandover; // retain setup authority until strategy registration is complete
         string outputJsonPath;
     }
 
@@ -261,10 +262,10 @@ contract DeployCoreSystem is Script {
         console.log("      Governor (temp):", cfg.deployer);
         console.log("      Will transfer to:", cfg.governor);
 
-        // 1.3 FeeCollector - governor is IMMUTABLE = ROOT_TIMELOCK
+        // 1.3 FeeCollector - temporary setup governor, then explicit two-step handover
         // SystemSealer.verifyAndSeal() verifies fc.governor() == config.rootTimelock
         result.feeCollector = new FeeCollector(
-            cfg.timelock, // IMMUTABLE governor = ROOT_TIMELOCK
+            cfg.deployer, // temporary setup governor
             cfg.treasury,
             cfg.ops,
             cfg.safetyReserve,
@@ -273,7 +274,7 @@ contract DeployCoreSystem is Script {
             3000 // opsMaxBps = 30% cap
         );
         console.log("[1.3] FeeCollector:", address(result.feeCollector));
-        console.log("      Governor (IMMUTABLE):", cfg.timelock);
+        console.log("      Setup governor:", cfg.deployer);
 
         // 1.4 PriceOracleMiddleware
         result.priceOracle = new PriceOracleMiddleware(cfg.deployer);
@@ -544,8 +545,29 @@ contract DeployCoreSystem is Script {
             dynamicCap.queueStressThreshold == queueStressThreshold,
             "DEPLOY_BUG: queue threshold mismatch"
         );
+        // Explicit opt-in for disposable test deployments; production remains seven days.
+        bool fastEpochTesting = vm.envOr("ENABLE_TWO_MINUTE_TEST_EPOCHS", false);
+        if (fastEpochTesting) {
+            result.globalConfig.setVaultQueueOverride(
+                address(result.vault), GlobalConfig.QueueConfig(10, 0, 2 minutes)
+            );
+            IParamsProvider.WithdrawalParams memory withdrawal =
+                result.globalConfig.getWithdrawalParams(address(result.vault));
+            result.globalConfig.setVaultWithdrawalOverride(
+                address(result.vault),
+                GlobalConfig.WithdrawalConfig({
+                    capPerEpochBps: withdrawal.capPerEpochBps,
+                    maxWithdrawalPerBlock: withdrawal.maxWithdrawalPerBlock,
+                    maxWithdrawalPerTx: withdrawal.maxWithdrawalPerTx,
+                    minClaimAmount: withdrawal.minClaimAmount,
+                    lockPeriod: 0
+                })
+            );
+            console.log("       TEST PROFILE: 120 second queue epochs; no claim cooldown or deposit lock");
+        }
         require(
-            result.globalConfig.getQueueParams(address(result.vault)).epochDuration == 7 days,
+            result.globalConfig.getQueueParams(address(result.vault)).epochDuration
+                == (fastEpochTesting ? 2 minutes : 7 days),
             "DEPLOY_BUG: epoch duration mismatch"
         );
         console.log("[5.5b] Vault deposit cap:", vaultDepositCap);
@@ -586,8 +608,10 @@ contract DeployCoreSystem is Script {
 
         // 5.6.2 Transfer GlobalConfig governor to ROOT_TIMELOCK (after oracle config)
         console.log("[5.6.2] Transferring GlobalConfig governor to ROOT_TIMELOCK...");
-        result.globalConfig.setGovernor(cfg.governor);
-        require(result.globalConfig.governor() == cfg.governor, "DEPLOY_BUG: GlobalConfig governor transfer failed");
+        if (!cfg.deferHandover) {
+            result.globalConfig.setGovernor(cfg.governor);
+            require(result.globalConfig.governor() == cfg.governor, "DEPLOY_BUG: GlobalConfig governor transfer failed");
+        }
         console.log("  [OK] GlobalConfig governor:", cfg.governor);
 
         // 5.7 Guardian
@@ -605,7 +629,7 @@ contract DeployCoreSystem is Script {
         console.log("[5.8b] Deploying and wiring RecoveryGate...");
         result.recoveryGate = new RecoveryGate(
             address(result.vault),
-            cfg.timelock, // ROOT_TIMELOCK
+            cfg.deployer, // temporary recovery root; handover after setup
             cfg.securityApprover,
             RECOVERY_MIN_DELAY,
             RECOVERY_COOLDOWN
@@ -669,6 +693,19 @@ contract DeployCoreSystem is Script {
         console.log("[5.12] Enabling components timelock...");
         IAdminModule(address(result.vault)).enableComponentsTimelock();
         console.log("  Components timelock ENABLED");
+
+        // The initial allowlist proposal still requires five real minutes before registration.
+        result.strategyRouter.setStrategyAllowlistDelay(
+            vm.envOr("INITIAL_STRATEGY_ALLOWLIST_DELAY", uint256(5 minutes))
+        );
+        result.feeCollector.setShareConfig(address(result.vault), FeeCollector.ShareMode.AUTO_HARVEST);
+        if (cfg.deferHandover) {
+            console.log("[5.13] Setup authority retained; run CompleteCoreHandover after strategy registration");
+            return;
+        }
+        result.feeCollector.beginGovernorTransfer(cfg.timelock);
+        result.vaultFactory.transferOwnership(cfg.timelock);
+        result.recoveryGate.beginRootTimelockTransfer(cfg.timelock);
 
         // 5.13 Transfer component ownership to ROOT_TIMELOCK
         console.log("[5.13] Transferring component ownerships to ROOT_TIMELOCK...");
@@ -761,6 +798,7 @@ contract DeployCoreSystem is Script {
         cfg.deployerPk = vm.envUint("DEPLOYER_PRIVATE_KEY");
         cfg.deployer = vm.addr(cfg.deployerPk);
 
+        cfg.deferHandover = vm.envOr("DEFER_CORE_HANDOVER", false);
         cfg.governor = vm.envAddress("GOVERNOR_ADDRESS");
         cfg.guardian = vm.envAddress("GUARDIAN_ADDRESS");
         cfg.treasury = vm.envAddress("TREASURY_ADDRESS");
@@ -808,7 +846,8 @@ contract DeployCoreSystem is Script {
         vm.serializeUint(json, "blockNumber", block.number);
         vm.serializeUint(json, "timestamp", block.timestamp);
         vm.serializeAddress(json, "deployer", cfg.deployer);
-        vm.serializeString(json, "state", "PRE-SEAL");
+        vm.serializeString(json, "state", cfg.deferHandover ? "SETUP_PENDING_HANDOVER" : "HANDOVER_PENDING_ACCEPTANCE");
+        vm.serializeBool(json, "deferredHandover", cfg.deferHandover);
 
         vm.serializeAddress(json, "vaultFactory", address(result.vaultFactory));
         vm.serializeAddress(json, "globalConfig", address(result.globalConfig));

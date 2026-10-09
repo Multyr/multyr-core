@@ -63,6 +63,43 @@ contract EpochedQueueModule_Test is Test {
         IERC20(USDC_UNDERLYING).approve(address(core), type(uint256).max);
     }
 
+    /// @notice Accelerated test cadence preserves funding and settlement accounting.
+    function test_twoMinuteEpoch_keeperAndSelfClaim() public {
+        params.setEpochDuration(2 minutes);
+        uint256 shares = _deposit(user, 100e6);
+        uint256 sharesB = _deposit(userB, 100e6);
+        vm.prank(user);
+        (uint256 epochId, uint256 claimId) = EpochedQueueModule(address(core)).requestEpochWithdrawal(shares);
+        vm.prank(userB);
+        (, uint256 claimB) = EpochedQueueModule(address(core)).requestEpochWithdrawal(sharesB);
+        EpochedQueueModule queue = EpochedQueueModule(address(core));
+        uint256 opened = queue.epochData(epochId).openedAt;
+        vm.warp(opened + 119);
+        assertFalse(queue.canCloseCurrentEpoch());
+        vm.expectRevert(EpochedQueueModule.EpochTooYoung.selector);
+        queue.closeCurrentEpoch();
+        vm.warp(opened + 120);
+        assertTrue(queue.canCloseCurrentEpoch());
+        queue.closeCurrentEpoch();
+        assertEq(queue.currentEpochId(), epochId + 1);
+        queue.fundEpoch(epochId);
+        assertEq(uint256(queue.epochData(epochId).state), uint256(EpochQueueStorage.EpochState.Funded));
+        uint256 recoveryIndex = queue.epochData(epochId).recoveryIndex;
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = claimId;
+        uint256 beforeA = IERC20(USDC_UNDERLYING).balanceOf(user);
+        queue.keeperSettleClaims(epochId, ids);
+        assertEq(IERC20(USDC_UNDERLYING).balanceOf(user) - beforeA, 100e6);
+        vm.prank(userB);
+        queue.claimEpochAssets(epochId, claimB);
+        assertEq(queue.epochData(epochId).recoveryIndex, recoveryIndex);
+        assertEq(core.totalOwed(), 0);
+        assertEq(queue.reservedForClaims(), 0);
+        vm.warp(opened + 240);
+        queue.closeCurrentEpoch();
+        assertEq(queue.currentEpochId(), epochId + 2);
+    }
+
     function _deposit(address who, uint256 assets) internal returns (uint256 shares) {
         vm.prank(who);
         shares = ERC4626Module(address(core)).deposit(assets, who);

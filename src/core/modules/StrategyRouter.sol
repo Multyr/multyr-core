@@ -47,7 +47,7 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
     mapping(address => bool) public strategyAllowlist;
     mapping(address => uint256) public strategyAllowlistEta; // 0 = no pending proposal
 
-    uint256 public constant MIN_ALLOWLIST_DELAY = 1 days;
+    uint256 public constant MIN_ALLOWLIST_DELAY = 5 minutes;
     uint256 public constant MAX_ALLOWLIST_DELAY = 30 days;
     uint256 public constant ALLOWLIST_GRACE_PERIOD = 7 days; // proposal must be executed within this window of eta
     uint256 public strategyAllowlistDelay = 2 days;
