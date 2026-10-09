@@ -38,7 +38,7 @@ This document, and the implementation it describes, is Multyr's response to the 
 The review's concern with a general `RecoveryController` was that it risks converting Multyr from a *progressively immutable* protocol into a *permanently governance-upgradeable* one — materially changing the trust model users and allocators rely on. `RecoveryGate` is designed so that, structurally, it cannot do this:
 
 - It cannot add selectors, relax roles, or touch anything outside `moduleOf` for one pre-approved group.
-- Its own policy (delay, cooldown, vault, root timelock) is immutable — set once at construction, no setters exist.
+- Its recovery policy (delay, cooldown and vault binding) is immutable. Root governance rotates through `beginRootTimelockTransfer` / `acceptRootTimelockTransfer`; acceptance cancels predecessor recovery and approver-change proposals.
 - The recoverable groups themselves are fixed at compile time (read from `SelectorLib`), not configurable post-deployment.
 - `CoreVault`'s constitutional surface — the shell, governance addresses, sealing logic, and the recovery policy binding itself — is entirely outside `RecoveryGate`'s reach by construction (see [§9](#9-what-recovery-cannot-do)).
 
@@ -81,16 +81,16 @@ Selector sets are read directly from `src/core/libraries/SelectorLib.sol` — th
 
 ## 5. Immutable Recovery Policy
 
-Fixed at `RecoveryGate` construction — no setters exist for any of these:
+Recovery policy and governance fields are initialized at construction. Rotation is explicitly identified below:
 
 | Field | Value | Rationale |
 |---|---|---|
 | `vault` | constructor arg | The one `CoreVault` this gate serves |
-| `rootTimelock` | constructor arg | The one address that may `propose()` |
+| `rootTimelock` | constructor arg, two-step rotation | Current governance address that may `propose()` |
 | `minDelay` | constructor arg, `>= 14 days` enforced by the constructor itself | Review §12 — recovery is remediation, not same-block containment |
 | `cooldown` | constructor arg | Minimum gap between two completed recoveries of the *same* group — prevents salami-slicing continuous evolution through repeated individually-reviewable recoveries |
 | Recoverable groups | compile-time, via `SelectorLib` | Not configurable post-deployment at all |
-| `securityApprover` | constructor arg, **the one rotatable field** | See [§8](#8-security-approver-rotation) |
+| `securityApprover` | constructor arg, **delayed rotation** | See [§8](#8-security-approver-rotation) |
 
 A misconfigured deployment cannot exist: `RecoveryGate`'s constructor reverts with `DelayTooShort()` if `minDelay < 14 days`, so there is no way to deploy a gate with a shorter delay than the review's floor.
 
@@ -116,7 +116,7 @@ Per review §13, the digest committed at `propose()` time binds:
 
 ## 8. Security Approver Rotation
 
-`securityApprover` is the one field in an otherwise fully immutable policy that can change — resolving the open question raised in the developer response (`docs/developer-response-recovery-architecture` §6): a permanently fixed approver address is itself an operational risk (signer key loss over a multi-year sealed deployment with no recourse).
+`securityApprover` rotates through a delayed process separate from root-governance ownership transfer — resolving the open question raised in the developer response (`docs/developer-response-recovery-architecture` §6): a permanently fixed approver address is itself an operational risk (signer key loss over a multi-year sealed deployment with no recourse).
 
 Rotation uses the same propose/execute/veto shape as a recovery itself:
 
@@ -172,3 +172,7 @@ Before sealing a vault that wires recovery:
 2. Call `CoreVault.setRecoveryGate(gate)` — set-once, before `freezeRouting()`/sealing.
 3. Include `recoveryGate` and `recoveryManifestVersion` (`RecoveryGate.MANIFEST_VERSION()`) in the `SystemSealer.SealConfig` passed to `verifyAndSeal()` — the seal will reject a mismatch between the manifest and what's actually wired into the vault.
 4. If a deployment deliberately does not wire recovery, pass `recoveryGate: address(0)` and `recoveryManifestVersion: 0` — `SystemSealer` treats this as a valid, explicit "no recovery" configuration, not an error.
+
+## Root governance handover
+
+The current root nominates a nonzero successor with `beginRootTimelockTransfer(address)`. Only that successor can call `acceptRootTimelockTransfer()`. The old root loses authorization on acceptance, pending recovery proposals and approver changes are cancelled, and recovery delays/cooldowns and the security approver remain unchanged. This also supports an initial deployer-to-Safe handover; a Safe must actually execute the acceptance call.

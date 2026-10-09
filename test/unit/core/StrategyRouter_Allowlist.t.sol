@@ -292,6 +292,19 @@ contract StrategyRouter_Allowlist is Test {
         router.executeStrategyAllowlist(address(strat));
     }
 
+    function test_fiveMinuteSetupDelayCannotBeBypassed() public {
+        router.setStrategyAllowlistDelay(5 minutes);
+        uint256 eta = router.proposeStrategyAllowlist(address(strat));
+        assertEq(eta, block.timestamp + 300);
+        vm.warp(eta - 1);
+        vm.expectRevert(bytes("timelock-not-passed"));
+        router.executeStrategyAllowlist(address(strat));
+        vm.warp(eta);
+        router.executeStrategyAllowlist(address(strat));
+        router.register(address(strat), 0, 1e4);
+        assertTrue(router.isStrategyEnabled(address(strat)));
+    }
+
     // ---------------- delay configuration ----------------
 
     function test_setStrategyAllowlistDelay_onlyOwner() public {

@@ -307,4 +307,26 @@ contract FeeCollectorHarvestQueue is Test {
         assertEq(collector.pendingHarvestClaimCount(address(vault)), 0);
         assertEq(collector.pendingHarvestShares(address(vault)), 0);
     }
+    function test_settledDustClearsQueueWithoutDistribution() public {
+        vm.prank(alice);
+        vault.deposit(1_000_000e6, alice);
+        _accrueFeeShares(200_000e6);
+        params.setCapPerEpochBps(1);
+        collector.distribute(address(vault));
+        (uint256 e,) = collector.pendingHarvestClaimAt(address(vault), 0);
+        _warp(7 days + 1);
+        _q().closeCurrentEpoch();
+        _q().fundEpoch(e);
+        vm.prank(gov);
+        collector.setMinDistribution(address(usdc), type(uint256).max);
+        collector.harvestQueued(address(vault));
+        assertEq(collector.pendingHarvestClaimCount(address(vault)), 0);
+        assertEq(collector.pendingHarvestShares(address(vault)), 0);
+        assertGt(usdc.balanceOf(address(collector)), 0);
+        vm.prank(gov);
+        collector.setMinDistribution(address(usdc), 0);
+        collector.distribute(address(usdc));
+        assertEq(usdc.balanceOf(address(collector)), 0);
+    }
+
 }

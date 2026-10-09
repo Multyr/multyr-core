@@ -22,6 +22,14 @@ contract GlobalConfigQueueTest is Test {
   assertEq(cfg.getQueueParams(VAULT).epochDuration,3600);
   assertEq(cfg.getQueueParams(VAULT).cooldownPerClaim,3600);
  }
+ function testTwoMinuteTestingEpoch() public {
+  cfg.setVaultQueueOverride(VAULT,GlobalConfig.QueueConfig(10,0,2 minutes));
+  assertEq(cfg.getQueueParams(VAULT).epochDuration,120);
+  assertEq(cfg.getQueueParams(VAULT).cooldownPerClaim,0);
+  assertEq(cfg.getQueueParams(OTHER).epochDuration,7 days);
+  vm.expectRevert(GlobalConfig.InvalidDelay.selector);
+  cfg.setVaultQueueOverride(VAULT,GlobalConfig.QueueConfig(10,121,120));
+ }
  function testDefaultsDoNotOverwriteVaultOverride() public {
   cfg.setVaultQueueOverride(VAULT,GlobalConfig.QueueConfig(2,0,1 days));
   cfg.setDefaultQueue(GlobalConfig.QueueConfig(15,100,30 days));
@@ -36,12 +44,12 @@ contract GlobalConfigQueueTest is Test {
  function testRejectInvalidConfiguration() public {
   vm.expectRevert(GlobalConfig.ZeroAddress.selector);cfg.setVaultQueueOverride(address(0),GlobalConfig.QueueConfig(10,0,1 days));
   vm.expectRevert(GlobalConfig.InvalidMaxActions.selector);cfg.setDefaultQueue(GlobalConfig.QueueConfig(0,0,1 days));
-  vm.expectRevert(GlobalConfig.InvalidDelay.selector);cfg.setDefaultQueue(GlobalConfig.QueueConfig(10,0,1 hours-1));
+  vm.expectRevert(GlobalConfig.InvalidDelay.selector);cfg.setDefaultQueue(GlobalConfig.QueueConfig(10,0,2 minutes-1));
   vm.expectRevert(GlobalConfig.InvalidDelay.selector);cfg.setDefaultQueue(GlobalConfig.QueueConfig(10,0,30 days+1));
   vm.expectRevert(GlobalConfig.InvalidDelay.selector);cfg.setVaultQueueOverride(VAULT,GlobalConfig.QueueConfig(10,1 days+1,1 days));
  }
  function testFuzzValidRoundtrip(uint8 count,uint64 duration,uint64 cooldown) public {
-  count=uint8(bound(count,1,255));duration=uint64(bound(duration,1 hours,30 days));cooldown=uint64(bound(cooldown,0,duration));
+  count=uint8(bound(count,1,255));duration=uint64(bound(duration,2 minutes,30 days));cooldown=uint64(bound(cooldown,0,duration));
   cfg.setVaultQueueOverride(VAULT,GlobalConfig.QueueConfig(count,cooldown,duration));
   IParamsProvider.QueueParams memory q=cfg.getQueueParams(VAULT);
   assertEq(q.maxClaimsPerUserPerEpoch,count);assertEq(q.cooldownPerClaim,cooldown);assertEq(q.epochDuration,duration);

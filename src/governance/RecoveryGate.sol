@@ -15,7 +15,7 @@ import { SelectorLib } from "../core/libraries/SelectorLib.sol";
  *      Not a general-purpose upgrade mechanism. Not callable by anyone but
  *      ROOT_TIMELOCK to propose, SECURITY_APPROVER to approve, and CoreVault's
  *      own vetoer to cancel. Cannot add selectors, cannot relax roles, cannot
- *      touch CoreVault's shell, governance, or this contract's own policy.
+ *      touch CoreVault's shell, governance, or this contract's recovery policy.
  *
  * WHAT THIS IS:
  *      A dedicated, separate entry point (review §7) that lets ROOT_TIMELOCK
@@ -45,14 +45,15 @@ import { SelectorLib } from "../core/libraries/SelectorLib.sol";
  * independently-maintained selector registry to drift out of sync.
  *
  * IMMUTABLE RECOVERY POLICY (review §8 — fixed at construction, no setters
- * of any kind on delay, cooldown, vault, or root timelock):
+ * of any kind on delay, cooldown, or vault):
  *      - minDelay: hard floor of 14 days, enforced in the constructor itself
  *        (a misconfigured deployment cannot even be deployed with less).
  *      - cooldown: minimum gap between two completed recoveries of the same
  *        group, preventing a group from being salami-sliced through
  *        repeated recoveries that each individually pass review but
  *        cumulatively amount to continuous evolution.
- *      - securityApprover is the one field that IS rotatable — but only by
+ *      - Root governance is rotatable through nominate/accept ownership transfer.
+ *      - securityApprover IS rotatable — but only by
  *        ROOT_TIMELOCK, and only subject to the same minDelay as a recovery
  *        itself, so a compromised timelock cannot fast-track a friendly
  *        approver into place in time to matter. This resolves the open
@@ -90,7 +91,8 @@ contract RecoveryGate {
     // IMMUTABLE POLICY
     // ═══════════════════════════════════════════════════════════════════════════════
     address public immutable vault;
-    address public immutable rootTimelock;
+    address public rootTimelock;
+    address public pendingRootTimelock;
     uint64 public immutable minDelay;
     uint64 public immutable cooldown;
 
@@ -125,6 +127,7 @@ contract RecoveryGate {
     error ZeroAddress();
     error InvalidGroup();
     error NotRootTimelock();
+    error NotPendingRootTimelock();
     error NotSecurityApprover();
     error NotVetoer();
     error WrongSelectorCount();
@@ -139,6 +142,10 @@ contract RecoveryGate {
     // ═══════════════════════════════════════════════════════════════════════════════
     // EVENTS
     // ═══════════════════════════════════════════════════════════════════════════════
+    event RecoveryCancelledOnRootTransfer(uint8 indexed groupId, bytes32 digest);
+    event RootTimelockTransferStarted(address indexed previousRoot, address indexed pendingRoot);
+    event RootTimelockTransferred(address indexed previousRoot, address indexed newRoot);
+
     event RecoveryProposed(uint8 indexed groupId, bytes32 digest, uint64 eta, bytes32 reasonRef);
     event RecoveryApproved(uint8 indexed groupId, bytes32 digest);
     event RecoveryVetoed(uint8 indexed groupId, bytes32 digest);
@@ -285,10 +292,39 @@ contract RecoveryGate {
     // ═══════════════════════════════════════════════════════════════════════════════
     // SECURITY APPROVER ROTATION
     // ═══════════════════════════════════════════════════════════════════════════════
-    // The one rotatable field in an otherwise immutable policy (see contract
+    // Delayed security-approver rotation (see contract
     // NatSpec). Subject to the same minDelay and the same vetoer as a
     // recovery itself, so compromising ROOT_TIMELOCK cannot install a
     // friendly approver in time to matter for any recovery already in flight.
+
+    /// @notice Nominate governance; the successor must explicitly accept.
+    function beginRootTimelockTransfer(address newRootTimelock) external onlyRootTimelock {
+        if (newRootTimelock == address(0)) revert ZeroAddress();
+        pendingRootTimelock = newRootTimelock;
+        emit RootTimelockTransferStarted(rootTimelock, newRootTimelock);
+    }
+
+    /// @dev Cancel predecessor proposals so old approvals cannot cross the authority handover.
+    /// Recovery delays, cooldown history, vault binding and security approver are preserved.
+    function acceptRootTimelockTransfer() external {
+        if (msg.sender != pendingRootTimelock) revert NotPendingRootTimelock();
+        address previous = rootTimelock;
+        rootTimelock = msg.sender;
+        pendingRootTimelock = address(0);
+        for (uint8 groupId; groupId < GROUP_COUNT; ++groupId) {
+            if (proposals[groupId].exists) {
+                bytes32 digest = proposals[groupId].digest;
+                delete proposals[groupId];
+                emit RecoveryCancelledOnRootTransfer(groupId, digest);
+            }
+        }
+        if (pendingApprover.exists) {
+            address rejected = pendingApprover.newApprover;
+            delete pendingApprover;
+            emit ApproverChangeVetoed(rejected);
+        }
+        emit RootTimelockTransferred(previous, msg.sender);
+    }
 
     function proposeApproverChange(address newApprover) external onlyRootTimelock {
         if (newApprover == address(0)) revert ZeroAddress();

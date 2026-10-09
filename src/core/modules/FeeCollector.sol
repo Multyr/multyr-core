@@ -19,7 +19,8 @@ contract FeeCollector is ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
     // Governance
-    address public immutable governor; // timelock/multisig executor
+    address public governor; // timelock/multisig executor
+    address public pendingGovernor;
 
     // Sinks
     address public treasury; // protocol treasury
@@ -150,6 +151,24 @@ contract FeeCollector is ReentrancyGuard, Pausable {
         governor = _governor;
         OPS_MAX_BPS = _opsMaxBps;
         _setParams(_treasury, _ops, _safetyReserve, _treasuryBps, _safetyReserveBps);
+    }
+
+    event GovernorTransferStarted(address indexed governor, address indexed pendingGovernor);
+    event GovernorTransferred(address indexed previousGovernor, address indexed governor);
+
+    /// @notice The current governor nominates a successor; authority changes only on acceptance.
+    function beginGovernorTransfer(address newGovernor) external onlyGov {
+        require(newGovernor != address(0), "FeeCollector: governor=0");
+        pendingGovernor = newGovernor;
+        emit GovernorTransferStarted(governor, newGovernor);
+    }
+
+    function acceptGovernorTransfer() external {
+        require(msg.sender == pendingGovernor, "FeeCollector: not pending governor");
+        address previous = governor;
+        governor = msg.sender;
+        pendingGovernor = address(0);
+        emit GovernorTransferred(previous, msg.sender);
     }
 
     // --- Admin setters ---
@@ -393,7 +412,11 @@ contract FeeCollector is ReentrancyGuard, Pausable {
         }
 
         emit HarvestSettled(token, sc.underlying, pending, underBal);
-        if (underBal > 0) _distributeUnderlying(sc.underlying, underBal);
+        // Settled queue entries must be cleared even when their recovery is dust.
+        // Retain sub-threshold underlying until a later distribution can batch it.
+        if (underBal > 0 && underBal >= minDistribution[sc.underlying]) {
+            _distributeUnderlying(sc.underlying, underBal);
+        }
     }
 
     /// @notice Number of queued epoch claims awaiting settlement for `token`.
