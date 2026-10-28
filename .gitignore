@@ -26,3 +26,7 @@ node_modules/
 
 # Forge coverage
 lcov.info
+
+# Python release tooling
+__pycache__/
+*.pyc
