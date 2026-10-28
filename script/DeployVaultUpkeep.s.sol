@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
+import {ReleaseGuard} from "./release/ReleaseGuard.sol";
 
 import { Script } from "forge-std/Script.sol";
 import { console } from "forge-std/console.sol";
@@ -25,6 +26,7 @@ import { ChainConfig } from "./config/ChainConfig.sol";
 contract DeployVaultUpkeep is Script {
 
     function run() external returns (VaultUpkeep upkeep) {
+        ReleaseGuard.check();
         ChainConfig.Config memory chain = ChainConfig.current();
 
         uint256 deployerPk = vm.envUint("DEPLOYER_PRIVATE_KEY");

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
+import {ReleaseGuard} from "./release/ReleaseGuard.sol";
 
 import {Script} from "forge-std/Script.sol";
 import {console2} from "forge-std/console2.sol";
@@ -10,6 +11,9 @@ import {CoreVault} from "../src/core/CoreVault.sol";
 /// Ownership transfers to GOVERNOR_ADDRESS once the upkeep has been configured.
 contract DeployClaimSettlementUpkeep is Script {
     function run() external returns (ClaimSettlementUpkeep upkeep) {
+        ReleaseGuard.check();
+        string memory output = vm.envString("CLAIM_OUTPUT_JSON");
+        require(!vm.exists(output), "deployment record already exists");
         uint256 key = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address vault = vm.envAddress("VAULT_ADDRESS");
         require(vault.code.length > 0, "vault has no code");
@@ -27,9 +31,12 @@ contract DeployClaimSettlementUpkeep is Script {
         require(upkeep.owner() == governor, "wrong owner");
         console2.log("ClaimSettlementUpkeep", address(upkeep));
         string memory json = "claimSettlement";
+        vm.serializeString(json, "coreCommit", vm.envString("RELEASE_CORE_COMMIT"));
+        vm.serializeString(json, "strategyCommit", vm.envString("RELEASE_STRATEGY_COMMIT"));
+        vm.serializeBool(json, "dirtyTree", false);
         vm.serializeAddress(json, "vault", vault);
         vm.serializeAddress(json, "owner", governor);
         string memory result = vm.serializeAddress(json, "claimSettlementUpkeep", address(upkeep));
-        vm.writeJson(result, vm.envOr("CLAIM_OUTPUT_JSON", string("broadcast/claim-settlement-addresses.json")));
+        vm.writeJson(result, output);
     }
 }

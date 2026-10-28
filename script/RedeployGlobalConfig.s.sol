@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
+import {ReleaseGuard} from "./release/ReleaseGuard.sol";
 import {Script,console2} from "forge-std/Script.sol";
 import {GlobalConfig} from "../src/core/config/GlobalConfig.sol";
 import {GlobalConfigMigrated} from "./helpers/GlobalConfigMigration.sol";
@@ -22,6 +23,7 @@ contract RedeployGlobalConfig is Script {
  address constant FACTORY=0x27b5B83E77044817310c14CF62D96be606f79436;
  address constant SIGNER=0x908756f36954f2853134259B8846c49F90E84ECe;
  function run() external {
+        ReleaseGuard.check();
   require(block.chainid==42161,"wrong chain");
   uint256 key=vm.envUint("DEPLOYER_PRIVATE_KEY");require(vm.addr(key)==SIGNER,"unexpected signer");
   MigrationTimelock tl=MigrationTimelock(ROOT);
