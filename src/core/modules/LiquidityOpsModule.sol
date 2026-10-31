@@ -26,6 +26,10 @@ interface IRouterScorerView {
     function scorer() external view returns (address);
 }
 
+interface IRouterDepositCapacity {
+    function depositCapacity(address strategy, uint256 nav) external view returns (uint256);
+}
+
 /// @title LiquidityOpsModule
 /// @notice Handles deploy-to-strategy operations via delegatecall from CoreVault
 /// @dev Called via delegatecall — uses EIP-7201 namespaced storage, no own storage.
@@ -42,6 +46,8 @@ contract LiquidityOpsModule {
     error AssetQueryFailed();
     error PlanExceedsSurplus(uint256 planTotal, uint256 surplus);
     error UnregisteredStrategy(address strat);
+    error InvalidDepositPlan();
+    error StrategyCapacityExceeded(address strategy, uint256 requested, uint256 capacity);
 
     // ═══════════════════════════════════════════════════════════════════════════════
     // CONSTANTS
@@ -666,6 +672,19 @@ contract LiquidityOpsModule {
             cs.packedFlags &= ~CoreStorage.FLAG_REENTRANCY_LOCKED;
             emit Events.DeploySkipped(SKIP_EMPTY_PLAN);
             return;
+        }
+
+        // Validate the complete plan before the first transfer. In particular,
+        // duplicate entries must share the same headroom instead of each spending it.
+        if (plan.length > 12) revert InvalidDepositPlan();
+        for (uint256 i; i < plan.length; ++i) {
+            if (plan[i].amount == 0 || plan[i].fundsAlreadyTransferred) revert InvalidDepositPlan();
+            uint256 requested = plan[i].amount;
+            for (uint256 j; j < i; ++j) {
+                if (plan[j].strat == plan[i].strat) requested += plan[j].amount;
+            }
+            uint256 capacity = IRouterDepositCapacity(address(r)).depositCapacity(plan[i].strat, nav);
+            if (requested > capacity) revert StrategyCapacityExceeded(plan[i].strat, requested, capacity);
         }
 
         emit Events.DeployPlanned(surplus, plan.length);
