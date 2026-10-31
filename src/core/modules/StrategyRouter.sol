@@ -133,9 +133,9 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
 
     // ---------------- ctor ----------------
     constructor(address owner_, address core_, address params_) {
-        require(owner_ != address(0), "owner=0");
-        require(core_ != address(0), "core=0");
-        require(params_ != address(0), "params=0");
+        if (owner_ == address(0)) revert ZeroAddress();
+        if (core_ == address(0)) revert ZeroAddress();
+        if (params_ == address(0)) revert ZeroAddress();
         owner = owner_;
         core = core_;
         params = IParamsProvider(params_);
@@ -146,13 +146,13 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
 
     // ---------------- admin ----------------
     function setCore(address core_) external override onlyOwner {
-        require(core_ != address(0), "core=0");
+        if (core_ == address(0)) revert ZeroAddress();
         core = core_;
         emit CoreSet(core_);
     }
 
     function setParamsProvider(address params_) external onlyOwner {
-        require(params_ != address(0), "params=0");
+        if (params_ == address(0)) revert ZeroAddress();
         params = IParamsProvider(params_);
         emit ParamsProviderSet(params_);
     }
@@ -176,7 +176,7 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
     /// @notice Set strategy health registry (A1: Audit Fix)
     /// @param registry Address of StrategyHealthRegistry contract
     function setHealthRegistry(address registry) external onlyOwner {
-        require(registry != address(0), "registry=0");
+        if (registry == address(0)) revert ZeroAddress();
         healthRegistry = IStrategyHealthRegistry(registry);
         emit HealthRegistrySet(registry);
     }
@@ -194,7 +194,7 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
     /// @param strategy Strategy address
     /// @param maxBps Max allocation as % of NAV in bps (e.g., 3000 = 30%)
     function setMaxStrategyBps(address strategy, uint16 maxBps) external onlyOwner {
-        require(maxBps <= 10000, "max 100%"); // Cannot exceed 100% of NAV
+        if (maxBps > 10000) revert InvalidConfiguration(); // Cannot exceed 100% of NAV
         maxStrategyBps[strategy] = maxBps;
         emit MaxStrategyBpsSet(strategy, maxBps);
     }
@@ -202,13 +202,14 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
     /// @notice Set gas estimate per strategy withdraw (C1: Audit Fix)
     /// @param gasAmount Estimated gas per withdraw (e.g., 100000)
     function setGasPerStrategyWithdraw(uint256 gasAmount) external onlyOwner {
-        require(gasAmount >= 50000 && gasAmount <= 500000, "gas out of range");
+        if (gasAmount < 50000 || gasAmount > 500000) revert InvalidConfiguration();
         gasPerStrategyWithdraw = gasAmount;
         emit GasPerStrategyWithdrawUpdated(gasAmount);
     }
 
     /// @notice Set the strategy scorer for SCORED intake mode
     function setScorer(address scorer_) external onlyOwner {
+        if (scorer_ == address(0) ? intakeMode == IntakeMode.SCORED : scorer_.code.length == 0) revert InvalidScorer();
         scorer = scorer_;
         emit ScorerSet(scorer_);
     }
@@ -307,6 +308,7 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
     }
 
     function setIntakeMode(IntakeMode m) external override onlyOwner {
+        if (m == IntakeMode.SCORED && scorer.code.length == 0) revert InvalidScorer();
         intakeMode = m;
         emit IntakeModeSet(m);
     }
@@ -335,7 +337,7 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
     }
 
     function transferOwnership(address newOwner) external onlyOwner {
-        require(newOwner != address(0), "newOwner=0");
+        if (newOwner == address(0)) revert ZeroAddress();
         emit OwnerChanged(owner, newOwner);
         owner = newOwner;
     }
@@ -354,16 +356,16 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
         return _strats[idx - 1].enabled;
     }
 
-    /// @notice Aggregate totalAssets across all enabled strategies. Never reverts.
+    /// @notice Aggregate totalAssets across all registered strategies. Never reverts.
     /// @dev Uses low-level staticcall + data.length guard (same pattern as
     ///      UsdcLendingStrategy._safeTotalAssets). Iterates _strats storage directly
-    ///      (no memory copy via list()). Skips disabled strategies and any
+    ///      (no memory copy via list()). Includes disabled capital; skips any
     ///      strategy whose totalAssets() reverts or returns malformed data.
     function totalStrategyAssetsSafe() external view override returns (uint256 sum) {
         uint256 len = _strats.length;
         for (uint256 i = 0; i < len;) {
             StrategyInfo storage s = _strats[i];
-            if (s.enabled) {
+            {
                 (bool ok, bytes memory data) = s.strat
                 .staticcall{
                     gas: _stratTaGas()
@@ -382,7 +384,7 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
     ///         is best-effort: it counts a reverting strategy as 0, which silently understates
     ///         the NAV. A withdrawal request turns the NAV into an irrevocable liability, so it
     ///         needs to know the valuation is COMPLETE and trustworthy, not merely computable.
-    /// @return strategyAssets Σ totalAssets() of enabled strategies (partial if issue != 0)
+    /// @return strategyAssets Σ totalAssets() of registered strategies (partial if issue != 0)
     /// @return issue 0 = valid; 4 = a strategy valuation reverted / returned malformed data;
     ///         5 = a strategy is DEGRADED/BROKEN in the health registry (or it cannot be read);
     ///         6 = a required oracle input is missing-when-configured, stale or inconsistent
@@ -390,7 +392,7 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
         uint256 len = _strats.length;
         for (uint256 i = 0; i < len;) {
             StrategyInfo storage s = _strats[i];
-            if (s.enabled) {
+            {
                 (bool ok, bytes memory data) = s.strat.staticcall{ gas: _stratTaGas() }(
                     abi.encodeWithSelector(IStrategy.totalAssets.selector)
                 );
@@ -399,7 +401,8 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
                 } else if (issue == 0) {
                     issue = 4;
                 }
-                if (issue == 0 && address(healthRegistry) != address(0)) {
+                // Empty retired legs cannot affect withdrawal pricing. Funded disabled legs can.
+                if (issue == 0 && abi.decode(data, (uint256)) > 0 && address(healthRegistry) != address(0)) {
                     try healthRegistry.getStrategyState(s.strat) returns (
                         IStrategyHealthRegistry.StrategyState st
                     ) {
@@ -439,113 +442,103 @@ contract StrategyRouter is IStrategyRouter, ReentrancyGuard {
         return 0; // excluded: reverted/OOG/malformed
     }
 
+    error ZeroAddress();
+    error InvalidConfiguration();
+    error InvalidScorer();
+    error InvalidScorePlan();
+
     // ---------------- planning ----------------
 
-    /// @notice Calculate deposit allocation across strategies (DEPRECATED)
-    /// @dev DEPRECATED: Planning moved off-chain for PR-EO execute-only pattern.
-    ///      Use script/planner/PlanDeposit.s.sol for production keeper flows.
-    ///      This function is kept as view-only for debugging and reference.
-    /// @param amount Amount to allocate
-    /// @return plan Allocation array (for reference/debug only - do NOT use in production)
+    /// @notice Bound every planned leg by current intake eligibility and NAV headroom.
+    /// @dev Unallocatable surplus stays in Core; zero legs are removed.
     function planDeposit(uint256 amount) public view override returns (Allocation[] memory plan) {
-        if (amount == 0) return new Allocation[](0);
-        // Cache array length for gas optimization
-        uint256 stratsLen = _strats.length;
-        // count eligible strategies (enabled + healthy) and find maxPriority
-        uint256 n = 0;
-        uint16 maxPriority = 0;
-        for (uint256 i = 0; i < stratsLen; i++) {
-            bool eligible = _strats[i].enabled;
-            // Health filter: DEGRADED/BROKEN excluded from ALL modes
-            if (eligible && address(healthRegistry) != address(0)) {
-                try healthRegistry.isHealthyForDeposit(_strats[i].strat) returns (bool ok) {
-                    eligible = ok;
-                } catch { eligible = false; } // FAIL-CLOSED
-            }
-            if (eligible) {
-                n++;
-                if (_strats[i].priority > maxPriority) {
-                    maxPriority = _strats[i].priority;
-                }
-            }
+        plan = _planDeposit(amount);
+        if (plan.length == 0) return plan;
+        uint256 nav = _getCoreNav();
+        uint256 count;
+        for (uint256 i; i < plan.length; ++i) {
+            uint256 capacity = depositCapacity(plan[i].strat, nav);
+            uint256 take = plan[i].amount < capacity ? plan[i].amount : capacity;
+            if (take > 0) plan[count++] = Allocation(plan[i].strat, take, false);
+        }
+        assembly { mstore(plan, count) }
+    }
+
+    /// @notice Maximum additional assets a currently eligible leg may receive.
+    /// @dev Rechecked by Core before transfers, including caller-supplied plans.
+    ///      nav is the single pre-transfer Core NAV snapshot. Zero cap retains the
+    ///      existing meaning of uncapped; unreadable valuations fail closed.
+    function depositCapacity(address strat, uint256 nav) public view returns (uint256) {
+        uint256 idx = _idx[strat];
+        if (idx == 0 || !_strats[idx - 1].enabled || !_isDepositReady(strat)) return 0;
+        uint16 cap = maxStrategyBps[strat];
+        (bool ok, bytes memory data) = strat.staticcall{gas: _stratTaGas()}(
+            abi.encodeWithSelector(IStrategy.totalAssets.selector)
+        );
+        if (!ok || data.length != 32) return 0;
+        if (cap == 0) return type(uint256).max;
+        uint256 limit = (nav * cap) / 10000;
+        uint256 current = abi.decode(data, (uint256));
+        return current < limit ? limit - current : 0;
+    }
+
+    /// @dev Lending intake flags are mandatory for this route: missing/malformed
+    ///      status or reverted probes fail closed rather than funding blindly.
+    function _isDepositReady(address strat) internal view returns (bool) {
+        return _isHealthy(strat)
+            && _intakeFlagClear(strat, bytes4(keccak256("paused()")))
+            && _intakeFlagClear(strat, bytes4(keccak256("depositsDisabled()")));
+    }
+
+    function _intakeFlagClear(address strat, bytes4 selector) private view returns (bool) {
+        (bool ok, bytes memory data) = strat.staticcall{gas: _stratTaGas()}(abi.encodeWithSelector(selector));
+        return ok && data.length == 32 && abi.decode(data, (uint256)) == 0;
+    }
+
+    function _planDeposit(uint256 amount) internal view returns (Allocation[] memory plan) {
+        if (amount == 0 || intakeMode == IntakeMode.NONE) return new Allocation[](0);
+        uint256 len = _strats.length;
+        address[] memory eligible = new address[](len);
+        uint256 n;
+        uint256 sumW;
+        uint256 first;
+        uint256 priority = type(uint256).max;
+        for (uint256 i; i < len; ++i) {
+            StrategyInfo storage s = _strats[i];
+            if (!s.enabled || !_isDepositReady(s.strat)) continue;
+            eligible[n] = s.strat;
+            sumW += s.weightBps;
+            if (s.priority < priority || n == 0) { priority = s.priority; first = n; }
+            ++n;
         }
         if (n == 0) return new Allocation[](0);
-
-        plan = new Allocation[](n);
+        assembly { mstore(eligible, n) }
         if (intakeMode == IntakeMode.PRIORITY) {
-            // ordina implicitamente per priority crescente e riempi
-            uint256 remaining = amount;
-            uint256 k = 0;
-            // Iterate only up to maxPriority, not 65535
-            for (uint256 p = 0; remaining > 0 && p <= maxPriority; p++) {
-                for (uint256 i = 0; i < stratsLen && remaining > 0; i++) {
-                    StrategyInfo memory s = _strats[i];
-                    if (!s.enabled || s.priority != p || !_isHealthy(s.strat)) continue;
-                    uint256 push = remaining;
-                    plan[k++] = Allocation({
-                        strat: s.strat, amount: push, fundsAlreadyTransferred: false
-                    });
-                    remaining = 0;
-                }
-            }
-            if (k < n) {
-                // ridimensiona array
-                assembly { mstore(plan, k) }
-            }
-        } else if (intakeMode == IntakeMode.WEIGHTED) {
-            uint256 sumW;
-            for (uint256 i = 0; i < stratsLen; i++) {
-                if (_strats[i].enabled && _isHealthy(_strats[i].strat)) {
-                    sumW += _strats[i].weightBps;
-                }
-            }
-            require(sumW == 1e4, "bad-weights");
-            uint256 k = 0;
-            uint256 acc = 0;
-            for (uint256 i = 0; i < stratsLen; i++) {
-                StrategyInfo memory s = _strats[i];
-                if (!s.enabled || !_isHealthy(s.strat)) continue;
-                uint256 part = (amount * s.weightBps) / 1e4;
+            plan = new Allocation[](1);
+            plan[0] = Allocation(eligible[first], amount, false);
+            return plan;
+        }
+        plan = new Allocation[](n);
+        uint256 acc;
+        if (intakeMode == IntakeMode.WEIGHTED) {
+            if (sumW == 0) return new Allocation[](0);
+            uint256 dustLeg;
+            for (uint256 i; i < n; ++i) {
+                uint256 part = amount * _strats[_idx[eligible[i]] - 1].weightBps / sumW;
+                plan[i] = Allocation(eligible[i], part, false);
                 acc += part;
-                plan[k++] =
-                    Allocation({ strat: s.strat, amount: part, fundsAlreadyTransferred: false });
+                if (_strats[_idx[eligible[dustLeg]] - 1].weightBps == 0) dustLeg = i;
             }
-            // assegna eventuali resti al primo
-            if (k > 0 && acc < amount) plan[0].amount += (amount - acc);
-            if (k < n) assembly { mstore(plan, k) }
-        } else if (intakeMode == IntakeMode.SCORED) {
-            require(scorer != address(0), "no-scorer");
-            // Build eligible strategy list
-            address[] memory eligible = new address[](n);
-            uint256 ek = 0;
-            for (uint256 i = 0; i < stratsLen; i++) {
-                if (_strats[i].enabled && _isHealthy(_strats[i].strat)) {
-                    eligible[ek++] = _strats[i].strat;
-                }
-            }
-            assembly { mstore(eligible, ek) }
-            if (ek == 0) {
-                // NoEligibleStrategyDetected event emitted at execution time, not in view
-                return new Allocation[](0);
-            }
-            if (ek == 1) {
-                // Single eligible -> passthrough 100%
-                plan = new Allocation[](1);
-                plan[0] = Allocation(eligible[0], amount, false);
-                return plan;
-            }
-            // 2+ eligible -> dynamic scoring
+            plan[dustLeg].amount += amount - acc;
+        } else {
             uint256[] memory allocs = IStrategyScorer(scorer).computeAllocations(eligible, amount);
-            plan = new Allocation[](ek);
-            uint256 acc = 0;
-            for (uint256 i = 0; i < ek; i++) {
+            if (allocs.length != n) revert InvalidScorePlan();
+            for (uint256 i; i < n; ++i) {
                 plan[i] = Allocation(eligible[i], allocs[i], false);
                 acc += allocs[i];
             }
-            if (acc < amount && ek > 0) plan[0].amount += (amount - acc); // dust
-        } else {
-            // NONE -> no automatic allocation
-            return new Allocation[](0);
+            if (acc > amount) revert InvalidScorePlan();
+            // A shortfall can express a scoring constraint; retain it in Core.
         }
     }
 
