@@ -76,6 +76,9 @@ contract ERC4626Module {
     error ReentrancyGuardLocked();
     error NavStale();
     error NavInvalid();
+    /// @notice navStatus() reports an input of grossAssets() it cannot trust (4 strategy
+    ///         valuation failed, 5 strategy unhealthy, 6 oracle invalid): no price to mint at.
+    error NavInputInvalid(uint8 reason);
     /// @notice grossAssets < totalOwed: totalAssets() == 0, so share pricing is meaningless.
     error VaultInsolvent();
     /// @notice forceWithdraw() values at totalAssets() == 0 (insolvency mode, or no shareholder equity):
@@ -577,6 +580,7 @@ contract ERC4626Module {
         if (assets == 0) revert ZeroAmount();
         _requireSolvent();
         _ensureFreshWarmNav();
+        _requireValidNav();
 
         CoreStorage.Layout storage core = CoreStorage.layout();
         FeeStorage.Layout storage f = FeeStorage.layout();
@@ -650,6 +654,7 @@ contract ERC4626Module {
         if (shares == 0) revert ZeroAmount();
         _requireSolvent();
         _ensureFreshWarmNav();
+        _requireValidNav();
 
         CoreStorage.Layout storage core = CoreStorage.layout();
         FeeStorage.Layout storage f = FeeStorage.layout();
@@ -757,6 +762,12 @@ contract ERC4626Module {
 
         if (!valid) revert NavInvalid();
         if (block.timestamp > ts + MAX_WARM_NAV_AGE) revert NavStale();
+    }
+
+    /// @notice Refuses to price shares while navStatus() is invalid, the gate exit requests apply.
+    function _requireValidNav() internal view {
+        (bool valid, uint8 reason) = ICoreVault(address(this)).navStatus();
+        if (!valid) revert NavInputInvalid(reason);
     }
 
     /// @notice Best-effort soft refresh for exit paths (W2 = never block exits)

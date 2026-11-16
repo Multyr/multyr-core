@@ -123,8 +123,8 @@ audit's subject; they are listed last for completeness.
    share value. Eligible requests pay the instant tier; queued fallbacks pay the standard tier.
 3. Successful instant exits consume their net payout from the cap. The cap uses
    `capPerEpochBps` and the cap-epoch NAV snapshot; `DynamicCapParams` has no effect.
-4. Requests refresh warm NAV, then require `navStatus()` to be valid before pricing.
-   Invalid or stale inputs reject the request. Funding attempts a soft refresh of stale warm NAV when a haircut is indicated,
+4. Requests and deposit/mint refresh warm NAV, then require `navStatus()` to be valid before
+   pricing. Invalid or stale inputs reject the request or the deposit. Funding attempts a soft refresh of stale warm NAV when a haircut is indicated,
    recomputes the funding requirement, and requires valid NAV whenever
    crystallization would produce a recovery index below `1e18`; invalid attempts emit
    `EpochFundingNavInvalid` and leave the epoch Closed. Governance can disable an affected

@@ -92,18 +92,19 @@ deposit(assets, receiver):
   2. _notPausedDeposits()            — FLAG_PAUSED / FLAG_PAUSED_DEPOSITS
   3. _enterNonReentrant()            — FLAG_REENTRANCY_LOCKED
   4. _ensureFreshWarmNav()           — auto-refresh, reverts if invalid/stale
-  5. _enforceDepositLimits()         — min/vault/user cap checks
-  6. feeA = mulBpsDown(assets, depBps)
-  7. net = assets - feeA
-  8. shares = convertToShares(net)
-  9. sharesFee = convertToShares(feeA)
-  10. safeTransferFrom(payer → vault, assets)
-  11. processorMint(receiver, shares + sharesFee)
-  12. processorTransfer(receiver → feeCollector, sharesFee)
-  13. emit Deposit, DepositFeeTaken
-  14. notifyIncentives (try/catch)
-  15. FM auto-close check (if FixedMaturity + Funding + autoClose)
-  16. _exitNonReentrant()
+  5. _requireValidNav()              — navStatus() must be valid, else NavInputInvalid(reason)
+  6. _enforceDepositLimits()         — min/vault/user cap checks
+  7. feeA = mulBpsDown(assets, depBps)
+  8. net = assets - feeA
+  9. shares = convertToShares(net)
+  10. sharesFee = convertToShares(feeA)
+  11. safeTransferFrom(payer → vault, assets)
+  12. processorMint(receiver, shares + sharesFee)
+  13. processorTransfer(receiver → feeCollector, sharesFee)
+  14. emit Deposit, DepositFeeTaken
+  15. notifyIncentives (try/catch)
+  16. FM auto-close check (if FixedMaturity + Funding + autoClose)
+  17. _exitNonReentrant()
 ```
 
 Source: `src/core/modules/ERC4626Module.sol:457-519`.
@@ -140,7 +141,7 @@ Source: `src/core/modules/ERC4626Module.sol:163-250`.
 | M2-I2 | `totalSupply` NEVER increases on any exit (no `_mint` in exit paths) |
 | M2-I3 | `forceWithdraw` does NOT consume epoch cap |
 | M2-I4 | Fee shares transferred via `processorTransfer` (not mint) — non-dilutive |
-| M2-I5 | Deposit rejected if warmNavValid=false or warmNav age > 15 min |
+| M2-I5 | Deposit and mint rejected whenever `navStatus()` is invalid: warm NAV invalid or older than 15 min, a strategy valuation failed, a strategy unhealthy, an oracle invalid |
 
 ### 2.6 Errors
 
@@ -150,6 +151,7 @@ Source: `src/core/modules/ERC4626Module.sol:163-250`.
 | `Paused`, `DepositsPaused`, `WithdrawalsPaused` | Flag checks |
 | `NavInvalid` | bufferManager=0 or warmNavValid=false after refresh attempt |
 | `NavStale` | warmNav timestamp > 15 min |
+| `NavInputInvalid(reason)` | deposit/mint while `navStatus()` reports 4 (strategy valuation failed), 5 (strategy unhealthy) or 6 (oracle invalid) |
 | `VaultDepositCapExceeded(after, cap)` | Total NAV + deposit > cap |
 | `UserDepositCapExceeded(after, cap)` | User assets + deposit > user cap |
 | `SlippageExceeded` | Slippage-protected overloads |
