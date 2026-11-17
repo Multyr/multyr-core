@@ -404,6 +404,7 @@ contract MockStrategyRouter is IStrategyRouter {
     uint256 private _strategyTVL;
     function setStrategyTVL(uint256 tvl) external { _strategyTVL = tvl; }
     function totalStrategyAssetsSafe() external view override returns (uint256) { return _strategyTVL; }
+    function navValidity() external view returns (uint256, uint8) { return (_strategyTVL, 0); }
     function planDeposit(uint256) external pure override returns (Allocation[] memory) { return new Allocation[](0); }
     function executeDepositBatch(Allocation[] calldata) external override {}
     function forceRedeemForWithdraw(uint256) external pure override returns (uint256) { return 0; }
