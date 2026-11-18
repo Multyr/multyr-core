@@ -26,3 +26,4 @@ node_modules/
 
 # Forge coverage
 lcov.info
+!.env.shadow.example
