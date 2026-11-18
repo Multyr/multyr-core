@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
+import {ReleaseGuard} from "./release/ReleaseGuard.sol";
 
 import { Script } from "forge-std/Script.sol";
 import { console } from "forge-std/console.sol";
@@ -104,6 +105,7 @@ contract DeployFixedMaturityVault is Script {
     // =========================================================================
 
     function run() external returns (FMDeploymentResult memory result) {
+        ReleaseGuard.check();
         FMConfig memory cfg = _loadConfig();
         _printConfig(cfg);
 

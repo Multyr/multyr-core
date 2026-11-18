@@ -1,0 +1,20 @@
+name: release-records
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  release-integrity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 -m unittest discover -s tests/release -v
+      - name: Preserve historical deployment records
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python3 script/release/check_append_only.py "$BASE"

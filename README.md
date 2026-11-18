@@ -1,3 +1,7 @@
+> **Release and ownership evidence:** see [release process](docs/release-process.md) and
+> [29 October 2026 chain evidence](deployments/evidence-20261029/). The legacy
+> `broadcast/core-addresses.json` is not a current ownership record.
+
 # multyr-core
 
 Non-custodial ERC-4626 vault primitive for the Multyr Protocol on Arbitrum.

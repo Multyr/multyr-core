@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
+import {ReleaseGuard} from "./release/ReleaseGuard.sol";
 
 import { Script } from "forge-std/Script.sol";
 import { console } from "forge-std/console.sol";
@@ -149,6 +150,7 @@ contract DeployCoreSystem is Script {
     // ═══════════════════════════════════════════════════════════════════════════════
 
     function run() external returns (CoreDeploymentResult memory result) {
+        ReleaseGuard.check();
         CoreConfig memory cfg = _loadConfig();
 
         console.log("");
@@ -836,12 +838,19 @@ contract DeployCoreSystem is Script {
         );
 
         try vm.envString("OUTPUT_JSON") returns (string memory p) { cfg.outputJsonPath = p; }
-        catch { cfg.outputJsonPath = "broadcast/core-addresses.json"; }
+        catch { revert("OUTPUT_JSON required: use release.py"); }
+        require(!vm.exists(cfg.outputJsonPath), "deployment record already exists");
     }
 
     function _writeAddressBook(CoreConfig memory cfg, CoreDeploymentResult memory result) internal {
         string memory json = "addresses";
 
+        vm.serializeString(json, "coreCommit", vm.envString("RELEASE_CORE_COMMIT"));
+        vm.serializeString(json, "strategyCommit", vm.envString("RELEASE_STRATEGY_COMMIT"));
+        vm.serializeString(json, "coreTag", vm.envString("RELEASE_CORE_TAG"));
+        vm.serializeString(json, "strategyTag", vm.envString("RELEASE_STRATEGY_TAG"));
+        vm.serializeBool(json, "dirtyTree", false);
+        vm.serializeString(json, "recordType", "DEPLOYMENT_SNAPSHOT_NOT_CURRENT_OWNERSHIP");
         vm.serializeUint(json, "chainId", block.chainid);
         vm.serializeUint(json, "blockNumber", block.number);
         vm.serializeUint(json, "timestamp", block.timestamp);

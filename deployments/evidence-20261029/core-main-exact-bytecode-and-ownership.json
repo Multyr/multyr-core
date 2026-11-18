@@ -1,0 +1,1319 @@
+{
+  "schemaVersion": 1,
+  "mode": "READ_ONLY",
+  "coreMainCommit": "703507d8a93165446f644331e99e08f6c0a7b48b",
+  "chainId": 42161,
+  "blockNumber": 519186126,
+  "blockHash": "0x987ad2045e500ff92b10addac4b50864fac5ab85c3ea68dbf6c8a98600e0ecb3",
+  "blockTimestamp": 1793228027,
+  "hashAlgorithm": "SHA-256",
+  "method": "Exact compiled creation prefix against RPC transaction input; successful CREATE trace runtime compared byte-for-byte with pinned current runtime; compiler runtime patched only with trace-derived immutable values and compared byte-for-byte. No masked differences.",
+  "checks": [
+    {
+      "name": "VaultFactory",
+      "address": "0xfde16c52e89ba078e9f71cc64c2256c8e66cbb01",
+      "transaction": "0xe0519c63f13e9eafe37d6b815eef28ccb4a5e8036e03a14cc3162074c96c4dd6",
+      "deploymentBlock": 513029843,
+      "status": "PASS",
+      "compiledCreationPrefixMatch": true,
+      "constructorAbi": [],
+      "constructorArgumentsHex": "0x",
+      "runtimeBytes": 2969,
+      "compiledCreationSha256": "a32ef6cc4c0ff751b6ca84e1653f7551b0e9e21cb57a664fddfb9c0932bedd3c",
+      "transactionInputSha256": "a32ef6cc4c0ff751b6ca84e1653f7551b0e9e21cb57a664fddfb9c0932bedd3c",
+      "creationRuntimeSha256": "e99fcebd124f6a79d5df9f5b9286bfdd8c600edbfc2e2af08ab2d5958fe62ac8",
+      "currentRuntimeSha256": "e99fcebd124f6a79d5df9f5b9286bfdd8c600edbfc2e2af08ab2d5958fe62ac8",
+      "creationRuntimeEqualsCurrent": true,
+      "compiledRuntimeWithCreationImmutablesEqualsCurrent": true,
+      "immutableBindings": []
+    },
+    {
+      "name": "GlobalConfig",
+      "address": "0x5680e4948759569dcb9d2eab6a5504d733c83b2a",
+      "transaction": "0x71ea6be331f731665f49b4c9ddc7d47cc07cd11534575f26deee5e5826c4c04d",
+      "deploymentBlock": 513029857,
+      "status": "PASS",
+      "compiledCreationPrefixMatch": true,
+      "constructorAbi": [
+        {
+          "internalType": "address",
+          "name": "_governor",
+          "type": "address"
+        },
+        {
+          "internalType": "uint16",
+          "name": "_depositBps",
+          "type": "uint16"
+        },
+        {
+          "internalType": "uint16",
+          "name": "_withdrawBps",
+          "type": "uint16"
+        },
+        {
+          "internalType": "uint16",
+          "name": "_perfBps",
+          "type": "uint16"
+        },
+        {
+          "internalType": "uint64",
+          "name": "_lockPeriod",
+          "type": "uint64"
+        },
+        {
+          "internalType": "uint8",
+          "name": "_maxActions",
+          "type": "uint8"
+        },
+        {
+          "internalType": "uint16",
+          "name": "_maxNavDelta",
+          "type": "uint16"
+        },
+        {
+          "internalType": "uint256",
+          "name": "_cooldown",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "_staleness",
+          "type": "uint256"
+        }
+      ],
+      "constructorArgumentsHex": "0x000000000000000000000000908756f36954f2853134259b8846c49f90e84ece0000000000000000000000000000000000000000000000000000000000000019000000000000000000000000000000000000000000000000000000000000001900000000000000000000000000000000000000000000000000000000000003e80000000000000000000000000000000000000000000000000000000000015180000000000000000000000000000000000000000000000000000000000000001900000000000000000000000000000000000000000000000000000000000001f40000000000000000000000000000000000000000000000000000000000000e100000000000000000000000000000000000000000000000000000000000015180",
+      "runtimeBytes": 16796,
+      "compiledCreationSha256": "77d6ea75d42639ab0f5f13e3d67d80b370b4e22fded5de7b0593591ecd4b22b6",
+      "transactionInputSha256": "1700f564ddcb57b5d01564a1a1623cf7804728ade73236fe855b53304d01c101",
+      "creationRuntimeSha256": "570798ef79c2cf8f8d1b24b35fde9b6c2a2f85d0243650f4526ef99225017ab7",
+      "currentRuntimeSha256": "570798ef79c2cf8f8d1b24b35fde9b6c2a2f85d0243650f4526ef99225017ab7",
+      "creationRuntimeEqualsCurrent": true,
+      "compiledRuntimeWithCreationImmutablesEqualsCurrent": true,
+      "immutableBindings": []
+    },
+    {
+      "name": "FeeCollector",
+      "address": "0x6917ce91cdc284e637ef51dc844fefca83789e92",
+      "transaction": "0x45199a537155aef1180180db97844764d2bd035a5d4eaf4c0949ae22296948a8",
+      "deploymentBlock": 513029863,
+      "status": "PASS",
+      "compiledCreationPrefixMatch": true,
+      "constructorAbi": [
+        {
+          "internalType": "address",
+          "name": "_governor",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_treasury",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_ops",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_safetyReserve",
+          "type": "address"
+        },
+        {
+          "internalType": "uint16",
+          "name": "_treasuryBps",
+          "type": "uint16"
+        },
+        {
+          "internalType": "uint16",
+          "name": "_safetyReserveBps",
+          "type": "uint16"
+        },
+        {
+          "internalType": "uint16",
+          "name": "_opsMaxBps",
+          "type": "uint16"
+        }
+      ],
+      "constructorArgumentsHex": "0x000000000000000000000000908756f36954f2853134259b8846c49f90e84ece00000000000000000000000075f65f192a47e5f9eaae057be90f52e85fde131400000000000000000000000080c791925ec19fa5ddd978e9a357d4d24ac4eabc0000000000000000000000008c85b299ab189f2f88776d21aa94057a457b4f2b0000000000000000000000000000000000000000000000000000000000001b5800000000000000000000000000000000000000000000000000000000000000640000000000000000000000000000000000000000000000000000000000000bb8",
+      "runtimeBytes": 8909,
+      "compiledCreationSha256": "3f81d7d37e08f1f0ba951c49db590d2c89bcbb8fd8c77d01ec6a56ecdfe8a407",
+      "transactionInputSha256": "6a55a431f8b2574b23c7236582052d6f5bc729c69ca36ffbda435a5a2221b67f",
+      "creationRuntimeSha256": "0c3aadcd55c8d2600cad6c400fa8507ed8ee424f39b38fcbba5c3f4a3585e2ad",
+      "currentRuntimeSha256": "0c3aadcd55c8d2600cad6c400fa8507ed8ee424f39b38fcbba5c3f4a3585e2ad",
+      "creationRuntimeEqualsCurrent": true,
+      "compiledRuntimeWithCreationImmutablesEqualsCurrent": true,
+      "immutableBindings": [
+        {
+          "length": 32,
+          "start": 1175,
+          "creationValue": "0x0000000000000000000000000000000000000000000000000000000000000bb8",
+          "currentValue": "0x0000000000000000000000000000000000000000000000000000000000000bb8"
+        },
+        {
+          "length": 32,
+          "start": 4934,
+          "creationValue": "0x0000000000000000000000000000000000000000000000000000000000000bb8",
+          "currentValue": "0x0000000000000000000000000000000000000000000000000000000000000bb8"
+        }
+      ]
+    },
+    {
+      "name": "PriceOracleMiddleware",
+      "address": "0x93c94af96e7e52ad5029ce8fea84d14583518b76",
+      "transaction": "0x70251d54f4d8c71ee049b257f4ef9b581e156494e219b566710dbbbc938aeb5d",
+      "deploymentBlock": 513029869,
+      "status": "PASS",
+      "compiledCreationPrefixMatch": true,
+      "constructorAbi": [
+        {
+          "internalType": "address",
+          "name": "owner_",
+          "type": "address"
+        }
+      ],
+      "constructorArgumentsHex": "0x000000000000000000000000908756f36954f2853134259b8846c49f90e84ece",
+      "runtimeBytes": 2586,
+      "compiledCreationSha256": "605d7ac6e950215c8587534bd6638f8d6763b34b86b138eea28b1df37a5ca745",
+      "transactionInputSha256": "43ccf2bc4ae0c48bfe511992f7c59c634167f624b576f31d5a80e986a25c184b",
+      "creationRuntimeSha256": "1e4a12e105357cd03fe95dcd49ad0f32e70c31697120216b1f6a8881f72bb550",
+      "currentRuntimeSha256": "1e4a12e105357cd03fe95dcd49ad0f32e70c31697120216b1f6a8881f72bb550",
+      "creationRuntimeEqualsCurrent": true,
+      "compiledRuntimeWithCreationImmutablesEqualsCurrent": true,
+      "immutableBindings": []
+    },
+    {
+      "name": "StrategyHealthRegistry",
+      "address": "0x5a866d66089ce7ee63748b172801fbfd584451ff",
+      "transaction": "0xcff00e70642e252ba14cba54ff2451c6601a2076e037dcd8f350aa831382359e",
+      "deploymentBlock": 513029880,
+      "status": "PASS",
+      "compiledCreationPrefixMatch": true,
+      "constructorAbi": [
+        {
+          "internalType": "address",
+          "name": "_owner",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_guardian",
+          "type": "address"
+        }
+      ],
+      "constructorArgumentsHex": "0x000000000000000000000000908756f36954f2853134259b8846c49f90e84ece0000000000000000000000007407e68a5553e948eed862f19fc6b292eb48d677",
+      "runtimeBytes": 3120,
+      "compiledCreationSha256": "50fb848cb9d4a038a370257e268e912fcbfbda6cffb1d9b7c91a94957510964b",
+      "transactionInputSha256": "877070e401798e43d6297c9d724601f1ab7b518aa07d10d0d7a50dfabc65edd9",
+      "creationRuntimeSha256": "982ed12dd5f18008b970b74e11a5a91439637c438b2ba808b24f71ec70691f15",
+      "currentRuntimeSha256": "982ed12dd5f18008b970b74e11a5a91439637c438b2ba808b24f71ec70691f15",
+      "creationRuntimeEqualsCurrent": true,
+      "compiledRuntimeWithCreationImmutablesEqualsCurrent": true,
+      "immutableBindings": []
+    },
+    {
+      "name": "SelectorRegistry",
+      "address": "0x57719e54f531d49f73a49d453b594fc857247fee",
+      "transaction": "0xcfce18b4b216b01c003dfb81e1356e0f6be700fdc85802a4109ac8048003a6cb",
+      "deploymentBlock": 513029892,
+      "status": "PASS",
+      "compiledCreationPrefixMatch": true,
+      "constructorAbi": [],
+      "constructorArgumentsHex": "0x",
+      "runtimeBytes": 3886,
+      "compiledCreationSha256": "dfc7bbde1b2e16c3c72c59419c9dfba91f80b1938787804f2c6df0bfec5debf6",
+      "transactionInputSha256": "dfc7bbde1b2e16c3c72c59419c9dfba91f80b1938787804f2c6df0bfec5debf6",
+      "creationRuntimeSha256": "6276912a972724717dee9ff50427eed26ff56b9d2951fa0e427f0279afbb375c",
+      "currentRuntimeSha256": "6276912a972724717dee9ff50427eed26ff56b9d2951fa0e427f0279afbb375c",
+      "creationRuntimeEqualsCurrent": true,
+      "compiledRuntimeWithCreationImmutablesEqualsCurrent": true,
+      "immutableBindings": []
+    },
+    {
+      "name": "SystemSealer",
+      "address": "0x6c259f1d143fc6de138a26624038819342756af9",
+      "transaction": "0x67211a3806ced70f8b43f8232f9e5c1f0653c04dc993693123ec62fd07ba0eb2",
+      "deploymentBlock": 513029902,
+      "status": "PASS",
+      "compiledCreationPrefixMatch": true,
+      "constructorAbi": [],
+      "constructorArgumentsHex": "0x",
+      "runtimeBytes": 9017,
+      "compiledCreationSha256": "e6ec84f1af34fe45aa8ac084f4e97e18335a4a0b3861808b3798873981a71c9b",
+      "transactionInputSha256": "e6ec84f1af34fe45aa8ac084f4e97e18335a4a0b3861808b3798873981a71c9b",
+      "creationRuntimeSha256": "93f999e7307ab7f77b9a2b0391742bdd134e759ce5a1a63a4cd353d8beb3fddb",
+      "currentRuntimeSha256": "93f999e7307ab7f77b9a2b0391742bdd134e759ce5a1a63a4cd353d8beb3fddb",
+      "creationRuntimeEqualsCurrent": true,
+      "compiledRuntimeWithCreationImmutablesEqualsCurrent": true,
+      "immutableBindings": []
+    },
+    {
+      "name": "CoreVault",
+      "address": "0x5e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+      "transaction": "0xe067142c0e6d8a2faf80064cf4b45cce39347bd21c7ad6773c1d88231f52ef0c",
+      "deploymentBlock": 513029914,
+      "status": "PASS",
+      "compiledCreationPrefixMatch": true,
+      "constructorAbi": [
+        {
+          "internalType": "contract IERC20Metadata",
+          "name": "_asset",
+          "type": "address"
+        },
+        {
+          "internalType": "string",
+          "name": "_name",
+          "type": "string"
+        },
+        {
+          "internalType": "string",
+          "name": "_symbol",
+          "type": "string"
+        },
+        {
+          "internalType": "address",
+          "name": "_owner",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_feeCollector",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_params",
+          "type": "address"
+        }
+      ],
+      "constructorArgumentsHex": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e583100000000000000000000000000000000000000000000000000000000000000c00000000000000000000000000000000000000000000000000000000000000100000000000000000000000000908756f36954f2853134259b8846c49f90e84ece0000000000000000000000006917ce91cdc284e637ef51dc844fefca83789e920000000000000000000000005680e4948759569dcb9d2eab6a5504d733c83b2a00000000000000000000000000000000000000000000000000000000000000104d756c747972204561726e20555344430000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000066d65555344430000000000000000000000000000000000000000000000000000",
+      "runtimeBytes": 22587,
+      "compiledCreationSha256": "28546f513689124b4189c9bbc46af583cc7431adf5afcb079190230c27b994ca",
+      "transactionInputSha256": "e0fd257e5a6bcb18a0b37926dbce3e078d56faaf3dd92a50fdda2f02b8d59219",
+      "creationRuntimeSha256": "e6854e70cb16071ae4441c2eed40f14b0e76a509b312e8f6555a969ec82ff380",
+      "currentRuntimeSha256": "e6854e70cb16071ae4441c2eed40f14b0e76a509b312e8f6555a969ec82ff380",
+      "creationRuntimeEqualsCurrent": true,
+      "compiledRuntimeWithCreationImmutablesEqualsCurrent": true,
+      "immutableBindings": [
+        {
+          "length": 32,
+          "start": 4642,
+          "creationValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
+          "currentValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831"
+        },
+        {
+          "length": 32,
+          "start": 11338,
+          "creationValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
+          "currentValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831"
+        },
+        {
+          "length": 32,
+          "start": 11705,
+          "creationValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
+          "currentValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831"
+        },
+        {
+          "length": 32,
+          "start": 14928,
+          "creationValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
+          "currentValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831"
+        },
+        {
+          "length": 32,
+          "start": 15568,
+          "creationValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
+          "currentValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831"
+        },
+        {
+          "length": 32,
+          "start": 18690,
+          "creationValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
+          "currentValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831"
+        },
+        {
+          "length": 32,
+          "start": 4533,
+          "creationValue": "0x0000000000000000000000000000000000000000000000000000000000000006",
+          "currentValue": "0x0000000000000000000000000000000000000000000000000000000000000006"
+        }
+      ]
+    },
+    {
+      "name": "EpochedQueueModule",
+      "address": "0xccad3125667639b1a49667be8dd201e66b0a3b21",
+      "transaction": "0xc61a2fcf4e13fa78b5edb690328f417b2143c74a29932a3b5c78831d8c8e83cd",
+      "deploymentBlock": 513029929,
+      "status": "PASS",
+      "compiledCreationPrefixMatch": true,
+      "constructorAbi": [],
+      "constructorArgumentsHex": "0x",
+      "runtimeBytes": 18594,
+      "compiledCreationSha256": "5515be40645106237eb7d1d9e792fb8018142b9ddd3c806dbab91337eff0cf32",
+      "transactionInputSha256": "5515be40645106237eb7d1d9e792fb8018142b9ddd3c806dbab91337eff0cf32",
+      "creationRuntimeSha256": "ae2ab3c6b72c6047df329ddd4a139d0fde9683670f0e7d6f690b2e076914865a",
+      "currentRuntimeSha256": "ae2ab3c6b72c6047df329ddd4a139d0fde9683670f0e7d6f690b2e076914865a",
+      "creationRuntimeEqualsCurrent": true,
+      "compiledRuntimeWithCreationImmutablesEqualsCurrent": true,
+      "immutableBindings": []
+    },
+    {
+      "name": "AdminModule",
+      "address": "0x0693ffe87ee54494c4ead1da679bb01af765938b",
+      "transaction": "0x0ce1ae34055cf7d2f4b57d9031184bed64f144acc5d00d70ae7347617f7c414c",
+      "deploymentBlock": 513029941,
+      "status": "PASS",
+      "compiledCreationPrefixMatch": true,
+      "constructorAbi": [],
+      "constructorArgumentsHex": "0x",
+      "runtimeBytes": 13094,
+      "compiledCreationSha256": "52bcffa66a354dd47d62649fe792c5ad4ebf9012bf8576617fd1d3d5907bcb64",
+      "transactionInputSha256": "52bcffa66a354dd47d62649fe792c5ad4ebf9012bf8576617fd1d3d5907bcb64",
+      "creationRuntimeSha256": "8e9efaca3a27c0fcfecc7bb6b9c83edeb5a608c477725b911887cc33a193a708",
+      "currentRuntimeSha256": "8e9efaca3a27c0fcfecc7bb6b9c83edeb5a608c477725b911887cc33a193a708",
+      "creationRuntimeEqualsCurrent": true,
+      "compiledRuntimeWithCreationImmutablesEqualsCurrent": true,
+      "immutableBindings": []
+    },
+    {
+      "name": "ERC4626Module",
+      "address": "0x1e4884436f1447f491a137c497d1a94c864a991f",
+      "transaction": "0x7b50e3dfbf2346e16f97a20260d1a1d616321e44903fb7cb17e09fcc792a2f04",
+      "deploymentBlock": 513029952,
+      "status": "PASS",
+      "compiledCreationPrefixMatch": true,
+      "constructorAbi": [],
+      "constructorArgumentsHex": "0x",
+      "runtimeBytes": 12030,
+      "compiledCreationSha256": "55e1b4ebd621e7ef19da42c4f9476f257db534338351cab14d8efc821916fd45",
+      "transactionInputSha256": "55e1b4ebd621e7ef19da42c4f9476f257db534338351cab14d8efc821916fd45",
+      "creationRuntimeSha256": "233c373f97ade2d2eff16bd1735bb072ba2c987756a23607de94ac92929e3c5c",
+      "currentRuntimeSha256": "233c373f97ade2d2eff16bd1735bb072ba2c987756a23607de94ac92929e3c5c",
+      "creationRuntimeEqualsCurrent": true,
+      "compiledRuntimeWithCreationImmutablesEqualsCurrent": true,
+      "immutableBindings": []
+    },
+    {
+      "name": "LiquidityOpsModule",
+      "address": "0x24715ed56e665b4391a2cc83ad6958534e60d84d",
+      "transaction": "0x2411a5cfdec3fbf8057115eb3098bcc383d2459a583a8e1de735e0810dc30662",
+      "deploymentBlock": 513029962,
+      "status": "PASS",
+      "compiledCreationPrefixMatch": true,
+      "constructorAbi": [],
+      "constructorArgumentsHex": "0x",
+      "runtimeBytes": 15796,
+      "compiledCreationSha256": "c088502b0a5a043912ef7d42b06d414ba6dd22de06daeabdfafe7100f469f25a",
+      "transactionInputSha256": "c088502b0a5a043912ef7d42b06d414ba6dd22de06daeabdfafe7100f469f25a",
+      "creationRuntimeSha256": "24342a5cbcb54c735cde2f2fd604d4a31345a5b438236d7c70006a6cf83803e0",
+      "currentRuntimeSha256": "24342a5cbcb54c735cde2f2fd604d4a31345a5b438236d7c70006a6cf83803e0",
+      "creationRuntimeEqualsCurrent": true,
+      "compiledRuntimeWithCreationImmutablesEqualsCurrent": true,
+      "immutableBindings": []
+    },
+    {
+      "name": "BufferManager",
+      "address": "0x9b3fe5c76e0c10de254ee2153f71df6a96020d96",
+      "transaction": "0x2ab7c1bdde4adfff0d27d884c32ece14dcda61379edff66cbda0d60634483f90",
+      "deploymentBlock": 513029974,
+      "status": "PASS",
+      "compiledCreationPrefixMatch": true,
+      "constructorAbi": [
+        {
+          "internalType": "address",
+          "name": "owner_",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "core_",
+          "type": "address"
+        },
+        {
+          "components": [
+            {
+              "internalType": "uint16",
+              "name": "targetHotBps",
+              "type": "uint16"
+            },
+            {
+              "internalType": "uint16",
+              "name": "minHotBps",
+              "type": "uint16"
+            },
+            {
+              "internalType": "uint16",
+              "name": "targetWarmBps",
+              "type": "uint16"
+            },
+            {
+              "internalType": "uint16",
+              "name": "maxWarmBps",
+              "type": "uint16"
+            },
+            {
+              "internalType": "uint16",
+              "name": "opsReserveTargetBps",
+              "type": "uint16"
+            },
+            {
+              "internalType": "uint16",
+              "name": "maxWarmSlippageBps",
+              "type": "uint16"
+            },
+            {
+              "internalType": "address",
+              "name": "asset",
+              "type": "address"
+            },
+            {
+              "internalType": "address",
+              "name": "warmAdapter",
+              "type": "address"
+            },
+            {
+              "internalType": "uint32",
+              "name": "twapWindowSec",
+              "type": "uint32"
+            },
+            {
+              "internalType": "bool",
+              "name": "paused",
+              "type": "bool"
+            }
+          ],
+          "internalType": "struct IBufferManager.BufferConfig",
+          "name": "cfg_",
+          "type": "tuple"
+        }
+      ],
+      "constructorArgumentsHex": "0x000000000000000000000000908756f36954f2853134259b8846c49f90e84ece0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb000000000000000000000000000000000000000000000000000000000000019000000000000000000000000000000000000000000000000000000000000000c80000000000000000000000000000000000000000000000000000000000000258000000000000000000000000000000000000000000000000000000000000032000000000000000000000000000000000000000000000000000000000000001900000000000000000000000000000000000000000000000000000000000000032000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "runtimeBytes": 9992,
+      "compiledCreationSha256": "3e39049c5f8daee263f28d7043b0a4877ca124123d8fd21327ad19614175bc43",
+      "transactionInputSha256": "5f4858754ebf82a82c9bf1898628c94c9c087af98ef0314ed7e795bc757bcca3",
+      "creationRuntimeSha256": "31cd745e0c104b3bcc998ba6656888bac9a2e75e24b18a3d629cc6d0556a52cc",
+      "currentRuntimeSha256": "31cd745e0c104b3bcc998ba6656888bac9a2e75e24b18a3d629cc6d0556a52cc",
+      "creationRuntimeEqualsCurrent": true,
+      "compiledRuntimeWithCreationImmutablesEqualsCurrent": true,
+      "immutableBindings": [
+        {
+          "length": 32,
+          "start": 451,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 937,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 1409,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 1586,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 3494,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 4318,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 5974,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 6990,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 7138,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 8869,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 9528,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        }
+      ]
+    },
+    {
+      "name": "StrategyRouter",
+      "address": "0x37847d2e12892e3298dee695e7e971fba0ca3e24",
+      "transaction": "0xea731ebbab16e56aafb874e7c1a59062995d696dfcb574f601712993077a1df3",
+      "deploymentBlock": 513029981,
+      "status": "PASS",
+      "compiledCreationPrefixMatch": true,
+      "constructorAbi": [
+        {
+          "internalType": "address",
+          "name": "owner_",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "core_",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "params_",
+          "type": "address"
+        }
+      ],
+      "constructorArgumentsHex": "0x000000000000000000000000908756f36954f2853134259b8846c49f90e84ece0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb0000000000000000000000005680e4948759569dcb9d2eab6a5504d733c83b2a",
+      "runtimeBytes": 24564,
+      "compiledCreationSha256": "89bc5c61ae3d11eaa94f2331d835ce6ab6e4743c4d453c50efa008942d662fcb",
+      "transactionInputSha256": "50ee7fc44bbd4fc41063c74d5e441fc23628e7dcfaf1d2e9f939f58c88541afa",
+      "creationRuntimeSha256": "50455b862df1b646d368f2d4f3cbd119250b3d6bd6f777d964017a824bf94772",
+      "currentRuntimeSha256": "50455b862df1b646d368f2d4f3cbd119250b3d6bd6f777d964017a824bf94772",
+      "creationRuntimeEqualsCurrent": true,
+      "compiledRuntimeWithCreationImmutablesEqualsCurrent": true,
+      "immutableBindings": []
+    },
+    {
+      "name": "AaveV3WarmAdapter_USDC",
+      "address": "0xd9a47bda143819bc01962bf43acd928789a90b66",
+      "transaction": "0x20ef090f85ba69574288cf0cfcac887c1d2afef003c6b385945c37eaf723b149",
+      "deploymentBlock": 513029994,
+      "status": "PASS",
+      "compiledCreationPrefixMatch": true,
+      "constructorAbi": [
+        {
+          "internalType": "address",
+          "name": "_controller",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_coreVault",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_underlying",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_pool",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_dataProvider",
+          "type": "address"
+        }
+      ],
+      "constructorArgumentsHex": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d960000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831000000000000000000000000794a61358d6845594f94dc1db02a252b5b4814ad00000000000000000000000069fa688f1dc47d4b5d8029d5a35fb7a548310654",
+      "runtimeBytes": 2715,
+      "compiledCreationSha256": "169dd4640927fa3acb8c455849e08e1e4c5500d4b00324e1d9ddf8479381cb9c",
+      "transactionInputSha256": "e67fbb3ab800dbaf04055bcc47f47d12174134fe14427bc4efa2532a7e5d6e5f",
+      "creationRuntimeSha256": "91112cfcd45e1c0234d08e17e68c10315ab0cc8c71ff39df616046a6c6953092",
+      "currentRuntimeSha256": "91112cfcd45e1c0234d08e17e68c10315ab0cc8c71ff39df616046a6c6953092",
+      "creationRuntimeEqualsCurrent": true,
+      "compiledRuntimeWithCreationImmutablesEqualsCurrent": true,
+      "immutableBindings": [
+        {
+          "length": 32,
+          "start": 193,
+          "creationValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96",
+          "currentValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96"
+        },
+        {
+          "length": 32,
+          "start": 272,
+          "creationValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96",
+          "currentValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96"
+        },
+        {
+          "length": 32,
+          "start": 1273,
+          "creationValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96",
+          "currentValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96"
+        },
+        {
+          "length": 32,
+          "start": 1971,
+          "creationValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96",
+          "currentValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96"
+        },
+        {
+          "length": 32,
+          "start": 347,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 1426,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 1782,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 618,
+          "creationValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
+          "currentValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831"
+        },
+        {
+          "length": 32,
+          "start": 2042,
+          "creationValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
+          "currentValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831"
+        },
+        {
+          "length": 32,
+          "start": 2317,
+          "creationValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
+          "currentValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831"
+        },
+        {
+          "length": 32,
+          "start": 555,
+          "creationValue": "0x000000000000000000000000794a61358d6845594f94dc1db02a252b5b4814ad",
+          "currentValue": "0x000000000000000000000000794a61358d6845594f94dc1db02a252b5b4814ad"
+        },
+        {
+          "length": 32,
+          "start": 1714,
+          "creationValue": "0x000000000000000000000000794a61358d6845594f94dc1db02a252b5b4814ad",
+          "currentValue": "0x000000000000000000000000794a61358d6845594f94dc1db02a252b5b4814ad"
+        },
+        {
+          "length": 32,
+          "start": 2106,
+          "creationValue": "0x000000000000000000000000794a61358d6845594f94dc1db02a252b5b4814ad",
+          "currentValue": "0x000000000000000000000000794a61358d6845594f94dc1db02a252b5b4814ad"
+        },
+        {
+          "length": 32,
+          "start": 412,
+          "creationValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
+          "currentValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831"
+        },
+        {
+          "length": 32,
+          "start": 1208,
+          "creationValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
+          "currentValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831"
+        },
+        {
+          "length": 32,
+          "start": 1340,
+          "creationValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
+          "currentValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831"
+        },
+        {
+          "length": 32,
+          "start": 2602,
+          "creationValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
+          "currentValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831"
+        },
+        {
+          "length": 32,
+          "start": 487,
+          "creationValue": "0x000000000000000000000000724dc807b04555b71ed48a6896b6f41593b8c637",
+          "currentValue": "0x000000000000000000000000724dc807b04555b71ed48a6896b6f41593b8c637"
+        },
+        {
+          "length": 32,
+          "start": 1106,
+          "creationValue": "0x000000000000000000000000724dc807b04555b71ed48a6896b6f41593b8c637",
+          "currentValue": "0x000000000000000000000000724dc807b04555b71ed48a6896b6f41593b8c637"
+        },
+        {
+          "length": 32,
+          "start": 2445,
+          "creationValue": "0x000000000000000000000000724dc807b04555b71ed48a6896b6f41593b8c637",
+          "currentValue": "0x000000000000000000000000724dc807b04555b71ed48a6896b6f41593b8c637"
+        }
+      ]
+    },
+    {
+      "name": "MorphoVaultWarmAdapter_USDC",
+      "address": "0x1df16ac92908feee3b104c630d818edfd3c75c1e",
+      "transaction": "0xb8772344de460fe63296c5b4c061e40f89d3d26acafd71060612d6bbed5b873c",
+      "deploymentBlock": 513030006,
+      "status": "PASS",
+      "compiledCreationPrefixMatch": true,
+      "constructorAbi": [
+        {
+          "internalType": "address",
+          "name": "_controller",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_coreVault",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_underlying",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_vault",
+          "type": "address"
+        },
+        {
+          "internalType": "uint16",
+          "name": "_withdrawSlippageBps",
+          "type": "uint16"
+        }
+      ],
+      "constructorArgumentsHex": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d960000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e58310000000000000000000000007e97fa6893871a2751b5fe961978dccb2c201e650000000000000000000000000000000000000000000000000000000000000005",
+      "runtimeBytes": 2855,
+      "compiledCreationSha256": "0a4a14c6417f6f12753f4c1e2760ba8d7f267ab67db4d619df185d4907eb5391",
+      "transactionInputSha256": "f5624ff8641912c1367601794c114a41b7f510f6073d3c063cf280e98a60e1d0",
+      "creationRuntimeSha256": "1d6d0542a5e528d4ef28f7537241f10496c05687103696ec51eef16925904863",
+      "currentRuntimeSha256": "1d6d0542a5e528d4ef28f7537241f10496c05687103696ec51eef16925904863",
+      "creationRuntimeEqualsCurrent": true,
+      "compiledRuntimeWithCreationImmutablesEqualsCurrent": true,
+      "immutableBindings": [
+        {
+          "length": 32,
+          "start": 188,
+          "creationValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96",
+          "currentValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96"
+        },
+        {
+          "length": 32,
+          "start": 261,
+          "creationValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96",
+          "currentValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96"
+        },
+        {
+          "length": 32,
+          "start": 912,
+          "creationValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96",
+          "currentValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96"
+        },
+        {
+          "length": 32,
+          "start": 1642,
+          "creationValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96",
+          "currentValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96"
+        },
+        {
+          "length": 32,
+          "start": 336,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 1065,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 1353,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 1723,
+          "creationValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
+          "currentValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831"
+        },
+        {
+          "length": 32,
+          "start": 401,
+          "creationValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
+          "currentValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831"
+        },
+        {
+          "length": 32,
+          "start": 847,
+          "creationValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
+          "currentValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831"
+        },
+        {
+          "length": 32,
+          "start": 979,
+          "creationValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
+          "currentValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831"
+        },
+        {
+          "length": 32,
+          "start": 2543,
+          "creationValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831",
+          "currentValue": "0x000000000000000000000000af88d065e77c8cc2239327c5edb3a432268e5831"
+        },
+        {
+          "length": 32,
+          "start": 491,
+          "creationValue": "0x0000000000000000000000007e97fa6893871a2751b5fe961978dccb2c201e65",
+          "currentValue": "0x0000000000000000000000007e97fa6893871a2751b5fe961978dccb2c201e65"
+        },
+        {
+          "length": 32,
+          "start": 1509,
+          "creationValue": "0x0000000000000000000000007e97fa6893871a2751b5fe961978dccb2c201e65",
+          "currentValue": "0x0000000000000000000000007e97fa6893871a2751b5fe961978dccb2c201e65"
+        },
+        {
+          "length": 32,
+          "start": 1888,
+          "creationValue": "0x0000000000000000000000007e97fa6893871a2751b5fe961978dccb2c201e65",
+          "currentValue": "0x0000000000000000000000007e97fa6893871a2751b5fe961978dccb2c201e65"
+        },
+        {
+          "length": 32,
+          "start": 2381,
+          "creationValue": "0x0000000000000000000000007e97fa6893871a2751b5fe961978dccb2c201e65",
+          "currentValue": "0x0000000000000000000000007e97fa6893871a2751b5fe961978dccb2c201e65"
+        },
+        {
+          "length": 32,
+          "start": 2647,
+          "creationValue": "0x0000000000000000000000007e97fa6893871a2751b5fe961978dccb2c201e65",
+          "currentValue": "0x0000000000000000000000007e97fa6893871a2751b5fe961978dccb2c201e65"
+        },
+        {
+          "length": 32,
+          "start": 1426,
+          "creationValue": "0x0000000000000000000000000000000000000000000000000000000000000005",
+          "currentValue": "0x0000000000000000000000000000000000000000000000000000000000000005"
+        },
+        {
+          "length": 32,
+          "start": 1955,
+          "creationValue": "0x0000000000000000000000000000000000000000000000000000000000000005",
+          "currentValue": "0x0000000000000000000000000000000000000000000000000000000000000005"
+        }
+      ]
+    },
+    {
+      "name": "VaultUpkeep",
+      "address": "0xcd31634f472fcc1d0b64fae3ed72bb7c0792b55f",
+      "transaction": "0x6122aec660f0b393f64c05c5a78c1ed3814abecaf30cfd444fbd13fe3e472c6e",
+      "deploymentBlock": 513030022,
+      "status": "PASS",
+      "compiledCreationPrefixMatch": true,
+      "constructorAbi": [
+        {
+          "internalType": "address",
+          "name": "core_",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "bufferManager_",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "router_",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "globalConfig_",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "defaultMaxRealize",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "defaultMaxDeploy",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint16",
+          "name": "minRealizeGapBps_",
+          "type": "uint16"
+        },
+        {
+          "internalType": "uint256",
+          "name": "minRealizeFloor_",
+          "type": "uint256"
+        }
+      ],
+      "constructorArgumentsHex": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d9600000000000000000000000037847d2e12892e3298dee695e7e971fba0ca3e240000000000000000000000005680e4948759569dcb9d2eab6a5504d733c83b2a000000000000000000000000000000000000000000000000000000e8d4a51000000000000000000000000000000000000000000000000000000000e8d4a51000000000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000002710",
+      "runtimeBytes": 10242,
+      "compiledCreationSha256": "b26772b06d35577e95d02c8999d8eb1dde0a4a9b8d1dab3058c69c5c73a00bd1",
+      "transactionInputSha256": "e7f0c48413ffb9968d0f027fe2b97287550aa0bb131737f5719f2f586f40d989",
+      "creationRuntimeSha256": "e877a1ea06fd02270623e1c334cc9ae90c014b25213cb7c0ccbb83a3db75fc95",
+      "currentRuntimeSha256": "e877a1ea06fd02270623e1c334cc9ae90c014b25213cb7c0ccbb83a3db75fc95",
+      "creationRuntimeEqualsCurrent": true,
+      "compiledRuntimeWithCreationImmutablesEqualsCurrent": true,
+      "immutableBindings": [
+        {
+          "length": 32,
+          "start": 836,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 3896,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 6556,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 9976,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 1526,
+          "creationValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96",
+          "currentValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96"
+        },
+        {
+          "length": 32,
+          "start": 5180,
+          "creationValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96",
+          "currentValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96"
+        },
+        {
+          "length": 32,
+          "start": 6912,
+          "creationValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96",
+          "currentValue": "0x0000000000000000000000009b3fe5c76e0c10de254ee2153f71df6a96020d96"
+        },
+        {
+          "length": 32,
+          "start": 566,
+          "creationValue": "0x00000000000000000000000037847d2e12892e3298dee695e7e971fba0ca3e24",
+          "currentValue": "0x00000000000000000000000037847d2e12892e3298dee695e7e971fba0ca3e24"
+        },
+        {
+          "length": 32,
+          "start": 9559,
+          "creationValue": "0x00000000000000000000000037847d2e12892e3298dee695e7e971fba0ca3e24",
+          "currentValue": "0x00000000000000000000000037847d2e12892e3298dee695e7e971fba0ca3e24"
+        },
+        {
+          "length": 32,
+          "start": 1936,
+          "creationValue": "0x0000000000000000000000005680e4948759569dcb9d2eab6a5504d733c83b2a",
+          "currentValue": "0x0000000000000000000000005680e4948759569dcb9d2eab6a5504d733c83b2a"
+        },
+        {
+          "length": 32,
+          "start": 9656,
+          "creationValue": "0x0000000000000000000000005680e4948759569dcb9d2eab6a5504d733c83b2a",
+          "currentValue": "0x0000000000000000000000005680e4948759569dcb9d2eab6a5504d733c83b2a"
+        },
+        {
+          "length": 32,
+          "start": 3392,
+          "creationValue": "0x000000000000000000000000000000000000000000000000000000e8d4a51000",
+          "currentValue": "0x000000000000000000000000000000000000000000000000000000e8d4a51000"
+        },
+        {
+          "length": 32,
+          "start": 4524,
+          "creationValue": "0x000000000000000000000000000000000000000000000000000000e8d4a51000",
+          "currentValue": "0x000000000000000000000000000000000000000000000000000000e8d4a51000"
+        },
+        {
+          "length": 32,
+          "start": 7487,
+          "creationValue": "0x000000000000000000000000000000000000000000000000000000e8d4a51000",
+          "currentValue": "0x000000000000000000000000000000000000000000000000000000e8d4a51000"
+        },
+        {
+          "length": 32,
+          "start": 2697,
+          "creationValue": "0x000000000000000000000000000000000000000000000000000000e8d4a51000",
+          "currentValue": "0x000000000000000000000000000000000000000000000000000000e8d4a51000"
+        },
+        {
+          "length": 32,
+          "start": 4852,
+          "creationValue": "0x000000000000000000000000000000000000000000000000000000e8d4a51000",
+          "currentValue": "0x000000000000000000000000000000000000000000000000000000e8d4a51000"
+        },
+        {
+          "length": 32,
+          "start": 505,
+          "creationValue": "0x000000000000000000000000000000000000000000000000000000000000000a",
+          "currentValue": "0x000000000000000000000000000000000000000000000000000000000000000a"
+        },
+        {
+          "length": 32,
+          "start": 9910,
+          "creationValue": "0x000000000000000000000000000000000000000000000000000000000000000a",
+          "currentValue": "0x000000000000000000000000000000000000000000000000000000000000000a"
+        },
+        {
+          "length": 32,
+          "start": 2639,
+          "creationValue": "0x0000000000000000000000000000000000000000000000000000000000002710",
+          "currentValue": "0x0000000000000000000000000000000000000000000000000000000000002710"
+        },
+        {
+          "length": 32,
+          "start": 9867,
+          "creationValue": "0x0000000000000000000000000000000000000000000000000000000000002710",
+          "currentValue": "0x0000000000000000000000000000000000000000000000000000000000002710"
+        }
+      ]
+    },
+    {
+      "name": "RecoveryGate",
+      "address": "0x45261d190f7192a68736cf058ad9448ebd53a560",
+      "transaction": "0xb57c35363a413e59d7b7ee4dcdf4e6b439142bad7016a0e70cf3f067339b53bf",
+      "deploymentBlock": 513030281,
+      "status": "PASS",
+      "compiledCreationPrefixMatch": true,
+      "constructorAbi": [
+        {
+          "internalType": "address",
+          "name": "_vault",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_rootTimelock",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "_securityApprover",
+          "type": "address"
+        },
+        {
+          "internalType": "uint64",
+          "name": "_minDelay",
+          "type": "uint64"
+        },
+        {
+          "internalType": "uint64",
+          "name": "_cooldown",
+          "type": "uint64"
+        }
+      ],
+      "constructorArgumentsHex": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb000000000000000000000000908756f36954f2853134259b8846c49f90e84ece000000000000000000000000a5cfa1d11a7c77201dd78cc0413d4b2fc132a69b00000000000000000000000000000000000000000000000000000000001baf800000000000000000000000000000000000000000000000000000000000278d00",
+      "runtimeBytes": 6892,
+      "compiledCreationSha256": "ac4fd045bef027aaa553466cf79ff234b06785e3d56a97a64159d5e1fb582d47",
+      "transactionInputSha256": "0ff3f213736fe44a678f81e9d1e704ef13fca228cb415da33e970715d8a09c0f",
+      "creationRuntimeSha256": "250888980ba364f2bd3a70a5e718b769c84c38a81f038957827ccac8158ab97e",
+      "currentRuntimeSha256": "250888980ba364f2bd3a70a5e718b769c84c38a81f038957827ccac8158ab97e",
+      "creationRuntimeEqualsCurrent": true,
+      "compiledRuntimeWithCreationImmutablesEqualsCurrent": true,
+      "immutableBindings": [
+        {
+          "length": 32,
+          "start": 348,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 613,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 992,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 2603,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 3071,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 1666,
+          "creationValue": "0x00000000000000000000000000000000000000000000000000000000001baf80",
+          "currentValue": "0x00000000000000000000000000000000000000000000000000000000001baf80"
+        },
+        {
+          "length": 32,
+          "start": 2210,
+          "creationValue": "0x00000000000000000000000000000000000000000000000000000000001baf80",
+          "currentValue": "0x00000000000000000000000000000000000000000000000000000000001baf80"
+        },
+        {
+          "length": 32,
+          "start": 3432,
+          "creationValue": "0x00000000000000000000000000000000000000000000000000000000001baf80",
+          "currentValue": "0x00000000000000000000000000000000000000000000000000000000001baf80"
+        },
+        {
+          "length": 32,
+          "start": 2521,
+          "creationValue": "0x0000000000000000000000000000000000000000000000000000000000278d00",
+          "currentValue": "0x0000000000000000000000000000000000000000000000000000000000278d00"
+        },
+        {
+          "length": 32,
+          "start": 3936,
+          "creationValue": "0x0000000000000000000000000000000000000000000000000000000000278d00",
+          "currentValue": "0x0000000000000000000000000000000000000000000000000000000000278d00"
+        }
+      ]
+    },
+    {
+      "name": "ClaimSettlementUpkeep",
+      "address": "0x4e845762e66518f34641326c7f77faf4b81c1260",
+      "transaction": "0x89718e92a179a89da62482e25738fc0467374eea84553ab4a576f05c1b693e39",
+      "deploymentBlock": 513035932,
+      "status": "PASS",
+      "compiledCreationPrefixMatch": true,
+      "constructorAbi": [
+        {
+          "internalType": "address",
+          "name": "target_",
+          "type": "address"
+        }
+      ],
+      "constructorArgumentsHex": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+      "runtimeBytes": 6281,
+      "compiledCreationSha256": "3fd706d11e56f4e231f3344940e8387954601b36880189140127f87a9c00fee7",
+      "transactionInputSha256": "7e283b73c2ddf65be502508e852bc2d93e92588971a5a001c0dd1287fa5db0cf",
+      "creationRuntimeSha256": "f84aa0fdc09d6c3d40196d314d94b9352b1286a5e195b9a5a53324380ef81236",
+      "currentRuntimeSha256": "f84aa0fdc09d6c3d40196d314d94b9352b1286a5e195b9a5a53324380ef81236",
+      "creationRuntimeEqualsCurrent": true,
+      "compiledRuntimeWithCreationImmutablesEqualsCurrent": true,
+      "immutableBindings": [
+        {
+          "length": 32,
+          "start": 508,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 2054,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 3145,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 3716,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 4261,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 4601,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 4686,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        },
+        {
+          "length": 32,
+          "start": 4815,
+          "creationValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+          "currentValue": "0x0000000000000000000000005e0cdb76487bd96ff069ef7f78eadf5b5909c8cb"
+        }
+      ]
+    }
+  ],
+  "ownership": [
+    {
+      "name": "VaultFactory",
+      "address": "0xfde16c52e89ba078e9f71cc64c2256c8e66cbb01",
+      "authorityGetter": "owner",
+      "authority": "0x70ef444799d6fbbe0865ba598bee6795e064a326",
+      "pendingAuthorityGetter": "pendingOwner",
+      "pendingAuthority": "0x0000000000000000000000000000000000000000"
+    },
+    {
+      "name": "FeeCollector",
+      "address": "0x6917ce91cdc284e637ef51dc844fefca83789e92",
+      "authorityGetter": "governor",
+      "authority": "0x70ef444799d6fbbe0865ba598bee6795e064a326",
+      "pendingAuthorityGetter": "pendingGovernor",
+      "pendingAuthority": "0x0000000000000000000000000000000000000000"
+    },
+    {
+      "name": "CoreVault",
+      "address": "0x5e0cdb76487bd96ff069ef7f78eadf5b5909c8cb",
+      "authorityGetter": "owner",
+      "authority": "0x70ef444799d6fbbe0865ba598bee6795e064a326",
+      "pendingAuthorityGetter": "pendingOwner",
+      "pendingAuthority": "0x0000000000000000000000000000000000000000"
+    },
+    {
+      "name": "RecoveryGate",
+      "address": "0x45261d190f7192a68736cf058ad9448ebd53a560",
+      "authorityGetter": "rootTimelock",
+      "authority": "0x70ef444799d6fbbe0865ba598bee6795e064a326",
+      "pendingAuthorityGetter": "pendingRootTimelock",
+      "pendingAuthority": "0x0000000000000000000000000000000000000000"
+    }
+  ],
+  "allBytecodeChecksPass": true
+}

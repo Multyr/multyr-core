@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
+import {ReleaseGuard} from "./release/ReleaseGuard.sol";
 
 import {Script} from "forge-std/Script.sol";
 import {console} from "forge-std/console.sol";
@@ -11,6 +12,7 @@ import {IncentivesTimelock} from "@multyr-core/governance/IncentivesTimelock.sol
 ///         to Safes without changing immutable protocol governance references.
 contract DeployRootTimelock is Script {
     function run() external returns (IncentivesTimelock rootTimelock) {
+        ReleaseGuard.check();
         uint256 deployerPk = vm.envUint("DEPLOYER_PRIVATE_KEY");
         address deployer = vm.addr(deployerPk);
         address controller = vm.envOr("ROOT_CONTROLLER_ADDRESS", deployer);
